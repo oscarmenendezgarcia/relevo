@@ -14,7 +14,7 @@ One server serves one team. Everyone on it may write to everyone else: the team 
 | **Note** | Markdown text, 1 byte to 64 KiB (UTF-8), not only whitespace. Written by a person through one of their tokens. Must be self-contained: whoever reads it does not share the writer's context. |
 | **Session** | One running agent of a person: a terminal, an editor window, a bot. A person may have several at once, each in its own context. See [Sessions and routing](#sessions-and-routing). |
 | **Context** | What a session is working on: the repository it runs in, optionally with its branch after `@`: `pagos-api` or `pagos-api@feat/refunds`. Lowercase; the repository part is `^[a-z0-9][a-z0-9._-]{0,63}$`, the branch part `^[a-z0-9._/-]{1,100}$`. A session without one is a *general* session. |
-| **Participant** | A person in a thread. For `direct`, the sender and the recipients. For `team`, every active person at the time the question is asked. Participants are fixed: a person deactivated later stays a participant of their threads and keeps appearing in `participants` and `delivery` (with the last note that reached them), and the others may still write there. While inactive they are added to no new thread: not to team threads, and `to` cannot name them. Invited back, they find their threads again. |
+| **Participant** | A person in a thread. For `direct`, the sender and the recipients. For `team`, every active person at the time the question is asked. Participants are fixed: a person deactivated later stays a participant of their threads and keeps appearing in `participants` and `delivery` (with the latest note by someone else that reached them), and the others may still write there. While inactive they are added to no new thread: not to team threads, and `to` cannot name them. Invited back, they find their threads again. |
 
 ## Sessions and routing
 
@@ -31,8 +31,8 @@ The server keeps each session with its token's label, its context and when it wa
 
 **Claiming.** For each participant a thread is *unclaimed* or *claimed* by one of their sessions. Claims break ties; they are not how a session decides whether a note is for it. Each session that sees a note judges, from its own context and work, whether it can answer; if it cannot, it stays silent; if it can, it claims the thread with a short note ("on it") before acting.
 
-- Writing a note claims the thread for the writing session when nobody of its person holds it, or when the claim has lapsed. It never takes a live claim from another session of the same person: the note is written, but the claim stays where it was. `send` says which happened (`claimed`), so the session that lost steps aside.
-- A claim lapses when the claiming session has not been seen for 1 hour. A lapsed claim counts as unclaimed everywhere: the thread shows again in the person's other sessions, and the next session to write takes it. It is gone for good: the session that held it, seen again, holds the thread again only by writing in it while nobody else of its person does. A session is seen with each request it makes; a waiting `inbox` request, when it arrives and when it answers.
+- Writing a note in an existing thread claims it for the writing session when nobody of its person holds it, or when the claim has lapsed. Opening a thread claims nothing: the person who asks has nothing to take on, and a claim by the session that asked would hide the answers from the person's next session. It never takes a live claim from another session of the same person: the note is written, but the claim stays where it was. `send` says which happened (`claimed`), so the session that lost steps aside.
+- A claim lapses when the claiming session has not been seen for 15 minutes. A lapsed claim counts as unclaimed everywhere: the thread shows again in the person's other sessions, and the next session to write takes it. It is gone for good: the session that held it, seen again, holds the thread again only by writing in it while nobody else of its person does. A session is seen with each request it makes; a waiting `inbox` request, when it arrives and when it answers.
 - Closing without text does not claim.
 
 **Which sessions see a thread.** For a participant, a thread shows in the inbox of one of their sessions when it is claimed by that session, or when it is unclaimed and either it has no context for them, or its context matches the session's context, or the session is general. A context without a branch matches the repository on any branch (`pagos-api` matches `pagos-api` and `pagos-api@feat/refunds`); one with a branch matches only itself: a note for `ana/pagos-api@feat/refunds` shows neither in Ana's `pagos-api@main` sessions nor in a `pagos-api` session that does not say its branch, and `frontend@feat/refunds` is another context altogether. So an unaddressed note shows in every session of the person until one of them claims it; then only there. A note for `ana/pagos-api` shows in Ana's `pagos-api` sessions, on any branch, and her general ones. `inbox` with `all` and `thread` ignore this and show any thread of the person.
@@ -71,7 +71,7 @@ Rules:
 
 - `to` holds 1 to 20 addresses of distinct active people other than you, or exactly `["@team"]`. An address is a handle, optionally followed by `/` and a context (`ana/pagos-api`, `ana/pagos-api@feat/refunds`: everything after the first `/`); naming the same person twice with different contexts (or once with a context and once without) fails with `BAD_REQUEST`, and so does a malformed context or a context on `@team`. Addresses may be written with or without a leading `@` and in any case; repeats are merged (`["@team", "equipo"]` is one `@team`). Writing to yourself, or `@team` next to other handles, fails with `BAD_REQUEST`. An unknown or inactive handle fails with `UNKNOWN_PERSON`, whose error lists the valid handles with their `about`.
 - `["@team"]` opens a `team` thread. `@equipo` is accepted as the same thing (both with or without `@`); `team` and `equipo` can therefore not be handles. A person may open at most `RELEVO_TEAM_QUESTIONS_PER_DAY` (default 5) team threads in any rolling 24 hours: beyond that, `TEAM_LIMIT`. A team of one (only you) fails with `NO_RECIPIENTS`.
-- Writing a note claims the thread for the session that wrote it, unless another session of your person holds it (see [Claiming](#sessions-and-routing)).
+- Writing a note in an existing thread claims it for the session that wrote it, unless another session of your person holds it; opening a thread claims nothing (see [Claiming](#sessions-and-routing)).
 - Writing in a thread you are not a participant of fails with `NOT_FOUND` (the thread's existence is not revealed).
 - Writing in a closed thread fails with `THREAD_CLOSED`. Open a new thread instead.
 - Closing: in a `direct` thread any participant may close it; in a `team` thread only the person who asked.
@@ -80,7 +80,7 @@ Rules:
 - A person may send at most 60 notes per rolling minute: beyond that, `RATE_LIMITED`.
 - The limits count notes only: a close without text is never limited.
 
-Returns `{ "thread": "<id>", "note": "<id>", "status": "open" | "closed", "claimed": "this-session" | "other-session" | null }`. `note` is `null` when the `send` only closed the thread. `claimed` is who holds the thread for your person after this `send`: `"other-session"` means another of your sessions had it first, so this one should step aside; `null` only after a close without text in a thread nobody of yours holds. A replayed `send` returns who held the thread after its first result, named for the session that replays: `"this-session"` only when that session is the one that held it, so a retry from another session (an agent restarted under a new id, say) is not told it holds a thread it does not.
+Returns `{ "thread": "<id>", "note": "<id>", "status": "open" | "closed", "claimed": "this-session" | "other-session" | null }`. `note` is `null` when the `send` only closed the thread. `claimed` is who holds the thread for your person after this `send`: `"other-session"` means another of your sessions had it first, so this one should step aside; `null` after opening a thread, and after a close without text in a thread nobody of yours holds. A replayed `send` returns who held the thread after its first result, named for the session that replays: `"this-session"` only when that session is the one that held it, so a retry from another session (an agent restarted under a new id, say) is not told it holds a thread it does not.
 
 ### `inbox`
 
@@ -96,7 +96,7 @@ Returns:
 ```json
 {
   "team": [ { "handle": "ana", "name": "Ana", "about": "payments backend", "contexts": ["pagos-api", "frontend"] } ],
-  "session": { "label": "Claude Code laptop", "context": "pagos-api" },
+  "session": { "label": "Claude Code laptop", "context": "pagos-api", "you": "ana" },
   "threads": [
     {
       "id": "r_8f2k…",
@@ -119,7 +119,7 @@ Returns:
 ```
 
 - `team` lists every active person, you included, so the agent knows whom to ask. `contexts` are the distinct contexts of their sessions seen in the last 15 minutes, sorted.
-- `session` is the session this request counts as.
+- `session` is the session this request counts as; `you` is the handle of its person, so an agent knows which member of `team` it speaks for.
 - A thread's `context` is the context it was addressed to for you, or `null`. `claimed` is `null` (unclaimed), `"this-session"`, or, only with `all` (and in `thread`, which also shows any thread of the person), `"other-session"`.
 - At most 20 threads: first those with new notes (waiting ones first among them), then waiting ones with nothing new; within each group, by latest note, newest first. `more` counts the rest. So threads that are only waiting, which stay until someone replies, never keep new notes out.
 - `new_notes` holds the notes that have not reached this session, oldest first. That may include the person's own (written without reading, or by another session of theirs), for context: they never make a thread new, but they are part of what this session has not seen. A note's `text` is cut to 4,000 characters with `truncated: true`; the agent reads it whole with `thread`.
@@ -145,7 +145,7 @@ Every route needs `Authorization: Bearer <token>`, and takes the optional `Relev
 GET  /api/inbox?all=1&wait=30
 GET  /api/threads/:id
 POST /api/send            { to | thread, text, close?, key? }
-GET  /api/people          { "team": [...] }  (same list as inbox)
+GET  /api/people          { "team": [...], "you": "ana" }  (same list as inbox)
 GET  /health              no token; { "ok": true }
 ```
 

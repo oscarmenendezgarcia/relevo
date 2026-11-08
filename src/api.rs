@@ -194,33 +194,34 @@ fn find_thread(conn: &Connection, session: &Session, id: &str) -> Result<ThreadR
 /// index on `session_threads`, condition on `x`, the row read through either). `?2` is the
 /// session, `?3` its context and `?4` that context's repository when it names a branch: a thread
 /// addressed to the repository alone reaches the session on any branch. With `all`, every thread
-/// of the person. The routes do not overlap.
+/// of the person; without it, a resolved (closed `team`) thread is in none. The routes do not
+/// overlap.
 fn routes(context: Option<&str>, all: bool) -> Vec<(&'static str, &'static str, &'static str)> {
     const CLAIM: (&str, &str) = ("participants_inbox_claim", "session_new_claim");
     const CONTEXT: (&str, &str) = ("participants_inbox_context", "session_new_context");
     if all {
         return vec![("participants_inbox", "session_new", "1")];
     }
-    let mut routes = vec![(CLAIM.0, CLAIM.1, "x.claimed_by = ?2")];
+    let mut routes = vec![(CLAIM.0, CLAIM.1, "x.resolved = 0 AND x.claimed_by = ?2")];
     let Some(context) = context else {
-        routes.push((CLAIM.0, CLAIM.1, "x.claimed_by IS NULL"));
+        routes.push((CLAIM.0, CLAIM.1, "x.resolved = 0 AND x.claimed_by IS NULL"));
         return routes;
     };
     routes.push((
         CONTEXT.0,
         CONTEXT.1,
-        "x.claimed_by IS NULL AND x.context IS NULL",
+        "x.resolved = 0 AND x.claimed_by IS NULL AND x.context IS NULL",
     ));
     routes.push((
         CONTEXT.0,
         CONTEXT.1,
-        "x.claimed_by IS NULL AND x.context = ?3",
+        "x.resolved = 0 AND x.claimed_by IS NULL AND x.context = ?3",
     ));
     if context_repo(context).is_some() {
         routes.push((
             CONTEXT.0,
             CONTEXT.1,
-            "x.claimed_by IS NULL AND x.context = ?4",
+            "x.resolved = 0 AND x.claimed_by IS NULL AND x.context = ?4",
         ));
     }
     routes
@@ -336,26 +337,28 @@ fn inbox_count(conn: &Connection, session: &Session, all: bool) -> Result<usize,
     Ok(counts.first().copied().unwrap_or(0) as usize)
 }
 
-/// Recomputes what the rows of a thread know about it (latest note, new, waiting, inbox, and the
-/// copies on the sessions' rows). Runs after every change to the thread: a note, a close, a
-/// delivery, a claim.
+/// Recomputes what the rows of a thread know about it (latest note, new, waiting, inbox,
+/// resolved, and the copies on the sessions' rows). Runs after every change to the thread: a
+/// note, a close, a delivery, a claim.
 fn refresh(conn: &Connection, thread: &str) -> Result<(), ApiError> {
     // A thread is opened by its first note, so it always has a latest one.
-    let (last_seq, last_author, open_direct): (i64, i64, bool) = conn.query_row(
-        "SELECT n.seq, n.author_id, t.kind = 'direct' AND t.status = 'open'
+    let (last_seq, last_author, open_direct, resolved): (i64, i64, bool, bool) = conn.query_row(
+        "SELECT n.seq, n.author_id, t.kind = 'direct' AND t.status = 'open',
+                t.kind = 'team' AND t.status = 'closed'
          FROM threads t JOIN notes n ON n.thread_id = t.id
          WHERE t.id = ?1 ORDER BY n.seq DESC LIMIT 1",
         [thread],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
     conn.execute(
         "UPDATE participants SET
              last_seq = ?2,
              has_new = coalesce(delivered_seq, 0) < last_other_seq,
              waiting = ?3 AND person_id != ?4,
-             inbox = coalesce(delivered_seq, 0) < last_other_seq OR (?3 AND person_id != ?4)
+             inbox = coalesce(delivered_seq, 0) < last_other_seq OR (?3 AND person_id != ?4),
+             resolved = ?5
          WHERE thread_id = ?1",
-        params![thread, last_seq, open_direct, last_author],
+        params![thread, last_seq, open_direct, last_author, resolved],
     )?;
     conn.execute(
         "UPDATE session_threads AS s SET
@@ -364,7 +367,8 @@ fn refresh(conn: &Connection, thread: &str) -> Result<(), ApiError> {
              last_seq = p.last_seq,
              claimed_by = p.claimed_by,
              context = p.context,
-             person_inbox = p.inbox
+             person_inbox = p.inbox,
+             resolved = p.resolved
          FROM participants p
          WHERE s.thread_id = ?1 AND p.thread_id = s.thread_id AND p.person_id = s.person_id",
         [thread],
@@ -459,9 +463,19 @@ fn deliver(
              SELECT id, ?2, ?3, ?4 FROM sessions WHERE person_id = ?3 AND id != ?1",
             params![session.id, thread, session.person_id, person_has],
         )?;
+        // When and where a note reached the person is told for notes by others only: their own
+        // say nothing about whether they read the others'.
+        let by_others: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM notes
+                            WHERE thread_id = ?1 AND seq > ?2 AND seq <= ?3 AND author_id != ?4)",
+            params![thread, person_has, seq, session.person_id],
+            |r| r.get(0),
+        )?;
         conn.execute(
-            "UPDATE participants SET delivered_seq = ?3, delivered_at = ?4,
-                 delivered_label = ?5, delivered_context = ?6
+            "UPDATE participants SET delivered_seq = ?3,
+                 delivered_at = CASE WHEN ?7 THEN ?4 ELSE delivered_at END,
+                 delivered_label = CASE WHEN ?7 THEN ?5 ELSE delivered_label END,
+                 delivered_context = CASE WHEN ?7 THEN ?6 ELSE delivered_context END
              WHERE thread_id = ?1 AND person_id = ?2",
             params![
                 thread,
@@ -469,7 +483,8 @@ fn deliver(
                 seq,
                 now,
                 session.label,
-                session.context
+                session.context,
+                by_others
             ],
         )?;
     }
@@ -514,9 +529,10 @@ fn claim(claimed_by: Option<i64>, session: &Session) -> Option<&'static str> {
     })
 }
 
-/// For each participant, in order: the latest note that reached one of their sessions, which
-/// session that was, which session claimed the thread (each with its context then), and how many
-/// of their sessions have that note: those without a row of their own have what their person has.
+/// For each participant, in order: the latest note by someone else that reached one of their
+/// sessions, which session it reached first, which session claimed the thread (each with its
+/// context then), and how many of their sessions have that note: those without a row of their own
+/// have what their person has.
 fn delivery(conn: &Connection, thread: &str) -> Result<Vec<Delivery>, ApiError> {
     let mut stmt = conn.prepare(
         "SELECT pe.handle, n.id, p.delivered_at, p.delivered_label, p.delivered_context,
@@ -524,9 +540,12 @@ fn delivery(conn: &Connection, thread: &str) -> Result<Vec<Delivery>, ApiError> 
                 (SELECT count(*) FROM sessions s
                  LEFT JOIN session_threads st ON st.session_id = s.id AND st.thread_id = p.thread_id
                  WHERE s.person_id = p.person_id
-                   AND coalesce(st.delivered_seq, p.delivered_seq) >= p.delivered_seq)
+                   AND coalesce(st.delivered_seq, p.delivered_seq) >= n.seq)
          FROM participants p JOIN people pe ON pe.id = p.person_id
-         LEFT JOIN notes n ON n.seq = p.delivered_seq
+         LEFT JOIN notes n ON n.seq = (
+             SELECT max(o.seq) FROM notes o
+             WHERE o.thread_id = p.thread_id AND o.author_id != p.person_id
+               AND o.seq <= p.delivered_seq)
          LEFT JOIN sessions cs ON cs.id = p.claimed_by
          LEFT JOIN tokens ct ON ct.id = cs.token_id
          WHERE p.thread_id = ?1 ORDER BY p.rowid",
@@ -609,7 +628,7 @@ fn as_session<T>(
 
 async fn people(State(app): State<Arc<App>>, caller: Caller) -> Result<Json<Value>, ApiError> {
     let team = as_session(&app, &caller, true, |tx, _, now| team(tx, now))?;
-    Ok(Json(json!({ "team": team })))
+    Ok(Json(json!({ "team": team, "you": caller.handle })))
 }
 
 async fn inbox(
@@ -721,7 +740,12 @@ fn answer_inbox(app: &App, caller: &Caller, all: bool, arrived: bool) -> Result<
         );
         Ok(json!({
             "team": team,
-            "session": session.out(),
+            // `you`: which member of `team` this session speaks for.
+            "session": {
+                "label": session.label,
+                "context": session.context,
+                "you": caller.handle,
+            },
             "threads": threads,
             "more": more,
         }))
@@ -924,20 +948,24 @@ fn write_as(
             if caught_up {
                 deliver(tx, session, &thread_id, seq, now)?;
             }
-            // Writing claims the thread for this session, unless another session of the person
-            // holds it: a claim is never taken from a session that still has it.
+            // Writing in an existing thread claims it for this session, unless another session
+            // of the person holds it: a claim is never taken from a session that still has it.
             // (A lapsed claim was already ended when this request was seen.) A note from the
             // holder is not a new claim: `claimed_context` stays the context it claimed in.
-            let claimed = tx.execute(
-                "UPDATE participants SET claimed_by = ?3,
-                        claimed_context = CASE WHEN claimed_by IS NULL THEN ?4
-                                               ELSE claimed_context END
-                 WHERE thread_id = ?1 AND person_id = ?2
-                   AND (claimed_by IS NULL OR claimed_by = ?3)",
-                params![thread_id, caller.person_id, session.id, session.context],
-            )?;
-            if claimed > 0 {
-                tx.execute("UPDATE sessions SET claims = 1 WHERE id = ?1", [session.id])?;
+            // Opening a thread claims nothing: the asker has nothing to take on, and the answers
+            // must reach the person's next session too.
+            if to.is_none() {
+                let claimed = tx.execute(
+                    "UPDATE participants SET claimed_by = ?3,
+                            claimed_context = CASE WHEN claimed_by IS NULL THEN ?4
+                                                   ELSE claimed_context END
+                     WHERE thread_id = ?1 AND person_id = ?2
+                       AND (claimed_by IS NULL OR claimed_by = ?3)",
+                    params![thread_id, caller.person_id, session.id, session.context],
+                )?;
+                if claimed > 0 {
+                    tx.execute("UPDATE sessions SET claims = 1 WHERE id = ?1", [session.id])?;
+                }
             }
             Some(id)
         }
@@ -1215,7 +1243,12 @@ mod tests {
                         "{plan:#?}"
                     );
                     if !all {
-                        assert!(step.contains("_id=? AND claimed_by"), "{plan:#?}");
+                        let bounded = if step.contains("session_count") {
+                            step.contains("session_id=? AND resolved=? AND claimed_by")
+                        } else {
+                            step.contains("person_id=? AND claimed_by")
+                        };
+                        assert!(bounded, "{plan:#?}");
                     }
                 }
                 assert!(!plan.iter().any(|s| s.contains("TEMP B-TREE")), "{plan:#?}");

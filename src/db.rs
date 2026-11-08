@@ -36,10 +36,11 @@ CREATE TABLE IF NOT EXISTS threads (
 -- A session is one running agent of a person, named by the `Relevo-Session` header under one
 -- token (`client_id` is '' for the token's default session). `context` is the latest
 -- `Relevo-Context` (NULL: general). `claims` is 1 while the session may hold claims: from its
--- first claim until they lapse, an hour after it was last seen (see `session::lapse`). Sessions
--- not seen for 7 days are forgotten.
+-- first claim until they lapse, 15 minutes after it was last seen (see `session::lapse`).
+-- Sessions not seen for 7 days are forgotten. Ids are never reused (AUTOINCREMENT): `send_keys` keeps the
+-- id of a session that may be forgotten since, and a replay must not name a newer one for it.
 CREATE TABLE IF NOT EXISTS sessions (
-    id         INTEGER PRIMARY KEY,
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
     token_id   TEXT NOT NULL REFERENCES tokens(id),
     client_id  TEXT NOT NULL,
     person_id  INTEGER NOT NULL REFERENCES people(id),
@@ -55,11 +56,13 @@ CREATE INDEX IF NOT EXISTS threads_by_opener ON threads(opener_id, kind, created
 -- One row per participant of a thread; rows are inserted in participant order, which rowid keeps.
 -- `context` is the context the thread was addressed to for this person; `claimed_by` the session
 -- of theirs that claimed it (the first to write while nobody held it), and `claimed_context` its
--- context then. `delivered_*` is the latest note that reached any of their sessions, and which
--- one (its label and context then). `last_seq` is the thread's latest note, `last_other_seq` the
+-- context then. `delivered_seq` is the latest note that reached any of their sessions;
+-- `delivered_at`, `_label` and `_context` say when the latest one by someone else first did, and
+-- which session (its label and context then). `last_seq` is the thread's latest note, `last_other_seq` the
 -- latest one not theirs; `has_new` (no session of theirs has that one),
--- `waiting` (open, direct, latest note not theirs) and `inbox` (`has_new` or `waiting`) are kept
--- by `api::refresh` after every change to the thread.
+-- `waiting` (open, direct, latest note not theirs), `inbox` (`has_new` or `waiting`) and
+-- `resolved` (a closed `team` thread: it shows only with `all`) are kept by `api::refresh` after
+-- every change to the thread.
 CREATE TABLE IF NOT EXISTS participants (
     thread_id         TEXT NOT NULL REFERENCES threads(id),
     person_id         INTEGER NOT NULL REFERENCES people(id),
@@ -75,6 +78,7 @@ CREATE TABLE IF NOT EXISTS participants (
     has_new           INTEGER NOT NULL DEFAULT 0,
     waiting           INTEGER NOT NULL DEFAULT 0,
     inbox             INTEGER NOT NULL DEFAULT 0,
+    resolved          INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (thread_id, person_id)
 );
 -- What a session has of a thread, once it differs from its person's: a session without a row has
@@ -93,6 +97,7 @@ CREATE TABLE IF NOT EXISTS session_threads (
     claimed_by    INTEGER,
     context       TEXT,
     person_inbox  INTEGER NOT NULL DEFAULT 0,
+    resolved      INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (session_id, thread_id)
 );
 CREATE INDEX IF NOT EXISTS session_threads_by_thread ON session_threads(thread_id);
@@ -104,22 +109,27 @@ CREATE INDEX IF NOT EXISTS participants_by_claim
 -- The inbox of a session is the union of a few index ranges, each already in inbox order, so it
 -- reads at most a page from each and stops, however many threads are flagged (see `api::page`):
 -- every thread of the person (`all`), those claimed by the session or unclaimed (general), those
--- unclaimed with no context or the session's context.
+-- unclaimed with no context or the session's context. Only `all` reads resolved threads.
 CREATE INDEX IF NOT EXISTS participants_inbox
     ON participants(person_id, has_new, waiting, last_seq) WHERE inbox = 1;
 CREATE INDEX IF NOT EXISTS participants_inbox_claim
-    ON participants(person_id, claimed_by, has_new, waiting, last_seq) WHERE inbox = 1;
+    ON participants(person_id, claimed_by, has_new, waiting, last_seq)
+    WHERE inbox = 1 AND resolved = 0;
 CREATE INDEX IF NOT EXISTS participants_inbox_context
-    ON participants(person_id, claimed_by, context, has_new, waiting, last_seq) WHERE inbox = 1;
+    ON participants(person_id, claimed_by, context, has_new, waiting, last_seq)
+    WHERE inbox = 1 AND resolved = 0;
 CREATE INDEX IF NOT EXISTS session_new
     ON session_threads(session_id, waiting, last_seq) WHERE has_new = 1;
 CREATE INDEX IF NOT EXISTS session_new_claim
-    ON session_threads(session_id, claimed_by, waiting, last_seq) WHERE has_new = 1;
+    ON session_threads(session_id, claimed_by, waiting, last_seq)
+    WHERE has_new = 1 AND resolved = 0;
 CREATE INDEX IF NOT EXISTS session_new_context
-    ON session_threads(session_id, claimed_by, context, waiting, last_seq) WHERE has_new = 1;
+    ON session_threads(session_id, claimed_by, context, waiting, last_seq)
+    WHERE has_new = 1 AND resolved = 0;
 -- For `more`: the threads new only for the session, by route (see `api::count_sql`).
 CREATE INDEX IF NOT EXISTS session_count
-    ON session_threads(session_id, claimed_by, context) WHERE has_new = 1 AND person_inbox = 0;
+    ON session_threads(session_id, resolved, claimed_by, context)
+    WHERE has_new = 1 AND person_inbox = 0;
 CREATE TABLE IF NOT EXISTS notes (
     seq        INTEGER PRIMARY KEY AUTOINCREMENT,
     id         TEXT NOT NULL UNIQUE,
@@ -156,12 +166,12 @@ pub const RESERVED_HANDLES: [&str; 2] = ["team", "equipo"];
 pub const SESSION_LIFETIME_SECS: i64 = 7 * 24 * 3600;
 
 /// The claims of a session not seen for this long lapse.
-pub const CLAIM_LAPSE_SECS: i64 = 3600;
+pub const CLAIM_LAPSE_SECS: i64 = 15 * 60;
 
 /// The layout of `SCHEMA`, kept in SQLite's `user_version`. v0 does not migrate: a database with
 /// another layout is refused, never half-updated (`CREATE TABLE IF NOT EXISTS` would skip the
 /// old tables and fail on their missing columns).
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 4;
 
 /// Opens (or creates) the database and applies the schema. `":memory:"` works for tests.
 pub fn open(path: &str) -> Result<Connection> {
