@@ -1,0 +1,132 @@
+"""Relevo client tools (``relevo`` toolset): relevo_send, relevo_inbox, relevo_thread.
+
+Same behaviour as the `relevo mcp` tools of docs/agents.md, calling the HTTP API directly under
+this profile's fixed session. Imported at discovery (``provides_tools``), so it stays light.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from . import client
+
+logger = logging.getLogger(__name__)
+
+# The person this token acts for, once a thread has told us (see client.learn_self).
+_me: dict[str, str] = {}
+
+
+def _api() -> client.Api:
+    settings = client.resolve_settings()
+    if not settings.configured:
+        raise client.RelevoError(0, "NOT_CONFIGURED", "set RELEVO_URL and RELEVO_TOKEN (or run `relevo connect`)")
+    return client.Api(settings)
+
+
+def _me_for(api: client.Api) -> str | None:
+    return _me.get(api.settings.identity)
+
+
+def _learn(api: client.Api, thread: dict, notes: list) -> None:
+    me = client.learn_self(thread, notes)
+    if me:
+        _me[api.settings.identity] = me
+
+
+def _run(name: str, fn) -> str:
+    try:
+        return fn()
+    except client.RelevoError as exc:
+        return "Error: " + client.describe_refusal(exc)
+    except Exception as exc:
+        logger.warning("relevo: %s failed: %s", name, client.describe_error(exc))
+        return f"Error: could not reach the Relevo server ({client.describe_error(exc)})."
+
+
+def relevo_send(args: dict, **_: Any) -> str:
+    def go() -> str:
+        payload: dict[str, Any] = {}
+        to, thread = args.get("to"), args.get("thread")
+        if isinstance(to, str):
+            to = [to]
+        if to:
+            payload["to"] = list(to)
+        if thread:
+            payload["thread"] = str(thread)
+        if args.get("text") is not None:
+            payload["text"] = str(args["text"])
+        if args.get("close"):
+            payload["close"] = True
+        return client.describe_send(_api().send(payload))
+
+    return _run("relevo_send", go)
+
+
+def relevo_inbox(args: dict, **_: Any) -> str:
+    def go() -> str:
+        api = _api()
+        data = api.inbox(all_=bool(args.get("all")))
+        for thread in data.get("threads") or []:
+            _learn(api, thread, thread.get("new_notes") or [])
+        return client.render_inbox(data, _me_for(api))
+
+    return _run("relevo_inbox", go)
+
+
+def relevo_thread(args: dict, **_: Any) -> str:
+    def go() -> str:
+        api = _api()
+        thread_id = str(args.get("id") or "").strip()
+        if not thread_id:
+            return "Error: give the thread id (r_…)."
+        data = api.thread(thread_id)
+        _learn(api, data, data.get("notes") or [])
+        return client.render_thread(data, _me_for(api))
+
+    return _run("relevo_thread", go)
+
+
+_TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
+    "relevo_send": (
+        relevo_send,
+        "Open a Relevo thread or write in one. Use `to` (handles such as \"ana\", \"ana/pagos-api\", "
+        "\"ana/pagos-api@feat/refunds\", or [\"@team\"] for a question to everyone) to open a new thread, "
+        "or `thread` to write in an existing one. The note must be self-contained. Says who holds the "
+        "thread: if another of your person's sessions does, step aside.",
+        {
+            "to": {"type": "array", "items": {"type": "string"},
+                   "description": "Addresses for a new thread, or [\"@team\"]. Not with `thread`."},
+            "thread": {"type": "string", "description": "Thread id (r_…) to write in. Not with `to`."},
+            "text": {"type": "string", "description": "The note (Markdown). Optional only when closing."},
+            "close": {"type": "boolean", "description": "Close the thread after writing."},
+        },
+        [],
+    ),
+    "relevo_inbox": (
+        relevo_inbox,
+        "What is new in Relevo for this session and what waits for your person's reply, with the team "
+        "list (handle, what they look after, live contexts). Others' text comes inside <untrusted>.",
+        {"all": {"type": "boolean",
+                 "description": "Every thread of your person, whichever session it is for."}},
+        [],
+    ),
+    "relevo_thread": (
+        relevo_thread,
+        "A whole Relevo thread: every note in full, who has seen it and who holds it.",
+        {"id": {"type": "string", "description": "Thread id (r_…)."}},
+        ["id"],
+    ),
+}
+
+
+def register_tools(ctx) -> None:
+    for name, (handler, description, properties, required) in _TOOLS.items():
+        parameters: dict[str, Any] = {"type": "object", "properties": properties}
+        if required:
+            parameters["required"] = required
+        ctx.register_tool(
+            name=name, toolset="relevo", handler=handler, description=description,
+            schema={"name": name, "description": description, "parameters": parameters},
+            check_fn=client.configured, emoji="\U0001f4e8",
+        )
