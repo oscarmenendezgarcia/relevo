@@ -450,7 +450,7 @@ async fn writers_own_notes_are_delivered_at_once() {
     assert_eq!(
         delivery[0],
         json!({ "handle": "ana", "note": null, "delivered_at": null, "by": null,
-                "claimed_by": { "label": "laptop", "context": null }, "seen_by": 0 })
+                "claimed_by": null, "seen_by": 0 })
     );
     assert_eq!(
         delivery[1],
@@ -526,9 +526,10 @@ async fn direct_thread_leaves_the_inbox_when_closed() {
     t.inbox("bob").await;
     let (status, v) = t.send("ana", json!({ "thread": id, "close": true })).await;
     assert_eq!(status, StatusCode::OK);
+    // Opening the thread claimed nothing, and closing without text does not claim.
     assert_eq!(
         v,
-        json!({ "thread": id, "note": null, "status": "closed", "claimed": "this-session" })
+        json!({ "thread": id, "note": null, "status": "closed", "claimed": null })
     );
     assert!(thread_ids(&t.inbox("bob").await).is_empty());
     assert_eq!(t.thread("bob", &id).await["status"], "closed");
@@ -2057,6 +2058,88 @@ async fn closing_without_text_does_not_claim() {
     let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
     pagos.ok(json!({ "thread": id, "close": true })).await;
     assert_eq!(pagos.thread(&id).await["claimed"], Value::Null);
+}
+
+#[tokio::test]
+async fn opening_a_thread_claims_nothing() {
+    let t = team(&["ana", "oscar"]);
+    let a = t.agent("oscar", "term-aaaa", "relevo");
+    let (status, v) = a
+        .send(json!({ "to": ["ana/pagos-api"], "text": "q" }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["claimed"], Value::Null);
+    let id = v["thread"].as_str().unwrap().to_string();
+    let th = a.thread(&id).await;
+    assert_eq!(th["claimed"], Value::Null);
+    assert_eq!(th["delivery"][0]["handle"], "oscar");
+    assert_eq!(th["delivery"][0]["claimed_by"], Value::Null);
+    // Nor does asking the team.
+    let (_, v) = a.send(json!({ "to": ["@team"], "text": "who?" })).await;
+    assert_eq!(v["claimed"], Value::Null);
+    let team_id = v["thread"].as_str().unwrap().to_string();
+    assert_eq!(a.thread(&team_id).await["claimed"], Value::Null);
+    // A replayed open says the same.
+    let (_, first) = a
+        .send(json!({ "to": ["ana"], "text": "k", "key": "open-1" }))
+        .await;
+    let (_, again) = a
+        .send(json!({ "to": ["ana"], "text": "k", "key": "open-1" }))
+        .await;
+    assert_eq!(first["claimed"], Value::Null);
+    assert_eq!(again, first);
+    // Writing in the thread afterwards claims it, as any note in an existing thread does.
+    let (_, v) = a.send(json!({ "thread": id, "text": "more" })).await;
+    assert_eq!(v["claimed"], "this-session");
+    let b = t.agent("oscar", "term-bbbb", "relevo");
+    assert_eq!(b.thread(&id).await["claimed"], "other-session");
+}
+
+#[tokio::test]
+async fn the_answer_to_a_question_reaches_the_askers_next_session() {
+    let t = team(&["ana", "oscar"]);
+    // Oscar's session A asks, and exits.
+    let a = t.agent("oscar", "term-aaaa", "relevo");
+    let id = a
+        .ok(json!({ "to": ["ana"], "text": "Is refunds live?" }))
+        .await;
+    let team_id = a
+        .ok(json!({ "to": ["@team"], "text": "Who owns billing?" }))
+        .await;
+    // Ana replies in both.
+    t.ok("ana", json!({ "thread": id, "text": "Yes, since Monday." }))
+        .await;
+    t.ok("ana", json!({ "thread": team_id, "text": "Me." }))
+        .await;
+    // Oscar's new session B, right away, sees both answers in its plain inbox.
+    let b = t.agent("oscar", "term-bbbb", "relevo");
+    let v = b.inbox().await;
+    assert_eq!(
+        new_texts(&v, &id),
+        Some(vec!["Yes, since Monday.".to_string()]),
+        "{v}"
+    );
+    assert_eq!(
+        new_texts(&v, &team_id),
+        Some(vec!["Me.".to_string()]),
+        "{v}"
+    );
+    for th in v["threads"].as_array().unwrap() {
+        assert_eq!(th["claimed"], Value::Null, "{th}");
+    }
+    let direct = v["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|th| th["id"] == id)
+        .unwrap();
+    assert_eq!(direct["waiting_for_you"], true);
+    // Unclaimed, it shows in his other sessions too, in any context, waiting for his reply
+    // (the answer reached B, so they start with it).
+    for (sid, context) in [("term-cccc", "frontend"), ("term-dddd", "")] {
+        let v = t.agent("oscar", sid, context).inbox().await;
+        assert_eq!(new_texts(&v, &id), Some(vec![]), "{v}");
+    }
 }
 
 #[tokio::test]

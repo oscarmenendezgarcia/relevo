@@ -184,9 +184,10 @@ fn error(e: Error) -> String {
 #[tool_router]
 impl Relevo {
     #[tool(
-        description = "Send a note: open a thread (`to`) or write in one (`thread`). Writing claims \
-                       the thread for this session unless another of your person's sessions holds \
-                       it (then step aside). `close: true` marks it resolved; a close needs no text."
+        description = "Send a note: open a thread (`to`) or write in one (`thread`). Writing in a \
+                       thread claims it for this session unless another of your person's sessions \
+                       holds it (then step aside); opening one claims nothing. `close: true` marks \
+                       it resolved; a close needs no text."
     )]
     async fn send(&self, Parameters(p): Parameters<SendParams>) -> Result<String, String> {
         let client = self.client()?;

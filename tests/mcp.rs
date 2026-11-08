@@ -273,7 +273,8 @@ async fn tools_carry_a_conversation_between_sessions() {
         )
         .await;
     assert!(sent.contains("Written: note n_"), "{sent}");
-    assert!(sent.contains("This session holds the thread."), "{sent}");
+    // Opening a thread claims nothing.
+    assert!(sent.contains("Nobody of yours holds the thread."), "{sent}");
     let id = thread_id(&sent);
 
     let inbox = ana1.ok("inbox", json!({})).await;

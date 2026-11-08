@@ -948,20 +948,24 @@ fn write_as(
             if caught_up {
                 deliver(tx, session, &thread_id, seq, now)?;
             }
-            // Writing claims the thread for this session, unless another session of the person
-            // holds it: a claim is never taken from a session that still has it.
+            // Writing in an existing thread claims it for this session, unless another session
+            // of the person holds it: a claim is never taken from a session that still has it.
             // (A lapsed claim was already ended when this request was seen.) A note from the
             // holder is not a new claim: `claimed_context` stays the context it claimed in.
-            let claimed = tx.execute(
-                "UPDATE participants SET claimed_by = ?3,
-                        claimed_context = CASE WHEN claimed_by IS NULL THEN ?4
-                                               ELSE claimed_context END
-                 WHERE thread_id = ?1 AND person_id = ?2
-                   AND (claimed_by IS NULL OR claimed_by = ?3)",
-                params![thread_id, caller.person_id, session.id, session.context],
-            )?;
-            if claimed > 0 {
-                tx.execute("UPDATE sessions SET claims = 1 WHERE id = ?1", [session.id])?;
+            // Opening a thread claims nothing: the asker has nothing to take on, and the answers
+            // must reach the person's next session too.
+            if to.is_none() {
+                let claimed = tx.execute(
+                    "UPDATE participants SET claimed_by = ?3,
+                            claimed_context = CASE WHEN claimed_by IS NULL THEN ?4
+                                                   ELSE claimed_context END
+                     WHERE thread_id = ?1 AND person_id = ?2
+                       AND (claimed_by IS NULL OR claimed_by = ?3)",
+                    params![thread_id, caller.person_id, session.id, session.context],
+                )?;
+                if claimed > 0 {
+                    tx.execute("UPDATE sessions SET claims = 1 WHERE id = ?1", [session.id])?;
+                }
             }
             Some(id)
         }
