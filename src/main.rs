@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use relevo::{App, Clock, api, db};
+use relevo::{App, Clock, api, client, config, db};
 
 /// Relevo: notes that your agent hands to a teammate's agent.
 #[derive(Parser)]
@@ -48,6 +48,9 @@ enum Command {
     About { handle: String, about: String },
     /// Stop a person from using Relevo (every token of theirs is revoked).
     Deactivate { handle: String },
+    /// Check a token against a server and save both for `relevo mcp` (in
+    /// ~/.config/relevo/config.json, or the file RELEVO_CONFIG names).
+    Connect { url: String, token: String },
 }
 
 #[derive(Subcommand)]
@@ -70,9 +73,39 @@ fn print_token(handle: &str, label: &str, token: &db::NewToken) {
     println!("This secret is shown once; only its hash is stored.");
 }
 
+/// Checks the token with `GET /api/people` and saves the server and token.
+async fn connect(url: &str, token: &str) -> Result<()> {
+    let config = config::Config {
+        url: config::normalize_url(url)?,
+        token: token.trim().to_string(),
+    };
+    let client = client::Client::new(&config, Some(String::new()), "/".into());
+    let people = client
+        .people()
+        .await
+        .map_err(|e| anyhow::anyhow!("checking the token with {}: {e}", config.url))?;
+    let path = config::path(config::env)?;
+    config::save(&path, &config)?;
+    let team = people["team"].as_array().map(Vec::len).unwrap_or(0);
+    println!(
+        "connected to {} (a team of {team}); saved to {}",
+        config.url,
+        path.display()
+    );
+    let loopback = ["http://127.", "http://localhost", "http://[::1]"];
+    if config.url.starts_with("http://") && !loopback.iter().any(|l| config.url.starts_with(l)) {
+        eprintln!("warning: plain http sends the token and notes in the clear; use https");
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    // The client commands never touch a database.
+    if let Command::Connect { url, token } = &cli.command {
+        return connect(url, token).await;
+    }
     let conn = db::open(&cli.db)?;
     let now = db::now_unix();
     match cli.command {
@@ -162,6 +195,7 @@ async fn main() -> Result<()> {
             let revoked = db::deactivate(&conn, &handle, now)?;
             println!("deactivated {handle}, revoked {revoked} token(s)");
         }
+        Command::Connect { .. } => unreachable!("handled above"),
     }
     Ok(())
 }
