@@ -1,7 +1,10 @@
-//! Relevo: a small server that keeps and delivers notes between the people of one team.
+//! Relevo: a small server that keeps and delivers notes between the people of one team, and the
+//! clients (`relevo connect`, `relevo mcp`) that agents use to reach it.
 
 pub mod api;
 pub mod auth;
+pub mod config;
+pub mod context;
 pub mod db;
 pub mod error;
 pub mod session;
