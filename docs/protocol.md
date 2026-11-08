@@ -85,7 +85,7 @@ Returns:
 ```
 
 - `team` lists every active person, you included, so the agent knows whom to ask.
-- At most 20 threads, waiting ones first, then by latest note, newest first. `more` counts the rest.
+- At most 20 threads: first those with new notes (waiting ones first among them), then waiting ones with nothing new; within each group, by latest note, newest first. `more` counts the rest. So threads that are only waiting, which stay until someone replies, never keep new notes out.
 - `new_notes` holds the notes not yet delivered to you, oldest first. A note's `text` is cut to 4,000 characters with `truncated: true`; the agent reads it whole with `thread`.
 - Returning a thread here delivers its new notes to you. Threads counted in `more` are not delivered.
 - `from` is the person who opened the thread.

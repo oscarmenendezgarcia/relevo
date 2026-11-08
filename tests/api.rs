@@ -882,3 +882,29 @@ async fn undecodable_thread_id_is_json_not_found() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(code(&v), "NOT_FOUND", "{v}");
 }
+
+#[tokio::test]
+async fn waiting_threads_with_nothing_new_never_hide_new_notes() {
+    let t = team(&["ana", "bob", "carl"]);
+    for i in 0..20 {
+        t.ok("ana", json!({ "to": ["bob"], "text": format!("t{i}") }))
+            .await;
+    }
+    // Bob's agent reads all 20 but does not reply: they stay waiting.
+    assert_eq!(t.inbox("bob").await["more"], 0);
+    t.app.clock.advance(60);
+    let team_q = t
+        .ok("carl", json!({ "to": ["@team"], "text": "urgent" }))
+        .await;
+    let closed = t
+        .ok("carl", json!({ "to": ["bob"], "text": "fyi", "close": true }))
+        .await;
+    let inbox = t.inbox("bob").await;
+    let shown = thread_ids(&inbox);
+    assert_eq!(shown.len(), 20);
+    assert_eq!(inbox["more"], 2);
+    // Threads with new notes come first, newest first, then the waiting ones.
+    assert_eq!(shown[..2], [closed, team_q]);
+    assert_eq!(inbox["threads"][2]["waiting_for_you"], true);
+    assert_eq!(inbox["threads"][2]["new_notes"], json!([]));
+}

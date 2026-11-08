@@ -255,7 +255,7 @@ async fn inbox(State(app): State<Arc<App>>, caller: Caller) -> Result<Json<Value
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let sql = format!(
         "{THREADS_OF} WHERE waiting OR last_seq > delivered_seq
-         ORDER BY waiting DESC, last_seq DESC"
+         ORDER BY last_seq > delivered_seq DESC, waiting DESC, last_seq DESC"
     );
     let rows: Vec<ThreadRow> = tx
         .prepare(&sql)?
