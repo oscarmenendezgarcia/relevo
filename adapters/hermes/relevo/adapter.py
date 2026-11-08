@@ -2,7 +2,8 @@
 
 connect() keeps one waiting inbox request open (wait=55) and backs off on errors; each thread with
 new notes becomes a MessageEvent from the author of its latest note; send() writes the agent's reply
-in that thread. One fixed Relevo-Session per profile (see client.gateway_session_id), general unless
+in that thread; disconnect() stops the loop, then ends the session with DELETE /api/session. One
+fixed Relevo-Session per profile (see client.gateway_session_id), general unless
 RELEVO_CONTEXT is set.
 """
 
@@ -218,6 +219,12 @@ def is_gateway_diagnostic(content: str) -> bool:
     return note_text(content) is None
 
 
+# The adapters of this process between connect() and disconnect(). The gateway may connect a new
+# adapter before it disconnects the one it replaces; both have the profile's one session, which the
+# old one must then leave to the new one rather than end it.
+_LIVE: set["RelevoAdapter"] = set()
+
+
 class _Stopping(Exception):
     """disconnect() was called while the loop waited on something it can do without."""
 
@@ -230,6 +237,8 @@ class RelevoAdapter(BasePlatformAdapter):
     backoff_max = 60.0
     # How long disconnect() lets the loop finish handing over a batch the server already delivered.
     stop_grace = 5.0
+    # How long disconnect() waits for DELETE /api/session, which releases the threads this session holds.
+    end_timeout = 2.0
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform(PLATFORM_NAME))
@@ -270,6 +279,7 @@ class RelevoAdapter(BasePlatformAdapter):
         self._ensure_http()
         self._stop = asyncio.Event()
         self._poll_task = asyncio.create_task(self._poll_loop(), name="relevo-inbox")
+        _LIVE.add(self)
         client.use_gateway_session(self.settings.session)
         self._mark_connected()
         logger.info("[relevo] connected; server and token from %s, session %s, context %s", self.settings.source,
@@ -277,7 +287,11 @@ class RelevoAdapter(BasePlatformAdapter):
         return True
 
     async def disconnect(self) -> None:
-        client.use_gateway_session(None)
+        _LIVE.discard(self)
+        # While another live adapter has this session (one the gateway connected in this one's
+        # place), the session is its: the tools keep acting for it, and it is not ended.
+        if not self._shared():
+            client.use_gateway_session(None)
         if self._stop is not None:
             self._stop.set()
         task, self._poll_task = self._poll_task, None
@@ -289,9 +303,30 @@ class RelevoAdapter(BasePlatformAdapter):
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         http, self._http = self._http, None
+        if task is not None and http is not None and not self._shared():
+            await self._end_session(http)
         if http is not None:
             await http.aclose()
         self._mark_disconnected()
+
+    def _shared(self) -> bool:
+        """Another live adapter of this process has the same session on the same server and token."""
+        mine = (self.settings.identity, self.settings.session)
+        return any((a.settings.identity, a.settings.session) == mine for a in _LIVE)
+
+    async def _end_session(self, http: Any) -> None:
+        """Once the loop has stopped, end the session (DELETE /api/session), so the threads it holds
+        show again in the person's other sessions now rather than when its claims lapse. Best effort:
+        a server that cannot be reached in end_timeout only leaves the claims to lapse."""
+        try:
+            await self.api.aend_session(http, timeout=self.end_timeout)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.info("[relevo] could not end session %s: %s; its claims lapse in 15 minutes",
+                        self.settings.session, client.describe_error(exc))
+        else:
+            logger.info("[relevo] ended session %s", self.settings.session)
 
     def _ensure_http(self) -> Any:
         if self._http is None:

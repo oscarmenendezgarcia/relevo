@@ -1,12 +1,13 @@
 """Relevo HTTP client shared by the platform adapter and the client tools.
 
-Settings, the session ids, the three calls of docs/protocol.md (sync for tools, async for the
+Settings, the session ids, the calls of docs/protocol.md (sync for tools, async for the
 adapter) and the text rendering the agent reads. Stdlib plus httpx (a Hermes core dependency),
 imported lazily so plugin discovery stays cheap. Never logs tokens or note text.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -98,9 +99,10 @@ def _saved_config() -> dict:
 
 
 def gateway_session_id() -> str:
-    """The gateway's Relevo-Session: fixed per Hermes profile, derived from the profile's home, so a
-    gateway restart keeps its delivery state and the threads it holds (claims of a session that is
-    gone would hide those threads from a new one for an hour), and two profiles never share one."""
+    """The gateway's Relevo-Session: fixed per Hermes profile, derived from the profile's home, and
+    never shared by two profiles. A gateway that stops cleanly ends it (DELETE /api/session); one
+    that dies without ending it gets back, when it starts again, the threads it held (claims of a
+    session that is gone would hide them from a new one until they lapse 15 minutes later)."""
     from hermes_constants import hermes_home_key
 
     digest = hashlib.sha256(hermes_home_key().encode("utf-8")).hexdigest()[:32]
@@ -306,6 +308,12 @@ class Api:
 
     async def athread(self, http: Any, thread_id: str) -> dict:
         return _parse(await http.request(**self._request("GET", self._thread_path(thread_id)), timeout=_TIMEOUT))
+
+    async def aend_session(self, http: Any, *, timeout: float) -> dict:
+        """DELETE /api/session: forget this session and release the threads it holds. `timeout`
+        caps the whole call, not each step of it."""
+        req = self._request("DELETE", "/api/session")
+        return _parse(await asyncio.wait_for(http.request(**req, timeout=timeout), timeout))
 
     async def asend(self, http: Any, payload: dict) -> dict:
         req = self._request("POST", "/api/send", body=self._with_key(payload))

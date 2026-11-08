@@ -788,8 +788,8 @@ class Tools(Base):
 
 
 class Sessions(Base):
-    """docs/agents.md: one session per running agent. The gateway keeps one fixed id per profile
-    (a restart keeps its deliveries and claims); every other Hermes process has its own."""
+    """docs/agents.md: one session per running agent. The gateway keeps one fixed id per profile and
+    ends it when it stops; every other Hermes process has its own."""
 
     async def test_the_gateway_and_a_cli_agent_step_aside_for_each_other(self):
         a = self.make_adapter()
@@ -852,17 +852,55 @@ class Sessions(Base):
             clear_session_vars(tokens)
         self.assertIn("Another of your person's sessions holds this thread", elsewhere)
 
-    async def test_reading_the_inbox_elsewhere_leaves_the_gateway_its_notes(self):
+    async def test_a_stop_ends_the_gateway_session_and_frees_its_threads(self):
+        a = self.make_adapter()
+        await a.connect()
+        opened = self.ana.send(to=["oscar"], text="Can you look at the refunds cron?")
+        await self.until(lambda: len(self.events) == 1)
+        claimed = await a.send(opened["thread"], "On it.", metadata=FINAL)
+        self.assertEqual(claimed.raw_response["claimed"], "this-session")
+        self.assertIsNotNone(self._oscar(opened["thread"])["claimed_by"])
+
+        await a.disconnect()  # a gateway stop or restart
+        self.assertNotIn(a.settings.session, SERVER.sessions("oscar"))
+        self.assertIsNone(self._oscar(opened["thread"])["claimed_by"])
+        # At once, not 15 minutes later: Oscar's CLI agent takes the thread.
+        self.assertIn("You hold this thread.", tools.relevo_send({"thread": opened["thread"], "text": "On it."}))
+
+    async def test_a_replaced_adapter_leaves_the_session_to_its_replacement(self):
+        a = self.make_adapter()
+        await a.connect()
+        b = self.make_adapter()  # the gateway connects a new adapter before it drops the old one
+        await b.connect()
+        opened = self.ana.send(to=["oscar"], text="Who runs the deploy today?")
+        await self.until(lambda: len(self.events) >= 1)
+        await b.send(opened["thread"], "On it.", metadata=FINAL)
+        await a.disconnect()
+        self.assertIn(b.settings.session, SERVER.sessions("oscar"))
+        self.assertIsNotNone(self._oscar(opened["thread"])["claimed_by"])
+        self.assertEqual(client._gateway_session, b.settings.session)  # its tools still act for it
+        await b.disconnect()
+        self.assertNotIn(b.settings.session, SERVER.sessions("oscar"))
+
+    async def test_after_a_stop_what_another_session_read_is_not_handed_over_again(self):
+        """The stop forgot the gateway's session: when it is back it starts with what its person
+        already has, like any new session. A note no session read meanwhile still arrives."""
         a = self.make_adapter()
         await a.connect()
         await asyncio.sleep(0.3)
-        await a.disconnect()  # a gateway restart, or a backoff
-        self.ana.send(to=["oscar"], text="Sent while the gateway was away")
+        await a.disconnect()
+        read = self.ana.send(to=["oscar"], text="Sent while the gateway was away")
         self.assertIn("Sent while the gateway was away", tools.relevo_inbox({}))
+        unread = self.ana.send(to=["oscar"], text="Also sent while it was away, read by nobody")
         b = self.make_adapter()
         await b.connect()
         await self.until(lambda: len(self.events) == 1)
-        self.assertIn("Sent while the gateway was away", self.events[0].text)
+        await asyncio.sleep(0.5)
+        self.assertEqual([e.source.chat_id for e in self.events], [unread["thread"]])
+        self.assertNotEqual(read["thread"], unread["thread"])
+
+    def _oscar(self, thread_id: str) -> dict:
+        return next(d for d in self.ana.thread(thread_id)["delivery"] if d["handle"] == "oscar")
 
 
 class Loop(Base):
@@ -915,6 +953,28 @@ class Loop(Base):
         self.assertEqual(len(texts), 3, texts and [t[:80] for t in texts])
         self.assertIn("cut at 4,000 characters", texts[0])
         self.assertTrue(any("Another short one" in t for t in texts))
+
+    async def test_a_server_that_never_answers_does_not_hold_up_a_disconnect(self):
+        with socket.socket() as mute:  # accepts connections, never answers
+            mute.bind(("127.0.0.1", 0))
+            mute.listen(8)
+            os.environ.pop("RELEVO_URL")
+            a = self.make_adapter(url=f"http://127.0.0.1:{mute.getsockname()[1]}")
+            ended: list[float] = []
+            real = a.api.aend_session
+
+            async def counted(http, *, timeout):
+                ended.append(timeout)
+                return await real(http, timeout=timeout)
+
+            a.api.aend_session = counted
+            self.assertTrue(await a.connect())
+            await asyncio.sleep(0.3)
+            started = time.monotonic()
+            await a.disconnect()
+            self.assertLess(time.monotonic() - started, a.end_timeout + 1)
+            self.assertEqual(ended, [a.end_timeout])
+            self.assertFalse(a.is_connected)
 
     async def test_errors_back_off_and_the_loop_recovers(self):
         a = self.make_adapter()
