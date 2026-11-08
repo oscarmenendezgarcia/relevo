@@ -466,6 +466,30 @@ async fn writing_does_not_skip_notes_that_never_reached_the_writer() {
 }
 
 #[tokio::test]
+async fn writing_does_not_skip_a_note_of_another_session_of_the_writer() {
+    let t = team(&["ana", "bob"]);
+    let one = t.agent("bob", "term-0001", "");
+    let two = t.agent("bob", "term-0002", "");
+    one.inbox().await;
+    two.inbox().await;
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
+    one.inbox().await;
+    two.inbox().await;
+    two.ok(json!({ "thread": id, "text": "from two" })).await;
+    // One answers without having fetched what two wrote: two's note must still reach it.
+    one.ok(json!({ "thread": id, "text": "from one" })).await;
+    t.ok("ana", json!({ "thread": id, "text": "c" })).await;
+    assert_eq!(
+        new_texts(&one.inbox().await, &id),
+        Some(vec![
+            "from two".to_string(),
+            "from one".to_string(),
+            "c".to_string()
+        ])
+    );
+}
+
+#[tokio::test]
 async fn thread_shows_whole_history_and_delivery() {
     let t = team(&["ana", "bob"]);
     let id = t.ok("ana", json!({ "to": ["bob"], "text": "one" })).await;
@@ -1896,7 +1920,7 @@ async fn session_inboxes_hold_order_and_more_over_hundreds_of_routed_threads() {
                     .ok(json!({ "thread": th.id, "text": format!("bob {step}") }))
                     .await;
                 order += 1;
-                if th.delivered[s] >= th.last_other {
+                if th.delivered[s] >= th.last {
                     th.delivered[s] = order;
                 }
                 th.last = order;

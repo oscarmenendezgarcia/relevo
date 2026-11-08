@@ -132,8 +132,6 @@ struct ThreadRow {
     /// The latest note that reached this session.
     delivered_seq: i64,
     last_seq: i64,
-    /// The latest note not written by this person.
-    last_other_seq: i64,
     waiting: bool,
     context: Option<String>,
     claimed_by: Option<i64>,
@@ -153,8 +151,8 @@ struct Candidate {
 /// has what its person has.
 const THREAD_SQL: &str = "
 SELECT t.id, t.kind, t.title, o.handle, t.opener_id, t.status,
-       coalesce(s.delivered_seq, p.delivered_seq, 0), p.last_seq, p.last_other_seq, p.waiting,
-       p.context, p.claimed_by
+       coalesce(s.delivered_seq, p.delivered_seq, 0), p.last_seq, p.waiting, p.context,
+       p.claimed_by
 FROM participants p
 JOIN threads t ON t.id = p.thread_id
 JOIN people o ON o.id = t.opener_id
@@ -175,10 +173,9 @@ fn find_thread(conn: &Connection, session: &Session, id: &str) -> Result<ThreadR
                 status: r.get(5)?,
                 delivered_seq: r.get(6)?,
                 last_seq: r.get(7)?,
-                last_other_seq: r.get(8)?,
-                waiting: r.get(9)?,
-                context: r.get(10)?,
-                claimed_by: r.get(11)?,
+                waiting: r.get(8)?,
+                context: r.get(9)?,
+                claimed_by: r.get(10)?,
             })
         },
     )
@@ -756,7 +753,8 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<(SendResult, Ve
         }
     }
 
-    // `caught_up`: every note of the others had reached this session before it wrote.
+    // `caught_up`: every note of the thread had reached this session before it wrote, the
+    // person's own from other sessions included.
     let (thread_id, caught_up) = match (&req.to, &req.thread) {
         (Some(to), _) => {
             let text = req.text.as_deref().unwrap_or_default();
@@ -780,7 +778,7 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<(SendResult, Ve
                     return Err(ApiError::thread_busy());
                 }
             }
-            let caught_up = row.delivered_seq >= row.last_other_seq;
+            let caught_up = row.delivered_seq >= row.last_seq;
             (row.id, caught_up)
         }
         (None, None) => unreachable!("checked above"),
@@ -817,7 +815,7 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<(SendResult, Ve
                 "UPDATE participants SET last_other_seq = ?2 WHERE thread_id = ?1 AND person_id != ?3",
                 params![thread_id, seq, caller.person_id],
             )?;
-            // The writing session has the thread up to its note, unless notes of the others never
+            // The writing session has the thread up to its note, unless earlier notes never
             // reached it: then nothing moves, so those notes are not skipped.
             if caught_up {
                 deliver(&tx, &session, &thread_id, seq, now)?;
