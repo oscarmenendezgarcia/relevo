@@ -36,8 +36,8 @@ CREATE TABLE IF NOT EXISTS threads (
 -- A session is one running agent of a person, named by the `Relevo-Session` header under one
 -- token (`client_id` is '' for the token's default session). `context` is the latest
 -- `Relevo-Context` (NULL: general). `claims` is 1 while the session may hold claims: from its
--- first claim until they lapse, an hour after it was last seen (see `session::lapse`). Sessions
--- not seen for 7 days are forgotten. Ids are never reused (AUTOINCREMENT): `send_keys` keeps the
+-- first claim until they lapse, 15 minutes after it was last seen (see `session::lapse`).
+-- Sessions not seen for 7 days are forgotten. Ids are never reused (AUTOINCREMENT): `send_keys` keeps the
 -- id of a session that may be forgotten since, and a replay must not name a newer one for it.
 CREATE TABLE IF NOT EXISTS sessions (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -166,7 +166,7 @@ pub const RESERVED_HANDLES: [&str; 2] = ["team", "equipo"];
 pub const SESSION_LIFETIME_SECS: i64 = 7 * 24 * 3600;
 
 /// The claims of a session not seen for this long lapse.
-pub const CLAIM_LAPSE_SECS: i64 = 3600;
+pub const CLAIM_LAPSE_SECS: i64 = 15 * 60;
 
 /// The layout of `SCHEMA`, kept in SQLite's `user_version`. v0 does not migrate: a database with
 /// another layout is refused, never half-updated (`CREATE TABLE IF NOT EXISTS` would skip the

@@ -46,8 +46,8 @@ fn check_token(conn: &Connection, caller: &Caller) -> Result<(), ApiError> {
 }
 
 /// Records that the caller's session was seen now and returns it. First ends the claims of
-/// sessions not seen for an hour (this one's included: they lapsed before it came back), forgets
-/// sessions not seen for 7 days, then those of the token beyond `MAX_SESSIONS_PER_TOKEN`.
+/// sessions not seen for 15 minutes (this one's included: they lapsed before it came back),
+/// forgets sessions not seen for 7 days, then those of the token beyond `MAX_SESSIONS_PER_TOKEN`.
 ///
 /// With `arrived`, the request has just arrived and records the context it sent (the latest one
 /// wins). Otherwise it is a waiting request answering, whose context may be older than one the
@@ -123,14 +123,15 @@ pub fn find(conn: &Connection, caller: &Caller) -> Result<Option<Session>, ApiEr
         .optional()?)
 }
 
-/// The sessions whose claims have lapsed (`?1`: an hour ago), read from an index that holds only
-/// sessions that may hold claims, so a request that finds none reads one index entry at most.
+/// The sessions whose claims have lapsed (`?1`: 15 minutes ago), read from an index that holds
+/// only sessions that may hold claims, so a request that finds none reads one index entry at most.
 const LAPSED_SQL: &str = "SELECT id, person_id FROM sessions INDEXED BY sessions_claiming
                           WHERE claims = 1 AND last_seen <= ?1";
 
-/// Ends the claims of every session not seen for an hour: the threads it claimed go back to every
-/// session of the person that sees them, so those sessions' waiting requests look again. Every
-/// request runs this before it reads or writes a claim, so a lapsed claim is never seen as held.
+/// Ends the claims of every session not seen for 15 minutes: the threads it claimed go back to
+/// every session of the person that sees them, so those sessions' waiting requests look again.
+/// Every request runs this before it reads or writes a claim, so a lapsed claim is never seen as
+/// held.
 /// Each session's claims lapse once: the index holds only sessions that may still hold some.
 pub fn lapse(conn: &Connection, app: &App, now: i64) -> Result<(), ApiError> {
     let lapsed: Vec<(i64, i64)> = conn

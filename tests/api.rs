@@ -12,6 +12,9 @@ use tower::ServiceExt;
 
 const T0: i64 = 1_794_134_460; // 2026-11-08T10:41:00Z
 
+/// A claim lapses when its session has not been seen for this long.
+const LAPSE: i64 = 15 * 60;
+
 struct Team {
     app: Arc<App>,
     tokens: HashMap<String, String>,
@@ -2346,7 +2349,7 @@ async fn claimed_by_shows_the_context_the_session_claimed_in() {
     pagos.inbox().await;
     pagos.ok(json!({ "thread": id, "text": "mine" })).await;
     // Later the same session works elsewhere: the thread does not follow it there.
-    t.app.clock.advance(30 * 60);
+    t.app.clock.advance(10 * 60);
     t.agent("bob", "term-0001", "acquisition").inbox().await;
     let d = &t.thread("ana", &id).await["delivery"][1];
     let pagos = json!({ "label": "laptop", "context": "pagos-api" });
@@ -2375,7 +2378,7 @@ async fn the_holder_writing_from_another_context_keeps_the_claims_first_context(
 }
 
 #[tokio::test]
-async fn a_session_seen_within_the_hour_keeps_its_claim_until_it_stops() {
+async fn a_session_seen_within_15_minutes_keeps_its_claim_until_it_stops() {
     let t = team(&["ana", "bob"]);
     let pagos = t.agent("bob", "term-pagos", "pagos-api");
     let front = t.agent("bob", "term-front", "frontend");
@@ -2383,16 +2386,16 @@ async fn a_session_seen_within_the_hour_keeps_its_claim_until_it_stops() {
     front.inbox().await;
     pagos.inbox().await;
     pagos.ok(json!({ "thread": id, "text": "mine" })).await;
-    // A day of a session seen every 59 minutes: the claim holds.
-    for _ in 0..25 {
-        t.app.clock.advance(59 * 60);
+    // A day of a session seen every 14 minutes: the claim holds.
+    for _ in 0..(24 * 60 / 14 + 1) {
+        t.app.clock.advance(LAPSE - 60);
         pagos.get("/api/people").await;
         assert!(thread_ids(&front.inbox().await).is_empty());
     }
     t.ok("ana", json!({ "thread": id, "text": "and?" })).await;
     assert!(thread_ids(&front.inbox().await).is_empty());
-    // Pagos stops: an hour later its claim has lapsed.
-    t.app.clock.advance(3600);
+    // Pagos stops: 15 minutes later its claim has lapsed.
+    t.app.clock.advance(LAPSE);
     let v = front.inbox().await;
     assert_eq!(
         new_texts(&v, &id),
@@ -2400,7 +2403,7 @@ async fn a_session_seen_within_the_hour_keeps_its_claim_until_it_stops() {
     );
     assert_eq!(v["threads"][0]["claimed"], Value::Null);
     // A week after it was last seen it is forgotten; coming back, it is a new session.
-    t.app.clock.advance(7 * 24 * 3600 - 3600);
+    t.app.clock.advance(7 * 24 * 3600 - LAPSE);
     assert_eq!(
         db::list_sessions(&t.app.db(), Some("bob"), T0)
             .unwrap()
@@ -2422,7 +2425,7 @@ async fn a_session_seen_within_the_hour_keeps_its_claim_until_it_stops() {
 }
 
 #[tokio::test]
-async fn a_claim_lapses_an_hour_after_its_session_was_last_seen_and_the_next_writer_takes_it() {
+async fn a_claim_lapses_15_minutes_after_its_session_was_last_seen_and_the_next_writer_takes_it() {
     let t = team(&["ana", "bob"]);
     let pagos = t.agent("bob", "term-pagos", "pagos-api");
     let front = t.agent("bob", "term-front", "frontend");
@@ -2430,8 +2433,8 @@ async fn a_claim_lapses_an_hour_after_its_session_was_last_seen_and_the_next_wri
     let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
     pagos.inbox().await;
     pagos.ok(json!({ "thread": id, "text": "mine" })).await;
-    // Others' requests do not keep it alive, nor do they lose it for pagos before the hour.
-    t.app.clock.advance(3599);
+    // Others' requests do not keep it alive, nor do they lose it for pagos before 15 minutes.
+    t.app.clock.advance(LAPSE - 1);
     t.ok("ana", json!({ "thread": id, "text": "and?" })).await;
     let (_, v) = front.send(json!({ "thread": id, "text": "me?" })).await;
     assert_eq!(v["claimed"], "other-session");
@@ -2440,7 +2443,7 @@ async fn a_claim_lapses_an_hour_after_its_session_was_last_seen_and_the_next_wri
         t.thread("ana", &id).await["delivery"][1]["claimed_by"],
         json!({ "label": "laptop", "context": "pagos-api" })
     );
-    // An hour after pagos was last seen its claim has lapsed, and counts as unclaimed
+    // 15 minutes after pagos was last seen its claim has lapsed, and counts as unclaimed
     // everywhere: the thread shows in Bob's other sessions, nobody holds it.
     t.app.clock.advance(1);
     let v = front.inbox().await;
@@ -2472,6 +2475,26 @@ async fn a_claim_lapses_an_hour_after_its_session_was_last_seen_and_the_next_wri
     t.ok("ana", json!({ "thread": id, "text": "ok" })).await;
     assert!(thread_ids(&pagos.inbox().await).is_empty());
     assert_eq!(thread_ids(&front.inbox().await), vec![id]);
+}
+
+#[tokio::test]
+async fn a_session_that_wrote_in_its_own_question_and_exited_holds_it_only_15_minutes() {
+    let t = team(&["ana", "oscar"]);
+    let a = t.agent("oscar", "term-aaaa", "relevo");
+    let id = a.ok(json!({ "to": ["ana"], "text": "q" })).await;
+    // A follow-up is a note in an existing thread: it claims.
+    let (_, v) = a.send(json!({ "thread": id, "text": "also" })).await;
+    assert_eq!(v["claimed"], "this-session");
+    // A exits. Ana answers; Oscar's next session does not see it while the claim lives...
+    t.ok("ana", json!({ "thread": id, "text": "answer" })).await;
+    let b = t.agent("oscar", "term-bbbb", "relevo");
+    t.app.clock.advance(LAPSE - 1);
+    assert!(thread_ids(&b.inbox().await).is_empty());
+    // ...and does 15 minutes after A was last seen.
+    t.app.clock.advance(1);
+    let v = b.inbox().await;
+    assert_eq!(new_texts(&v, &id), Some(vec!["answer".to_string()]), "{v}");
+    assert_eq!(v["threads"][0]["claimed"], Value::Null);
 }
 
 /// The ids of the threads in `who`'s inbox, as the default session of the token `secret`.
@@ -2686,17 +2709,17 @@ async fn session_inboxes_hold_order_and_more_over_hundreds_of_routed_threads() {
             delivered: [0; SESSIONS.len()],
         });
     }
-    // When each of bob's sessions was last seen, in seconds from the start: a claim lapses an
-    // hour after its session was, which the next request (anyone's) notices.
+    // When each of bob's sessions was last seen, in seconds from the start: a claim lapses 15
+    // minutes after its session was, which the next request (anyone's) notices.
     let mut now = 0;
     let mut seen = [0; SESSIONS.len()];
     for step in 0..400 {
         // Now and then a pause long enough for the claims of some sessions to lapse.
-        let pause = if next(25) == 0 { 1800 } else { 10 };
+        let pause = if next(25) == 0 { LAPSE / 2 } else { 10 };
         t.app.clock.advance(pause);
         now += pause;
         for th in model.iter_mut() {
-            if th.claimed.is_some_and(|c| now - seen[c] >= 3600) {
+            if th.claimed.is_some_and(|c| now - seen[c] >= LAPSE) {
                 th.claimed = None;
             }
         }
@@ -2966,7 +2989,7 @@ async fn a_claim_lapsing_wakes_a_waiting_inbox_when_it_lapses() {
     let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
     pagos.inbox().await;
     pagos.ok(json!({ "thread": id, "text": "mine" })).await;
-    t.app.clock.advance(3599);
+    t.app.clock.advance(LAPSE - 1);
     let started = std::time::Instant::now();
     let waiter = tokio::spawn({
         let front = front.clone();
@@ -3004,7 +3027,7 @@ async fn a_lapse_any_request_notices_wakes_waiting_inboxes() {
     until_waiting(&t.app, 1).await;
     // The clock jumps past the lapse; the next request, anyone's, ends the claim and wakes Bob's
     // waiting requests.
-    t.app.clock.advance(3600);
+    t.app.clock.advance(LAPSE);
     t.inbox("ana").await;
     let v = waiter.await.unwrap();
     assert!(started.elapsed().as_secs() < 10);
