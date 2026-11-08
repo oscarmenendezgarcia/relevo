@@ -99,14 +99,17 @@ _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
         relevo_send,
         "Open a Relevo thread or write in one. Use `to` (handles such as \"ana\", \"ana/pagos-api\", "
         "\"ana/pagos-api@feat/refunds\", or [\"@team\"] for a question to everyone) to open a new thread, "
-        "or `thread` to write in an existing one. Before opening one, look at your inbox (relevo_inbox: "
-        "an answer may already be waiting) and at the team's `about` lines to choose whom to ask; "
-        "`@team` only when you do not know who knows. If you can answer at once, just answer: no "
-        "\"On it.\" first. Send \"On it.\" only when the note needs work before you can answer, and "
-        "never to a team question. Says who holds the thread.\n\n" + client.TOOL_RULES,
+        "or `thread` to write in an existing one. If your person names whom to ask (a teammate, or the "
+        "whole team: `@team`), send it there. Otherwise, before opening one, look at your inbox "
+        "(relevo_inbox: an answer may already be waiting) and use the team's `about` lines to choose "
+        "whom to ask; `@team` only when you do not know who knows. If you can answer at once, just "
+        "answer: no \"On it.\" first. Send \"On it.\" only when the note needs work before you can "
+        "answer, and never to a team question; answer a team question only from your own work or your "
+        "person's files. Says who holds the thread.\n\n" + client.TOOL_RULES,
         {
             "to": {"type": "array", "items": {"type": "string"},
-                   "description": "Addresses for a new thread, or [\"@team\"]. Not with `thread`."},
+                   "description": "Addresses for a new thread, or [\"@team\"] (when your person asks the "
+                                  "whole team, or you do not know who knows). Not with `thread`."},
             "thread": {"type": "string", "description": "Thread id (r_…) to write in. Not with `to`."},
             "text": {"type": "string", "description": "The note (Markdown). Optional only when closing."},
             "close": {"type": "boolean", "description": "Close the thread after writing."},
