@@ -245,21 +245,25 @@ fn page_sqls(contextual: bool, all: bool) -> Vec<String> {
 }
 
 /// How many threads the session's inbox holds: the person's flagged threads it sees, plus those
-/// new only for the session. Counts index entries only.
+/// new only for the session. The routes do not overlap, so their counts add up; each counts the
+/// entries of one index range, reading nothing else.
 fn count_sql(contextual: bool, all: bool) -> String {
-    let sees = match (all, contextual) {
-        (true, _) => "1",
-        (false, false) => "(x.claimed_by = ?2 OR x.claimed_by IS NULL)",
-        (false, true) => {
-            "(x.claimed_by = ?2 OR (x.claimed_by IS NULL AND (x.context IS NULL OR x.context = ?3)))"
-        }
-    };
-    format!(
-        "SELECT (SELECT count(*) FROM participants x
-                 WHERE x.person_id = ?1 AND x.inbox = 1 AND {sees})
-              + (SELECT count(*) FROM session_threads x
-                 WHERE x.session_id = ?2 AND x.has_new = 1 AND x.person_inbox = 0 AND {sees})"
-    )
+    let counts: Vec<String> = routes(contextual, all)
+        .into_iter()
+        .flat_map(|(person_index, _, route)| {
+            [
+                format!(
+                    "(SELECT count(*) FROM participants x INDEXED BY {person_index}
+                      WHERE x.person_id = ?1 AND x.inbox = 1 AND {route})"
+                ),
+                format!(
+                    "(SELECT count(*) FROM session_threads x INDEXED BY session_count
+                      WHERE x.session_id = ?2 AND x.has_new = 1 AND x.person_inbox = 0 AND {route})"
+                ),
+            ]
+        })
+        .collect();
+    format!("SELECT {}", counts.join(" + "))
 }
 
 /// Runs one of the inbox queries with the parameters it uses: `?1` person, `?2` session,
@@ -1088,19 +1092,24 @@ mod tests {
         }
     }
 
-    /// `more` counts index entries of flagged threads only, never every thread of the person.
+    /// `more` is a count, so it reads every entry it counts; but only those, and only index
+    /// entries: never a table row, nor a flagged thread the session does not see (one claimed
+    /// by another session, or addressed to another context).
     #[test]
-    fn inbox_count_reads_only_flagged_index_entries() {
+    fn inbox_count_reads_only_the_index_entries_it_counts() {
         for contextual in [false, true] {
             for all in [false, true] {
                 let plan = plan(&count_sql(contextual, all));
-                for step in plan.iter().filter(|s| s.contains(" x ")) {
+                let steps: Vec<&String> = plan.iter().filter(|s| s.contains(" x ")).collect();
+                assert!(!steps.is_empty(), "{plan:#?}");
+                for step in steps {
                     assert!(
-                        step.contains("USING INDEX participants_inbox")
-                            || step.contains("USING COVERING INDEX participants_inbox")
-                            || step.contains("INDEX session_new"),
+                        step.starts_with("SEARCH x USING COVERING INDEX"),
                         "{plan:#?}"
                     );
+                    if !all {
+                        assert!(step.contains("_id=? AND claimed_by"), "{plan:#?}");
+                    }
                 }
                 assert!(!plan.iter().any(|s| s.contains("TEMP B-TREE")), "{plan:#?}");
             }

@@ -112,6 +112,9 @@ CREATE INDEX IF NOT EXISTS session_new_claim
     ON session_threads(session_id, claimed_by, waiting, last_seq) WHERE has_new = 1;
 CREATE INDEX IF NOT EXISTS session_new_context
     ON session_threads(session_id, claimed_by, context, waiting, last_seq) WHERE has_new = 1;
+-- For `more`: the threads new only for the session, by route (see `api::count_sql`).
+CREATE INDEX IF NOT EXISTS session_count
+    ON session_threads(session_id, claimed_by, context) WHERE has_new = 1 AND person_inbox = 0;
 CREATE TABLE IF NOT EXISTS notes (
     seq        INTEGER PRIMARY KEY AUTOINCREMENT,
     id         TEXT NOT NULL UNIQUE,
