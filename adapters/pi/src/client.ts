@@ -29,7 +29,8 @@ export interface Delivery {
   note: string | null;
   delivered_at: string | null;
   by: SessionRef | null;
-  claimed_by: SessionRef | null;
+  /** `since`: when that session claimed the thread (servers before it leave it out). */
+  claimed_by: (SessionRef & { since?: string }) | null;
   seen_by: number;
 }
 

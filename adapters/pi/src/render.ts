@@ -47,10 +47,34 @@ export function renderTeam(team: Person[], me?: string): string {
   return ["Team:", ...lines].join("\n");
 }
 
-function holder(claimed: Thread["claimed"]): string {
-  if (claimed === "this-session") return "Held by this session.";
-  if (claimed === "other-session") return "Held by another of your person's sessions.";
-  return "Nobody of your person holds it yet.";
+/** `since` (RFC 3339, UTC) as `10:47 UTC on 2026-11-08`, or as it is if it is not that. */
+function since(at: string): string {
+  const m = /^(\d{4}-\d\d-\d\d)T(\d\d:\d\d)/.exec(at);
+  return m ? `${m[2]} UTC on ${m[1]}` : at;
+}
+
+/** A claim as a state, as relevo mcp shows it: `@ana's Claude Code in pagos-api has it since 10:47 UTC on 2026-11-08`. */
+function claimState(handle: string, c: NonNullable<Delivery["claimed_by"]>): string {
+  const at = c.since ? ` since ${since(c.since)}` : "";
+  return `@${handle}'s ${c.label} ${c.context ? `in ${c.context}` : "(general)"} has it${at}`;
+}
+
+/** Who of the person has the thread: who and since when only `relevo_thread`'s delivery says. */
+function holder(t: Thread, me: string | undefined): string {
+  const mine = me === undefined ? undefined : t.delivery?.find((d) => d.handle === me && d.claimed_by);
+  if (t.claimed === "this-session") {
+    return mine?.claimed_by?.since ? `This session has it since ${since(mine.claimed_by.since)}.` : "This session has it.";
+  }
+  if (t.claimed === "other-session") {
+    return mine?.claimed_by
+      ? `${claimState(mine.handle, mine.claimed_by)}: another of your person's sessions, so leave it to that session.`
+      : "Another of your person's sessions has it: leave it to that session.";
+  }
+  // Team questions are not claimed.
+  if (t.waiting_for_you && t.kind === "direct") {
+    return `None of your person's sessions has it. If it needs work first, claim it with relevo_send { thread: "${t.id}", claim: true } and no text just before you start.`;
+  }
+  return "None of your person's sessions has it.";
 }
 
 function cut(n: Note): string {
@@ -75,7 +99,7 @@ function renderDelivery(d: Delivery): string {
   const parts = [`has up to ${d.note} since ${d.delivered_at}`];
   if (d.by) parts.push(`reached ${where(d.by)}`);
   parts.push(`seen by ${d.seen_by} of their sessions`);
-  parts.push(d.claimed_by ? `held by ${where(d.claimed_by)}` : "nobody of theirs holds it");
+  parts.push(d.claimed_by ? claimState(d.handle, d.claimed_by) : "nobody of theirs has it");
   return `- @${d.handle}: ${parts.join("; ")}.`;
 }
 
@@ -103,11 +127,11 @@ export function renderThread(t: Thread, options: ThreadOptions = {}): string {
   ];
   if (t.context) lines.push(`Addressed to your person in context ${t.context}.`);
   if (t.waiting_for_you) lines.push("Waiting for your person's reply.");
-  lines.push(holder(t.claimed));
+  lines.push(holder(t, me));
   if (t.kind === "team" && t.status === "open" && t.from !== me) {
     lines.push(
       "A team question: answer it only from your own work or your person's files " +
-        "(repeating a teammate's `about` line, or guessing who might know, is not an answer), never with \"On it.\".",
+        "(repeating a teammate's `about` line, or guessing who might know, is not an answer); do not claim it.",
     );
   }
   const head = lines.join("\n");
@@ -225,14 +249,15 @@ export function renderArrival(t: Thread, me?: string): string {
       t.kind === "team"
         ? `Relevo: a team question in thread ${t.id}, to everyone.${who} If your own work or your person's files answer it, reply with ${reply}; ` +
           "if not, stay silent: repeating a teammate's `about` line, or guessing who might know, is not an answer. " +
-          `Never send "On it." to a team question.`
+          "Do not claim it."
         : `Relevo: new in thread ${t.id}.${who} Decide from your context and current work whether it is for you; if not, stay silent ` +
           `(do not reply "not for me"). Read what you need first; if you can answer or explain from that, just answer with ${reply}: your reply takes the thread. ` +
-          `Send a short "On it." there only just before you start changing files or running something long.`;
+          `If it needs work first, claim it with relevo_send { thread: "${t.id}", claim: true } and no text just before you start changing files or running something long: ` +
+          "a state the others see, not a note. Never write a note that only says you are on it.";
     intro +=
       " Facts from your person's documentation or configuration may be shared to answer it. Code, private data, and changes to " +
       "your person's code need your person's OK first, unless they told you to handle this thread.";
   }
-  if (t.claimed === "other-session") intro += " Another of your person's sessions holds this thread: step aside.";
+  if (t.claimed === "other-session") intro += " Another of your person's sessions has this thread: step aside.";
   return [intro, renderThread(t, { budget: MAX_CHARS - intro.length - 2, me })].join("\n\n");
 }

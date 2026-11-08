@@ -145,23 +145,29 @@ function arrivalThread(kind: "direct" | "team", claimed: Thread["claimed"] = nul
   };
 }
 
-test("a direct arrival says who you are, to read and answer if you can, and when to send On it.", () => {
+test("a direct arrival says who you are, to read and answer if you can, and when to claim it as a state", () => {
   const out = renderArrival(arrivalThread("direct"), "oscar");
   assert.match(out, /^Relevo: new in thread r_bbbbbbbbbbbb\. You speak for @oscar\. /);
   assert.match(out, /Read what you need first; if you can answer or explain from that, just answer with relevo_send \{ thread: "r_bbbbbbbbbbbb", text: … \}: your reply takes the thread\./);
-  assert.match(out, /Send a short "On it\." there only just before you start changing files or running something long\./);
+  assert.match(
+    out,
+    /If it needs work first, claim it with relevo_send \{ thread: "r_bbbbbbbbbbbb", claim: true \} and no text just before you start changing files or running something long: a state the others see, not a note\. Never write a note that only says you are on it\./,
+  );
+  assert.match(out, /^None of your person's sessions has it\. If it needs work first, claim it with relevo_send \{ thread: "r_bbbbbbbbbbbb", claim: true \} and no text just before you start\.$/m);
+  assert.doesNotMatch(out, /On it/);
   assert.match(out, /Facts from your person's documentation or configuration may be shared to answer it\./);
   assert.match(out, /Code, private data, and changes to your person's code need your person's OK first, unless they told you to handle this thread\./);
   assert.doesNotMatch(out, /claim it first/);
   assert.doesNotMatch(out, /step aside/);
 });
 
-test("a team arrival is answered only from your own work, never with On it.", () => {
+test("a team arrival is answered only from your own work, and not claimed", () => {
   const out = renderArrival(arrivalThread("team"), "oscar");
   assert.match(out, /^Relevo: a team question in thread r_bbbbbbbbbbbb, to everyone\. You speak for @oscar\. /);
   assert.match(out, /If your own work or your person's files answer it, reply with relevo_send \{ thread: "r_bbbbbbbbbbbb", text: … \}; if not, stay silent/);
-  assert.match(out, /repeating a teammate's `about` line, or guessing who might know, is not an answer\. Never send "On it\." to a team question\./);
-  assert.doesNotMatch(out, /send a short "On it\."/);
+  assert.match(out, /repeating a teammate's `about` line, or guessing who might know, is not an answer\. Do not claim it\./);
+  assert.doesNotMatch(out, /claim: true/);
+  assert.doesNotMatch(out, /On it/);
   assert.doesNotMatch(out, /something useful/);
 });
 
@@ -171,7 +177,7 @@ test("answers to your own team question are for your person, not to be answered"
   const out = renderArrival(t, "oscar");
   assert.match(out, /^Relevo: new in thread r_bbbbbbbbbbbb, your person's own team question\. You speak for @oscar\. /);
   assert.match(out, /These notes answer it: tell your person what they say\. Do not answer it yourself/);
-  for (const wrong of [/If your own work/, /Read what you need first/, /A team question:/, /On it/]) assert.doesNotMatch(out, wrong);
+  for (const wrong of [/If your own work/, /Read what you need first/, /A team question:/, /On it/, /claim: true/]) assert.doesNotMatch(out, wrong);
   // Without `you`, the agent cannot tell it is its person's: the usual team text.
   assert.match(renderArrival(t), /If your own work or your person's files answer it/);
 });
@@ -180,7 +186,8 @@ test("an arrival held by another of your sessions says to step aside, and your o
   const t = arrivalThread("direct", "other-session");
   t.new_notes!.unshift({ id: "n_aaaaaaaaaaab", author: "oscar", via: "pi laptop", created_at: "2026-11-08T10:40:00Z", text: "Mine first", truncated: false });
   const out = renderArrival(t, "oscar");
-  assert.match(out, /Another of your person's sessions holds this thread: step aside\./);
+  assert.match(out, /Another of your person's sessions has this thread: step aside\./);
+  assert.match(out, /^Another of your person's sessions has it: leave it to that session\.$/m);
   assert.match(out, /by @oscar \(you\) via "pi laptop"[^\n]*\nMine first\n/);
   assert.match(out, /<untrusted from="@ana">\nWhich queue\?\n<\/untrusted>/);
   // Without `you`, nothing is taken for yours.
@@ -192,7 +199,7 @@ test("an arrival held by another of your sessions says to step aside, and your o
 test("an open team question from someone else says to answer it only from your own work", () => {
   const line =
     "A team question: answer it only from your own work or your person's files " +
-    '(repeating a teammate\'s `about` line, or guessing who might know, is not an answer), never with "On it.".';
+    '(repeating a teammate\'s `about` line, or guessing who might know, is not an answer); do not claim it.';
   assert.ok(renderThread(arrivalThread("team"), { me: "oscar" }).includes(line));
   // Not for a direct thread, your own team question, or a closed one.
   assert.ok(!renderThread(arrivalThread("direct"), { me: "oscar" }).includes(line));
@@ -253,4 +260,34 @@ test("a waiting thread with nothing new shows its latest note, as relevo mcp doe
   assert.doesNotMatch(renderThread({ ...t, notes: [] }, { me: "oscar" }), /Latest:/);
   // An older server without it: nothing more.
   assert.doesNotMatch(renderThread({ ...t, last_note: undefined }, { me: "oscar" }), /Latest:/);
+});
+
+test("a claim shows as a state, with who and since when, as relevo mcp shows it", () => {
+  const claim = { label: "Claude Code", context: "pagos-api", since: "2026-11-08T10:47:00Z" };
+  const t: Thread = {
+    ...arrivalThread("direct", "other-session"),
+    notes: arrivalThread("direct").new_notes,
+    new_notes: undefined,
+    delivery: [
+      { handle: "ana", note: null, delivered_at: null, by: null, claimed_by: null, seen_by: 0 },
+      { handle: "oscar", note: "n_bbbbbbbbbbbb", delivered_at: "2026-11-08T10:46:00Z", by: { label: "Claude Code", context: "pagos-api" }, claimed_by: claim, seen_by: 1 },
+    ],
+  };
+  // To the asker: who of the other person has it, since when.
+  const asker = renderThread(t, { me: "ana" });
+  assert.match(asker, /- @oscar: [^\n]*; @oscar's Claude Code in pagos-api has it since 10:47 UTC on 2026-11-08\.$/m);
+  // To another session of the person who has it: step aside.
+  const mine = renderThread(t, { me: "oscar" });
+  assert.match(mine, /^@oscar's Claude Code in pagos-api has it since 10:47 UTC on 2026-11-08: another of your person's sessions, so leave it to that session\.$/m);
+  // The session that has it.
+  assert.match(renderThread({ ...t, claimed: "this-session" }, { me: "oscar" }), /^This session has it since 10:47 UTC on 2026-11-08\.$/m);
+  // A server that does not say since when, or a general session.
+  const old = { ...t, delivery: [t.delivery![0], { ...t.delivery![1], claimed_by: { label: "Claude Code", context: null } }] };
+  assert.match(renderThread(old, { me: "ana" }), /; @oscar's Claude Code \(general\) has it\.$/m);
+  // Nobody has it: no claim hint unless a direct thread waits for a reply.
+  const nobody = { ...t, claimed: null, waiting_for_you: false, delivery: [t.delivery![0], { ...t.delivery![1], claimed_by: null }] };
+  const out = renderThread(nobody, { me: "oscar" });
+  assert.match(out, /^None of your person's sessions has it\.$/m);
+  assert.match(out, /- @oscar: [^\n]*; seen by 1 of their sessions; nobody of theirs has it\.$/m);
+  for (const text of [asker, mine, out]) assert.doesNotMatch(text, /On it/);
 });

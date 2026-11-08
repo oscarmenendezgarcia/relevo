@@ -100,7 +100,11 @@ test("thread shows every note and the delivery", async () => {
   // Your own person's note is marked and not wrapped as untrusted.
   assert.match(out, /note n_\w+ by @oscar \(you\) via "pi laptop"[^\n]*\nThey back off 1, 5 and 25 minutes\.\n/);
   assert.doesNotMatch(out, /<untrusted from="@oscar">/);
-  assert.match(out, /Delivery:\n- @ana: [^\n]+\n- @oscar: has up to n_\w+ since [^;]+; reached "pi laptop" in pagos-api@main; seen by 1 of their sessions; held by "pi laptop" in pagos-api@main\./);
+  assert.match(out, /Delivery:\n- @ana: [^\n]+\n- @oscar: has up to n_\w+ since [^;]+; reached "pi laptop" in pagos-api@main; seen by 1 of their sessions; @oscar's pi laptop in pagos-api@main has it since \d\d:\d\d UTC on \d{4}-\d\d-\d\d\./);
+  assert.match(out, /^This session has it since \d\d:\d\d UTC on \d{4}-\d\d-\d\d\.$/m);
+  // To another session of the person: who has it, since when, and to leave it.
+  const other = await extension().tool("relevo_thread", { id: opened.thread }, work);
+  assert.match(other, /^@oscar's pi laptop in pagos-api@main has it since [^:\n]+:\d\d UTC on [\d-]+: another of your person's sessions, so leave it to that session\.$/m);
 });
 
 test("thread says when nothing has reached a participant", async () => {
@@ -124,7 +128,7 @@ test("a second session of the same person is told to step aside", async () => {
   assert.match(claim, /^claimed: other-session\. Another of your person's sessions already has thread r_\w+: step aside[^\n]*\(nothing was written\)\.$/);
 });
 
-test("claim marks the thread as this session's without writing a note, for the others to see", async () => {
+test("claim marks the thread as this session's without writing a note, and shows as a state", async () => {
   const ext = extension();
   const opened = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Can you fix the refund rounding?" });
   const out = await ext.tool("relevo_send", { thread: opened.thread, claim: true }, work);
@@ -134,6 +138,9 @@ test("claim marks the thread as this session's without writing a note, for the o
   assert.equal(seen.notes.length, 1);
   const shown = await ext.tool("relevo_thread", { id: opened.thread }, work);
   assert.match(shown, /Notes \(1\):/);
+  assert.match(shown, /^This session has it since \d\d:\d\d UTC on \d{4}-\d\d-\d\d\.$/m);
+  assert.match(shown, /- @oscar: [^\n]*; @oscar's pi laptop in pagos-api@main has it since \d\d:\d\d UTC on \d{4}-\d\d-\d\d\./);
+  assert.doesNotMatch(shown, /On it/);
   // Claiming goes with a thread only: opening one claims nothing.
   await assert.rejects(ext.tool("relevo_send", { to: ["ana"], text: "Hi", claim: true }, work), /Relevo BAD_REQUEST/);
 });
