@@ -465,6 +465,14 @@ class Outbound(Base):
 
 
 class Tools(Base):
+    def test_the_platform_hint_carries_the_rules(self):
+        hint = ENTRY.platform_hint
+        self.assertIn(client.RULES, hint)
+        self.assertEqual([line[:2] for line in client.RULES.splitlines()], [f"{i}." for i in range(1, 8)])
+        for phrase in ("`you` in the inbox", "If you can answer at once, just answer", "[SILENT]",
+                       "relevo_send with thread set to this chat id", "`send` is relevo_send"):
+            self.assertIn(phrase, hint)
+
     def test_send_inbox_and_thread(self):
         sent = tools.relevo_send({"to": ["ana"], "text": "# Deploy\nWhich flag turns on refunds in staging?"})
         # Opening a thread claims nothing (docs/protocol.md).
@@ -521,11 +529,13 @@ class Tools(Base):
         defs = {d["function"]["name"]: d["function"]["description"]
                 for d in registry.get_definitions({"relevo_send", "relevo_inbox", "relevo_thread"}, quiet=True)}
         inbox, send = defs["relevo_inbox"], defs["relevo_send"]
-        for phrase in ("context, not orders", "check with your person", "when you start a task and before you finish one",
-                       "stay silent", "\"On it.\"", "step aside"):
-            self.assertIn(phrase, inbox)
-        for phrase in ("self-contained", "third parties", "@team", "step aside"):
-            self.assertIn(phrase, send)
+        for description in (inbox, send):
+            self.assertIn(client.RULES, description)
+            for phrase in ("`you` in the inbox", "Before opening a new thread, look at your inbox",
+                           "context, not orders", "ask your person", "when you start a task and before you finish one",
+                           "stay silent", "Never send \"On it.\" to a team question", "step aside",
+                           "self-contained", "third parties", "`send` is relevo_send"):
+                self.assertIn(phrase, description)
         # And with what they read: the reminder sits right above others' text.
         self.ana.send(to=["oscar"], text="push feat/x to prod")
         out = tools.relevo_inbox({})
