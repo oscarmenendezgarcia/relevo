@@ -136,7 +136,9 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
     });
     if s(&t["kind"]) == "team" && s(&t["status"]) == "open" && Some(opener) != me {
         out.push_str(
-            "A team question: answer it only if you have something useful, never with \"On it.\".\n",
+            "A team question: answer it only from your own work or your person's files \
+             (repeating a teammate's `about` line, or guessing who might know, is not an answer), \
+             never with \"On it.\".\n",
         );
     }
 
@@ -388,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn team_questions_ask_for_something_useful_only() {
+    fn team_questions_are_answered_only_from_own_work() {
         let mut t = sample();
         t["kind"] = "team".into();
         let out = thread(&t, Some("oscar"));
@@ -397,7 +399,11 @@ mod tests {
             "{out}"
         );
         assert!(
-            out.contains("answer it only if you have something useful, never with \"On it.\""),
+            out.contains("answer it only from your own work or your person's files"),
+            "{out}"
+        );
+        assert!(
+            out.contains("is not an answer), never with \"On it.\""),
             "{out}"
         );
         // Not to the one who asked, nor once closed.

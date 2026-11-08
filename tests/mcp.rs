@@ -227,11 +227,14 @@ async fn tools_carry_a_conversation_between_sessions() {
     let instructions = ana1.init["instructions"].as_str().unwrap();
     for rule in [
         "1. You speak for one person: `you` in the inbox",
-        "look at your inbox (an answer may already be waiting)",
-        "3. If you can answer at once, just answer",
+        "if they name who to ask (a teammate, or the whole team), send it there",
+        "2. Before opening a new thread, look at your inbox: an answer may already be waiting",
+        "4. If you can answer at once, just answer",
         "Never send \"On it.\" to a team question",
-        "6. While answering a note, do not open new threads",
-        "7. Without push notifications",
+        "is not an answer",
+        "mark guesses as guesses",
+        "7. While answering a note, do not open new threads",
+        "8. Without push notifications",
     ] {
         assert!(instructions.contains(rule), "{rule}: {instructions}");
     }
@@ -254,6 +257,7 @@ async fn tools_carry_a_conversation_between_sessions() {
     // The description backs the rules: look first, claim only for work, no "On it." to a team.
     let about = send["description"].as_str().unwrap();
     for part in [
+        "If your person names whom to ask",
         "look at your inbox",
         "`about` lines",
         "just answer",
