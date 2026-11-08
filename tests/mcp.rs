@@ -278,7 +278,9 @@ async fn tools_carry_a_conversation_between_sessions() {
 
     let inbox = ana1.ok("inbox", json!({})).await;
     assert!(
-        inbox.contains(&format!("\"Is refunds live?\" (thread {id})")),
+        inbox.contains(&format!(
+            "### Thread {id}\nTitle: <untrusted from=\"@bob\">Is refunds live?</untrusted>\n"
+        )),
         "{inbox}"
     );
     assert!(inbox.contains("Waiting for a reply from you."), "{inbox}");
@@ -400,7 +402,7 @@ async fn channel_pushes_notes_from_others() {
     let content = event["params"]["content"].as_str().unwrap();
     assert!(content.contains("Thanks."), "{content}");
     // Only what is new: not the first note, nor ana's own reply (it reached her when she wrote).
-    assert_eq!(content.matches("<untrusted").count(), 1, "{content}");
+    assert_eq!(content.matches("\n<untrusted").count(), 1, "{content}");
     assert!(!content.contains("Yes."), "{content}");
 
     // Gone with its client, even with an inbox request waiting.
