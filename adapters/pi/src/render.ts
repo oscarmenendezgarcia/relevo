@@ -90,6 +90,9 @@ export function renderThread(t: Thread, options: ThreadOptions = {}): string {
   if (t.context) lines.push(`Addressed to your person in context ${t.context}.`);
   if (t.waiting_for_you) lines.push("Waiting for your person's reply.");
   lines.push(holder(t.claimed));
+  if (t.kind === "team" && t.status === "open" && t.from !== me) {
+    lines.push('A team question: answer it only if you have something useful, never with "On it.".');
+  }
   const head = lines.join("\n");
   const delivery = t.delivery ? ["Delivery:", ...t.delivery.map(renderDelivery)].join("\n") : null;
 

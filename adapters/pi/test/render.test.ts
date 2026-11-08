@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import type { Note, Thread } from "../src/client.ts";
-import { renderArrival } from "../src/render.ts";
+import { renderArrival, renderThread } from "../src/render.ts";
 import { loadExtension } from "./mock-pi.ts";
 import { api, startServer, type TestServer } from "./server.ts";
 
@@ -173,4 +173,13 @@ test("an arrival held by another of your sessions says to step aside, and your o
   const unknown = renderArrival(t);
   assert.doesNotMatch(unknown, /You speak for/);
   assert.match(unknown, /<untrusted from="@oscar">\nMine first\n<\/untrusted>/);
+});
+
+test("an open team question from someone else says to answer only with something useful", () => {
+  const line = 'A team question: answer it only if you have something useful, never with "On it.".';
+  assert.ok(renderThread(arrivalThread("team"), { me: "oscar" }).includes(line));
+  // Not for a direct thread, your own team question, or a closed one.
+  assert.ok(!renderThread(arrivalThread("direct"), { me: "oscar" }).includes(line));
+  assert.ok(!renderThread({ ...arrivalThread("team"), from: "oscar" }, { me: "oscar" }).includes(line));
+  assert.ok(!renderThread({ ...arrivalThread("team"), status: "closed" }, { me: "oscar" }).includes(line));
 });
