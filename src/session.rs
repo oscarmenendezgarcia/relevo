@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use crate::App;
 use crate::auth::Caller;
-use crate::db::{SESSION_LIFETIME_SECS, forget_sessions};
+use crate::db::{CLAIM_LAPSE_SECS, SESSION_LIFETIME_SECS, forget_sessions, release_claims};
 use crate::error::ApiError;
 
 /// Sessions one token keeps. A client that picks a new `Relevo-Session` for every request must
@@ -54,8 +54,9 @@ fn check_token(conn: &Connection, caller: &Caller) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// Records that the caller's session was seen now and returns it. First forgets sessions not
-/// seen for 7 days, then those of the token beyond `MAX_SESSIONS_PER_TOKEN`.
+/// Records that the caller's session was seen now and returns it. First ends the claims of
+/// sessions not seen for an hour (this one's included: they lapsed before it came back), forgets
+/// sessions not seen for 7 days, then those of the token beyond `MAX_SESSIONS_PER_TOKEN`.
 ///
 /// With `arrived`, the request has just arrived and records the context it sent (the latest one
 /// wins). Otherwise it is a waiting request answering, whose context may be older than one the
@@ -68,7 +69,8 @@ pub fn touch(
     arrived: bool,
 ) -> Result<Session, ApiError> {
     check_token(conn, caller)?;
-    forget(conn, app, now)?;
+    lapse(conn, app, now)?;
+    forget(conn, now)?;
     let (id, context): (i64, Option<String>) = conn.query_row(
         "INSERT INTO sessions (token_id, client_id, person_id, context, last_seen)
          VALUES (?1, ?2, ?3, ?4, ?5)
@@ -130,17 +132,65 @@ pub fn find(conn: &Connection, caller: &Caller) -> Result<Option<Session>, ApiEr
         .optional()?)
 }
 
-/// Forgets every session not seen for 7 days, and its claims: the threads it claimed go back to
-/// every session of the person that sees them, so those sessions' waiting requests look again.
-fn forget(conn: &Connection, app: &App, now: i64) -> Result<(), ApiError> {
-    let expired: Vec<(i64, i64)> = conn
-        .prepare("SELECT id, person_id FROM sessions WHERE last_seen <= ?1")?
-        .query_map([now - SESSION_LIFETIME_SECS], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })?
+/// The sessions whose claims have lapsed (`?1`: an hour ago), read from an index that holds only
+/// sessions that may hold claims, so a request that finds none reads one index entry at most.
+const LAPSED_SQL: &str = "SELECT id, person_id FROM sessions INDEXED BY sessions_claiming
+                          WHERE claims = 1 AND last_seen <= ?1";
+
+/// Ends the claims of every session not seen for an hour: the threads it claimed go back to every
+/// session of the person that sees them, so those sessions' waiting requests look again. Every
+/// request runs this before it reads or writes a claim, so a lapsed claim is never seen as held.
+/// Each session's claims lapse once: the index holds only sessions that may still hold some.
+pub fn lapse(conn: &Connection, app: &App, now: i64) -> Result<(), ApiError> {
+    let lapsed: Vec<(i64, i64)> = conn
+        .prepare_cached(LAPSED_SQL)?
+        .query_map([now - CLAIM_LAPSE_SECS], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
-    app.announce(expired.iter().map(|(_, person)| *person));
-    let ids: Vec<i64> = expired.into_iter().map(|(id, _)| id).collect();
-    forget_sessions(conn, &ids)?;
+    app.announce(lapsed.iter().map(|(_, person)| *person));
+    for (id, _) in lapsed {
+        release_claims(conn, id)?;
+    }
     Ok(())
+}
+
+/// When the next claim of the person's sessions lapses, if any of them holds one.
+pub fn next_lapse(conn: &Connection, person: i64) -> Result<Option<i64>, ApiError> {
+    Ok(conn
+        .prepare_cached(
+            "SELECT min(last_seen) + ?2 FROM sessions WHERE person_id = ?1 AND claims = 1",
+        )?
+        .query_row(params![person, CLAIM_LAPSE_SECS], |r| r.get(0))?)
+}
+
+/// Forgets every session not seen for 7 days. Their claims lapsed long before.
+fn forget(conn: &Connection, now: i64) -> Result<(), ApiError> {
+    let expired: Vec<i64> = conn
+        .prepare("SELECT id FROM sessions WHERE last_seen <= ?1")?
+        .query_map([now - SESSION_LIFETIME_SECS], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    forget_sessions(conn, &expired)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LAPSED_SQL;
+
+    /// Every request looks for lapsed claims, so that must cost nothing however many sessions,
+    /// lapsed or not, the server keeps: a range of the index of sessions that may hold claims.
+    #[test]
+    fn looking_for_lapsed_claims_reads_one_index_range() {
+        let conn = crate::db::open(":memory:").unwrap();
+        let plan: Vec<String> = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {LAPSED_SQL}"))
+            .unwrap()
+            .query_map([0], |r| r.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            plan,
+            vec!["SEARCH sessions USING INDEX sessions_claiming (last_seen<?)"]
+        );
+    }
 }

@@ -35,7 +35,9 @@ CREATE TABLE IF NOT EXISTS threads (
 );
 -- A session is one running agent of a person, named by the `Relevo-Session` header under one
 -- token (`client_id` is '' for the token's default session). `context` is the latest
--- `Relevo-Context` (NULL: general). Sessions not seen for 7 days are forgotten.
+-- `Relevo-Context` (NULL: general). `claims` is 1 while the session may hold claims: from its
+-- first claim until they lapse, an hour after it was last seen (see `session::lapse`). Sessions
+-- not seen for 7 days are forgotten.
 CREATE TABLE IF NOT EXISTS sessions (
     id         INTEGER PRIMARY KEY,
     token_id   TEXT NOT NULL REFERENCES tokens(id),
@@ -43,10 +45,12 @@ CREATE TABLE IF NOT EXISTS sessions (
     person_id  INTEGER NOT NULL REFERENCES people(id),
     context    TEXT,
     last_seen  INTEGER NOT NULL,
+    claims     INTEGER NOT NULL DEFAULT 0,
     UNIQUE (token_id, client_id)
 );
 CREATE INDEX IF NOT EXISTS sessions_by_person ON sessions(person_id, last_seen);
 CREATE INDEX IF NOT EXISTS sessions_by_last_seen ON sessions(last_seen);
+CREATE INDEX IF NOT EXISTS sessions_claiming ON sessions(last_seen) WHERE claims = 1;
 CREATE INDEX IF NOT EXISTS threads_by_opener ON threads(opener_id, kind, created_at);
 -- One row per participant of a thread; rows are inserted in participant order, which rowid keeps.
 -- `context` is the context the thread was addressed to for this person; `claimed_by` the session
@@ -148,6 +152,9 @@ pub const RESERVED_HANDLES: [&str; 2] = ["team", "equipo"];
 
 /// A session not seen for this long is forgotten, and so are its claims.
 pub const SESSION_LIFETIME_SECS: i64 = 7 * 24 * 3600;
+
+/// The claims of a session not seen for this long lapse.
+pub const CLAIM_LAPSE_SECS: i64 = 3600;
 
 /// Opens (or creates) the database and applies the schema. `":memory:"` works for tests.
 pub fn open(path: &str) -> Result<Connection> {
@@ -402,18 +409,23 @@ fn select_ids(conn: &Connection, sql: &str, param: impl rusqlite::ToSql) -> Resu
 /// their person that sees them. Callers that can, wake those sessions' waiting requests.
 pub fn forget_sessions(conn: &Connection, ids: &[i64]) -> rusqlite::Result<()> {
     for id in ids {
-        conn.execute(
-            "UPDATE participants SET claimed_by = NULL, claimed_context = NULL
-             WHERE claimed_by = ?1",
-            [id],
-        )?;
-        conn.execute(
-            "UPDATE session_threads SET claimed_by = NULL WHERE claimed_by = ?1",
-            [id],
-        )?;
+        release_claims(conn, *id)?;
         conn.execute("DELETE FROM session_threads WHERE session_id = ?1", [id])?;
         conn.execute("DELETE FROM sessions WHERE id = ?1", [id])?;
     }
+    Ok(())
+}
+
+/// Ends every claim of the session: those threads count as unclaimed for its person.
+pub fn release_claims(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.prepare_cached(
+        "UPDATE participants SET claimed_by = NULL, claimed_context = NULL WHERE claimed_by = ?1",
+    )?
+    .execute([id])?;
+    conn.prepare_cached("UPDATE session_threads SET claimed_by = NULL WHERE claimed_by = ?1")?
+        .execute([id])?;
+    conn.prepare_cached("UPDATE sessions SET claims = 0 WHERE id = ?1")?
+        .execute([id])?;
     Ok(())
 }
 

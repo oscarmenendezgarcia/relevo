@@ -20,7 +20,7 @@ use crate::db::{
     CONTEXT_FORMAT, RESERVED_HANDLES, context_repo, random_id, rfc3339, valid_context,
 };
 use crate::error::ApiError;
-use crate::session::{Session, SessionOut, find, touch};
+use crate::session::{Session, SessionOut, find, lapse, next_lapse, touch};
 use crate::{App, MAX_WAITS_PER_TOKEN};
 
 const MAX_TEXT: usize = 64 * 1024;
@@ -621,13 +621,19 @@ async fn inbox(
         let mut first = true;
         loop {
             news.borrow_and_update();
-            if anything_new(&app, &caller, all, first)? {
+            let look = look(&app, &caller, all, first)?;
+            if look.new {
                 break;
             }
             first = false;
-            // The database lock is not held here: `anything_new` let it go.
-            match tokio::time::timeout_at(deadline, news.changed()).await {
+            // A claim lapsing may give this session a thread: look again then too.
+            let wake = look.lapse_in.map_or(deadline, |secs| {
+                deadline.min(tokio::time::Instant::now() + Duration::from_secs(secs))
+            });
+            // The database lock is not held here: `look` let it go.
+            match tokio::time::timeout_at(wake, news.changed()).await {
                 Ok(Ok(())) => continue,
+                Err(_) if wake < deadline => continue,
                 _ => break,
             }
         }
@@ -637,22 +643,38 @@ async fn inbox(
     Ok(Json(answer_inbox(&app, &caller, all, wait == 0)?))
 }
 
+/// What a waiting `inbox` request found when it looked.
+struct Look {
+    /// The session has a thread with new notes.
+    new: bool,
+    /// Seconds until the next claim of the person's sessions lapses, if one does.
+    lapse_in: Option<u64>,
+}
+
 /// Whether the caller's session has a thread with new notes, without delivering anything. The
-/// `first` look records the session, with the context the request sent; later ones only read,
-/// with the session's context as it is now.
-fn anything_new(app: &App, caller: &Caller, all: bool, first: bool) -> Result<bool, ApiError> {
-    let new = |tx: &Connection, session: &Session| {
-        Ok(page(tx, session, all)?.first().is_some_and(|c| c.new))
+/// `first` look records the session, with the context the request sent; later ones do not
+/// record it, and use the session's context as it is now. Every look first ends lapsed claims.
+fn look(app: &App, caller: &Caller, all: bool, first: bool) -> Result<Look, ApiError> {
+    let look = |tx: &Connection, session: &Session, now: i64| {
+        Ok(Look {
+            new: page(tx, session, all)?.first().is_some_and(|c| c.new),
+            lapse_in: next_lapse(tx, session.person_id)?.map(|at| (at - now).max(1) as u64),
+        })
     };
     if first {
-        return as_session(app, caller, true, |tx, session, _| new(tx, session));
+        return as_session(app, caller, true, look);
     }
     let mut conn = app.db();
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let now = app.clock.now();
+    lapse(&tx, app, now)?;
     let found = match find(&tx, caller)? {
-        Some(session) => new(&tx, &session)?,
+        Some(session) => look(&tx, &session, now)?,
         // Forgotten while waiting (its token started too many others): answer, which records it.
-        None => true,
+        None => Look {
+            new: true,
+            lapse_in: None,
+        },
     };
     tx.commit()?;
     Ok(found)
@@ -884,12 +906,16 @@ fn write_as(
             }
             // Writing claims the thread for this session, unless another session of the person
             // holds it: a claim is never taken from a session that still has it.
-            tx.execute(
+            // (A lapsed claim was already ended when this request was seen.)
+            let claimed = tx.execute(
                 "UPDATE participants SET claimed_by = ?3, claimed_context = ?4
                  WHERE thread_id = ?1 AND person_id = ?2
                    AND (claimed_by IS NULL OR claimed_by = ?3)",
                 params![thread_id, caller.person_id, session.id, session.context],
             )?;
+            if claimed > 0 {
+                tx.execute("UPDATE sessions SET claims = 1 WHERE id = ?1", [session.id])?;
+            }
             Some(id)
         }
         None => None,
