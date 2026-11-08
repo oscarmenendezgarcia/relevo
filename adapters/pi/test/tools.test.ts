@@ -125,16 +125,19 @@ test("errors name the code, and an unknown person lists the team", async () => {
 
 test("send tells the agent to look at its inbox before opening a thread", () => {
   const send = extension().tools.get("relevo_send");
-  assert.match(send.description, /Before opening a new thread, look at relevo_inbox: an answer may already be waiting/);
+  assert.match(send.description, /^[^\n]*If your person names whom to ask \(a teammate, or the whole team: \["@team"\]\), send it there\. Otherwise, before opening/);
+  assert.match(send.description, /before opening a new thread, look at relevo_inbox: an answer may already be waiting/);
+  assert.match(send.description, /answer a team question only from your own work or your person's files\./);
   assert.match(send.description, /ask @team only when you do not know who knows/);
   assert.match(send.promptSnippet, /look at relevo_inbox before opening a new one/);
   assert.match(send.description, /If you can answer at once, just answer: no "On it\." first\./);
-  assert.match(send.description, /Send "On it\." only when the note needs work before you can answer, and never to a team question\./);
+  assert.match(send.description, /Send "On it\." only when the note needs work before you can answer, and never to a team question;/);
 });
 
 test("the inbox says it tells whom you speak for, and to look there before opening a thread", () => {
   const inbox = extension().tools.get("relevo_inbox");
-  assert.match(inbox.description, /whom you speak for \(`you`\)/);
+  assert.match(inbox.description, /starting with whom you speak for \(`you`\) and this session, then the team list/);
+  assert.match(inbox.description, /Without `all` it already shows everything new or waiting for this session/);
   assert.match(inbox.description, /Look here before opening a new thread: an answer may already be waiting\./);
   assert.match(inbox.promptSnippet, /whom you speak for/);
 });

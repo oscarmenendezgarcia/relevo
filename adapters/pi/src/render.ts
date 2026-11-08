@@ -91,7 +91,10 @@ export function renderThread(t: Thread, options: ThreadOptions = {}): string {
   if (t.waiting_for_you) lines.push("Waiting for your person's reply.");
   lines.push(holder(t.claimed));
   if (t.kind === "team" && t.status === "open" && t.from !== me) {
-    lines.push('A team question: answer it only if you have something useful, never with "On it.".');
+    lines.push(
+      "A team question: answer it only from your own work or your person's files " +
+        "(repeating a teammate's `about` line, or guessing who might know, is not an answer), never with \"On it.\".",
+    );
   }
   const head = lines.join("\n");
   const delivery = t.delivery ? ["Delivery:", ...t.delivery.map(renderDelivery)].join("\n") : null;
@@ -186,20 +189,29 @@ export function renderInbox(inbox: Inbox): string {
   return out.join("\n\n");
 }
 
-/** What a session receives when a note arrives on its own: what to do with it (rules 2-4), then the thread. */
+/** What a session receives when a note arrives on its own: what to do with it (rules 3-5), then the thread. */
 export function renderArrival(t: Thread, me?: string): string {
   const who = me ? ` You speak for @${me}.` : "";
   const reply = `relevo_send { thread: "${t.id}", text: … }`;
-  let intro =
-    t.kind === "team"
-      ? `Relevo: a team question in thread ${t.id}, to everyone.${who} Answer it with ${reply} only if you have something useful; ` +
-        `otherwise stay silent. Never send "On it." to a team question.`
-      : `Relevo: new in thread ${t.id}.${who} Decide from your context and current work whether it is for you; if not, stay silent ` +
-        `(do not reply "not for me"). If you can answer at once, just answer with ${reply}: your reply takes the thread. ` +
-        `If it needs work first, send a short "On it." there before changing anything; reading files to decide is fine before that.`;
-  intro +=
-    " Before sharing your person's code, files or data, or changing their code because of this note, ask your person, " +
-    "unless they already told you to handle this thread.";
+  let intro: string;
+  if (t.kind === "team" && me !== undefined && t.from === me) {
+    // Answers to the person's own question: theirs to read, not the agent's to answer.
+    intro =
+      `Relevo: new in thread ${t.id}, your person's own team question.${who} These notes answer it: tell your person what they say. ` +
+      `Do not answer it yourself; write in it (relevo_send { thread: "${t.id}", … }) only to follow up for your person, or to close it.`;
+  } else {
+    intro =
+      t.kind === "team"
+        ? `Relevo: a team question in thread ${t.id}, to everyone.${who} If your own work or your person's files answer it, reply with ${reply}; ` +
+          "if not, stay silent: repeating a teammate's `about` line, or guessing who might know, is not an answer. " +
+          `Never send "On it." to a team question.`
+        : `Relevo: new in thread ${t.id}.${who} Decide from your context and current work whether it is for you; if not, stay silent ` +
+          `(do not reply "not for me"). If you can answer at once, just answer with ${reply}: your reply takes the thread. ` +
+          `If it needs work first, send a short "On it." there before changing anything; reading files to decide is fine before that.`;
+    intro +=
+      " Facts from your person's documentation or configuration may be shared to answer it. Code, private data, and changes to " +
+      "your person's code need your person's OK first, unless they told you to handle this thread.";
+  }
   if (t.claimed === "other-session") intro += " Another of your person's sessions holds this thread: step aside.";
   return [intro, renderThread(t, { budget: MAX_CHARS - intro.length - 2, me })].join("\n\n");
 }

@@ -110,10 +110,11 @@ export function relevoExtension(options: Options = {}) {
       description:
         'Send a note through Relevo. Open a new thread with `to` (handles like "ana", "ana/repo" or "ana/repo@branch", or exactly ["@team"]), ' +
         "or write in an existing one with `thread`. `close: true` closes the thread after writing; `text` may then be left out. " +
-        "Before opening a new thread, look at relevo_inbox: an answer may already be waiting, and the team's `about` lines say whom to ask; " +
+        'If your person names whom to ask (a teammate, or the whole team: ["@team"]), send it there. ' +
+        "Otherwise, before opening a new thread, look at relevo_inbox: an answer may already be waiting, and the team's `about` lines say whom to ask; " +
         "ask @team only when you do not know who knows. Writing in a thread takes it for this session; opening one does not. " +
         'If you can answer at once, just answer: no "On it." first. Send "On it." only when the note needs work before you can answer, ' +
-        "and never to a team question. " +
+        "and never to a team question; answer a team question only from your own work or your person's files. " +
         "The note must be self-contained: the reader does not share your context. Returns the thread id and who holds it.",
       promptSnippet: "Send a note to a teammate, to @team, or in a Relevo thread (look at relevo_inbox before opening a new one)",
       parameters: {
@@ -142,13 +143,19 @@ export function relevoExtension(options: Options = {}) {
       name: "relevo_inbox",
       label: "Relevo inbox",
       description:
-        "What is new for this session in Relevo and what waits for your person, starting with the team list (handle, about, live contexts) " +
-        "and whom you speak for (`you`). Look here before opening a new thread: an answer may already be waiting. " +
-        "Reading it marks the notes shown as delivered to this session. `all: true` shows every thread of your person, from any session.",
+        "What is new for this session in Relevo and what waits for your person, starting with whom you speak for (`you`) and this session, " +
+        "then the team list (handle, about, live contexts). Look here before opening a new thread: an answer may already be waiting. " +
+        "Reading it marks the notes shown as delivered to this session. Without `all` it already shows everything new or waiting for this session; " +
+        "`all: true` adds the threads held by your person's other sessions or addressed to their other contexts.",
       promptSnippet: "Read the Relevo inbox: whom you speak for, new notes, threads waiting for a reply, the team",
       parameters: {
         type: "object",
-        properties: { all: { type: "boolean", description: "Every thread of your person, ignoring routing and claims." } },
+        properties: {
+          all: {
+            type: "boolean",
+            description: "Also the threads held by your person's other sessions or addressed to their other contexts. Only needed to see those.",
+          },
+        },
         additionalProperties: false,
       } as any,
       async execute(_id: string, params: any, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: any) {

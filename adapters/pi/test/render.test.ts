@@ -150,16 +150,30 @@ test("a direct arrival says who you are, to answer at once if you can, and when 
   assert.match(out, /^Relevo: new in thread r_bbbbbbbbbbbb\. You speak for @oscar\. /);
   assert.match(out, /If you can answer at once, just answer with relevo_send \{ thread: "r_bbbbbbbbbbbb", text: … \}: your reply takes the thread\./);
   assert.match(out, /If it needs work first, send a short "On it\." there before changing anything/);
-  assert.match(out, /ask your person, unless they already told you to handle this thread/);
+  assert.match(out, /Facts from your person's documentation or configuration may be shared to answer it\./);
+  assert.match(out, /Code, private data, and changes to your person's code need your person's OK first, unless they told you to handle this thread\./);
   assert.doesNotMatch(out, /claim it first/);
   assert.doesNotMatch(out, /step aside/);
 });
 
-test("a team arrival never asks for On it.", () => {
+test("a team arrival is answered only from your own work, never with On it.", () => {
   const out = renderArrival(arrivalThread("team"), "oscar");
   assert.match(out, /^Relevo: a team question in thread r_bbbbbbbbbbbb, to everyone\. You speak for @oscar\. /);
-  assert.match(out, /only if you have something useful; otherwise stay silent\. Never send "On it\." to a team question\./);
+  assert.match(out, /If your own work or your person's files answer it, reply with relevo_send \{ thread: "r_bbbbbbbbbbbb", text: … \}; if not, stay silent/);
+  assert.match(out, /repeating a teammate's `about` line, or guessing who might know, is not an answer\. Never send "On it\." to a team question\./);
   assert.doesNotMatch(out, /send a short "On it\."/);
+  assert.doesNotMatch(out, /something useful/);
+});
+
+test("answers to your own team question are for your person, not to be answered", () => {
+  const t = { ...arrivalThread("team"), from: "oscar" };
+  t.new_notes = [{ ...t.new_notes![0], author: "ana", text: "Queue Q7." }];
+  const out = renderArrival(t, "oscar");
+  assert.match(out, /^Relevo: new in thread r_bbbbbbbbbbbb, your person's own team question\. You speak for @oscar\. /);
+  assert.match(out, /These notes answer it: tell your person what they say\. Do not answer it yourself/);
+  for (const wrong of [/If your own work/, /If you can answer at once/, /A team question:/, /On it/]) assert.doesNotMatch(out, wrong);
+  // Without `you`, the agent cannot tell it is its person's: the usual team text.
+  assert.match(renderArrival(t), /If your own work or your person's files answer it/);
 });
 
 test("an arrival held by another of your sessions says to step aside, and your own new notes are not wrapped", () => {
@@ -175,8 +189,10 @@ test("an arrival held by another of your sessions says to step aside, and your o
   assert.match(unknown, /<untrusted from="@oscar">\nMine first\n<\/untrusted>/);
 });
 
-test("an open team question from someone else says to answer only with something useful", () => {
-  const line = 'A team question: answer it only if you have something useful, never with "On it.".';
+test("an open team question from someone else says to answer it only from your own work", () => {
+  const line =
+    "A team question: answer it only from your own work or your person's files " +
+    '(repeating a teammate\'s `about` line, or guessing who might know, is not an answer), never with "On it.".';
   assert.ok(renderThread(arrivalThread("team"), { me: "oscar" }).includes(line));
   // Not for a direct thread, your own team question, or a closed one.
   assert.ok(!renderThread(arrivalThread("direct"), { me: "oscar" }).includes(line));
