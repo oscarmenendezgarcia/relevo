@@ -177,8 +177,11 @@ impl Client {
     }
 }
 
+/// A field an answer must have, and the test of its type.
+type Field<'a> = (&'a str, fn(&Value) -> bool);
+
 /// `v`, unless it is an answer that lacks one of `fields` (with the right type).
-fn shaped(v: Result<Value, Error>, fields: &[(&str, fn(&Value) -> bool)]) -> Result<Value, Error> {
+fn shaped(v: Result<Value, Error>, fields: &[Field]) -> Result<Value, Error> {
     let v = v?;
     match fields.iter().find(|(name, ok)| !ok(&v[*name])) {
         Some((name, _)) => Err(Error::BadResponse(format!("no `{name}` in the answer"))),
