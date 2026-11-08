@@ -1,6 +1,8 @@
+use std::net::SocketAddr;
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use relevo::db;
+use relevo::{App, Clock, api, db};
 
 /// Relevo: notes that your agent hands to a teammate's agent.
 #[derive(Parser)]
@@ -15,6 +17,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run the HTTP server.
+    Serve {
+        #[arg(long, env = "RELEVO_ADDR", default_value = "127.0.0.1:7878")]
+        addr: SocketAddr,
+        /// Team threads one person may open in any rolling 24 hours.
+        #[arg(long, env = "RELEVO_TEAM_QUESTIONS_PER_DAY", default_value_t = 5)]
+        team_questions_per_day: u32,
+    },
     /// Create a person (or reuse and reactivate one) and print a new token once.
     Invite {
         handle: String,
@@ -58,11 +68,31 @@ fn print_token(handle: &str, label: &str, token: &db::NewToken) {
     println!("This secret is shown once; only its hash is stored.");
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
     let conn = db::open(&cli.db)?;
     let now = db::now_unix();
     match cli.command {
+        Command::Serve {
+            addr,
+            team_questions_per_day,
+        } => {
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| "info".into()),
+                )
+                .init();
+            let app = App::new(conn, Clock::system(), team_questions_per_day);
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            tracing::info!(%addr, db = %cli.db, "relevo listening");
+            axum::serve(listener, api::router(app))
+                .with_graceful_shutdown(async {
+                    let _ = tokio::signal::ctrl_c().await;
+                })
+                .await?;
+        }
         Command::Invite {
             handle,
             name,
