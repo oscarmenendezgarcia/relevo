@@ -1793,6 +1793,54 @@ async fn forgotten_sessions_release_their_claims() {
     assert_eq!(pagos.thread(&id).await["claimed"], Value::Null);
 }
 
+/// The ids of the threads in `who`'s inbox, as the default session of the token `secret`.
+async fn inbox_of(t: &Team, secret: &str) -> Vec<String> {
+    let agent = Agent {
+        app: t.app.clone(),
+        token: secret.to_string(),
+        headers: Vec::new(),
+    };
+    thread_ids(&agent.inbox().await)
+}
+
+#[tokio::test]
+async fn a_revoked_tokens_sessions_are_forgotten_with_their_claims() {
+    let t = team(&["ana", "bob"]);
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
+    t.inbox("bob").await;
+    t.ok("bob", json!({ "thread": id, "text": "mine" })).await;
+    let laptop = db::list_tokens(&t.app.db(), Some("bob")).unwrap()[0]
+        .id
+        .clone();
+    db::revoke_token(&t.app.db(), &laptop, T0).unwrap();
+    let desktop = db::add_token(&t.app.db(), "bob", "desktop", T0).unwrap();
+    t.ok("ana", json!({ "thread": id, "text": "and?" })).await;
+    assert_eq!(inbox_of(&t, &desktop.secret).await, vec![id.clone()]);
+    assert_eq!(
+        db::list_sessions(&t.app.db(), Some("bob"), T0)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        t.thread("ana", &id).await["delivery"][1]["claimed_by"],
+        Value::Null
+    );
+}
+
+#[tokio::test]
+async fn invited_back_a_person_finds_threads_their_old_sessions_had_claimed() {
+    let t = team(&["ana", "bob"]);
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
+    let pagos = t.agent("bob", "term-pagos", "pagos-api");
+    pagos.inbox().await;
+    pagos.ok(json!({ "thread": id, "text": "mine" })).await;
+    db::deactivate(&t.app.db(), "bob", T0).unwrap();
+    let back = db::invite(&t.app.db(), "bob", "BOB", None, "desktop", T0).unwrap();
+    t.ok("ana", json!({ "thread": id, "text": "and?" })).await;
+    assert_eq!(inbox_of(&t, &back.secret).await, vec![id]);
+}
+
 /// A thread as the model sees it, for the person `bob` and his three sessions.
 struct ModelThread {
     id: String,

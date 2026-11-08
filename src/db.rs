@@ -345,13 +345,45 @@ pub fn list_tokens(conn: &Connection, handle: Option<&str>) -> Result<Vec<TokenI
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// Revokes the token and forgets its sessions, with their claims: no request can be made as
+/// them again, so they must not keep threads from the person's other sessions.
 pub fn revoke_token(conn: &Connection, id: &str, now: i64) -> Result<()> {
-    let changed = conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    let changed = tx.execute(
         "UPDATE tokens SET revoked_at = ?2 WHERE id = ?1 AND revoked_at IS NULL",
         params![id, now],
     )?;
     if changed == 0 {
         bail!("no active token with id '{id}'");
+    }
+    let sessions = select_ids(&tx, "SELECT id FROM sessions WHERE token_id = ?1", id)?;
+    forget_sessions(&tx, &sessions)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn select_ids(conn: &Connection, sql: &str, param: impl rusqlite::ToSql) -> Result<Vec<i64>> {
+    let ids = conn
+        .prepare(sql)?
+        .query_map([param], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(ids)
+}
+
+/// Forgets these sessions and their claims: the threads they claimed go back to every session of
+/// their person that sees them. Callers that can, wake those sessions' waiting requests.
+pub fn forget_sessions(conn: &Connection, ids: &[i64]) -> rusqlite::Result<()> {
+    for id in ids {
+        conn.execute(
+            "UPDATE participants SET claimed_by = NULL WHERE claimed_by = ?1",
+            [id],
+        )?;
+        conn.execute(
+            "UPDATE session_threads SET claimed_by = NULL WHERE claimed_by = ?1",
+            [id],
+        )?;
+        conn.execute("DELETE FROM session_threads WHERE session_id = ?1", [id])?;
+        conn.execute("DELETE FROM sessions WHERE id = ?1", [id])?;
     }
     Ok(())
 }
@@ -424,7 +456,8 @@ pub fn list_sessions(
 }
 
 /// Deactivated people can no longer authenticate nor receive new threads. Every token of theirs
-/// is revoked for good: `invite` brings them back with a new one. Returns how many it revoked.
+/// is revoked for good, and its sessions forgotten with their claims: `invite` brings them back
+/// with a new token, and they find their threads again. Returns how many tokens it revoked.
 pub fn deactivate(conn: &Connection, handle: &str, now: i64) -> Result<usize> {
     let id = person_id(conn, handle)?;
     let tx = conn.unchecked_transaction()?;
@@ -433,6 +466,8 @@ pub fn deactivate(conn: &Connection, handle: &str, now: i64) -> Result<usize> {
         "UPDATE tokens SET revoked_at = ?2 WHERE person_id = ?1 AND revoked_at IS NULL",
         params![id, now],
     )?;
+    let sessions = select_ids(&tx, "SELECT id FROM sessions WHERE person_id = ?1", id)?;
+    forget_sessions(&tx, &sessions)?;
     tx.commit()?;
     Ok(revoked)
 }

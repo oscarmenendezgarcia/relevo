@@ -25,7 +25,7 @@ A person may run several agents at once, each with its own context: a terminal i
 - `Relevo-Session`: an id the client picks once per running agent, `^[A-Za-z0-9_-]{8,64}$`. Sessions belong to a token: the same id under another token is another session. Without the header, the request uses the token's *default session*.
 - `Relevo-Context`: the session's context. Sent with each request; the latest value wins. Without it (or empty), the session is general. A default session is always general unless the header says otherwise. Like addresses, it may be written in any case: `Pagos-API` is `pagos-api`.
 
-The server keeps each session with its token's label, its context and when it was last seen. A session not seen for 7 days is forgotten, and so are its claims.
+The server keeps each session with its token's label, its context and when it was last seen. A session not seen for 7 days is forgotten, and so are its claims. The sessions of a revoked token (every token of a deactivated person is) are forgotten at once, with their claims: no request can be made as them again, so they must not keep threads from the person's other sessions.
 
 **Addressing.** In `to`, `ana` means Ana, any of her sessions; `ana/pagos-api` means Ana, in the context `pagos-api`. The context does not need a live session: the thread waits for one.
 
@@ -145,7 +145,7 @@ GET  /api/people          { "team": [...] }  (same list as inbox)
 GET  /health              no token; { "ok": true }
 ```
 
-A token may hold at most 10 waiting `inbox` requests at once (requests with `wait` above 0, counted from when they arrive until they answer or the client goes away); beyond that, `RATE_LIMITED`. A waiting request holds no database lock; it looks again whenever a note lands in a thread of its person, or a forgotten session releases one of their threads.
+A token may hold at most 10 waiting `inbox` requests at once (requests with `wait` above 0, counted from when they arrive until they answer or the client goes away); beyond that, `RATE_LIMITED`. A waiting request holds no database lock; it looks again whenever a note lands in a thread of its person, or a session forgotten after 7 days releases one of their threads. (A token revoked from the CLI releases its threads from another process, which wakes nobody: waiting requests find them when they next look.)
 
 Errors: `{ "error": { "code": "…", "message": "…", …extra } }` with these statuses:
 

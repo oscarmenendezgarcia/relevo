@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use crate::App;
 use crate::auth::Caller;
-use crate::db::SESSION_LIFETIME_SECS;
+use crate::db::{SESSION_LIFETIME_SECS, forget_sessions};
 use crate::error::ApiError;
 
 /// The session a request counts as.
@@ -83,17 +83,7 @@ fn forget(conn: &Connection, app: &App, now: i64) -> Result<(), ApiError> {
         })?
         .collect::<rusqlite::Result<_>>()?;
     app.announce(expired.iter().map(|(_, person)| *person));
-    for (id, _) in expired {
-        conn.execute(
-            "UPDATE participants SET claimed_by = NULL WHERE claimed_by = ?1",
-            [id],
-        )?;
-        conn.execute(
-            "UPDATE session_threads SET claimed_by = NULL WHERE claimed_by = ?1",
-            [id],
-        )?;
-        conn.execute("DELETE FROM session_threads WHERE session_id = ?1", [id])?;
-        conn.execute("DELETE FROM sessions WHERE id = ?1", [id])?;
-    }
+    let ids: Vec<i64> = expired.into_iter().map(|(id, _)| id).collect();
+    forget_sessions(conn, &ids)?;
     Ok(())
 }
