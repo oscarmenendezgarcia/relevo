@@ -8,6 +8,7 @@ pub mod config;
 pub mod context;
 pub mod db;
 pub mod error;
+pub mod render;
 pub mod session;
 
 use std::collections::HashMap;
