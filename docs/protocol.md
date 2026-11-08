@@ -38,7 +38,7 @@ Opens a thread, or writes in one.
 | `thread` | thread id | Writes in an existing thread. |
 | `text` | string | The note. Required unless only closing (`thread` + `close: true` + no `text`). |
 | `close` | bool, optional | Marks the thread closed after writing. |
-| `key` | string, 1 to 100 characters, optional | Idempotency key. A repeated `send` from the same person with the same key returns the first result and writes nothing. Only a successful `send` uses up a key; keys do not expire. |
+| `key` | string, 1 to 100 characters, optional | Idempotency key. A repeated `send` from the same person with the same key, within 24 hours of the `send` that used it, returns the first result and writes nothing. Only a successful `send` uses up a key. After 24 hours the key expires: the same key is a fresh `send`, which uses it up for another 24 hours. The server forgets expired keys. |
 
 The body is a JSON object; anything else (an array, say), or any other field, fails with `BAD_REQUEST`. Characters here and below are Unicode scalar values.
 

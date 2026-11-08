@@ -65,15 +65,18 @@ CREATE TABLE IF NOT EXISTS notes (
 );
 CREATE INDEX IF NOT EXISTS notes_by_thread ON notes(thread_id, seq);
 CREATE INDEX IF NOT EXISTS notes_by_author ON notes(author_id, created_at);
--- Idempotency keys: the first result of a send, per person and key.
+-- Idempotency keys: the first result of a send, per person and key. A key lives 24 hours from
+-- `created_at`; `send` deletes expired ones, so the table holds about a day of keyed sends.
 CREATE TABLE IF NOT EXISTS send_keys (
-    person_id INTEGER NOT NULL REFERENCES people(id),
-    key       TEXT NOT NULL,
-    thread_id TEXT NOT NULL,
-    note_id   TEXT,
-    status    TEXT NOT NULL,
+    person_id  INTEGER NOT NULL REFERENCES people(id),
+    key        TEXT NOT NULL,
+    thread_id  TEXT NOT NULL,
+    note_id    TEXT,
+    status     TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
     PRIMARY KEY (person_id, key)
 );
+CREATE INDEX IF NOT EXISTS send_keys_by_time ON send_keys(created_at);
 ";
 
 /// Handles that mean "the whole team" in `to`, so no person may take them.

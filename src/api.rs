@@ -29,6 +29,7 @@ const INBOX_THREADS: i64 = 20;
 const INBOX_TEXT_CHARS: usize = 4000;
 const THREAD_NOTES_PER_HOUR: i64 = 20;
 const PERSON_NOTES_PER_MINUTE: i64 = 60;
+const KEY_LIFETIME_SECS: i64 = 24 * 3600;
 
 pub fn router(app: Arc<App>) -> Router {
     Router::new()
@@ -415,6 +416,12 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<SendResult, Api
     // Read under the lock, so that times follow the order of `seq`.
     let now = app.clock.now();
 
+    // Keys expire 24 hours after the send that used them. Forgetting them here keeps the table
+    // small, and lets an expired key be used again as a fresh send.
+    tx.execute(
+        "DELETE FROM send_keys WHERE created_at <= ?1",
+        [now - KEY_LIFETIME_SECS],
+    )?;
     if let Some(key) = &req.key {
         let first = tx
             .query_row(
@@ -514,14 +521,15 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<SendResult, Api
     };
     if let Some(key) = &req.key {
         tx.execute(
-            "INSERT INTO send_keys (person_id, key, thread_id, note_id, status)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO send_keys (person_id, key, thread_id, note_id, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 caller.person_id,
                 key,
                 result.thread,
                 result.note,
-                result.status
+                result.status,
+                now
             ],
         )?;
     }

@@ -736,6 +736,41 @@ async fn idempotent_key_returns_the_first_result() {
 }
 
 #[tokio::test]
+async fn idempotency_key_expires_24_hours_after_its_send() {
+    let t = team(&["ana", "bob"]);
+    let body = json!({ "to": ["bob"], "text": "once", "key": "k1" });
+    let (_, first) = t.send("ana", body.clone()).await;
+    t.app.clock.advance(24 * 3600 - 1);
+    let (_, again) = t.send("ana", body.clone()).await;
+    assert_eq!(first, again);
+    t.app.clock.advance(1);
+    let (status, fresh) = t.send("ana", body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{fresh}");
+    assert_ne!(fresh["thread"], first["thread"]);
+    // The new send uses the key up again, for another 24 hours.
+    let (_, again) = t.send("ana", body).await;
+    assert_eq!(fresh, again);
+}
+
+#[tokio::test]
+async fn expired_keys_are_forgotten_on_send() {
+    let t = team(&["ana", "bob"]);
+    for key in ["a", "b"] {
+        t.ok("ana", json!({ "to": ["bob"], "text": "x", "key": key }))
+            .await;
+    }
+    t.app.clock.advance(24 * 3600);
+    t.ok("bob", json!({ "to": ["ana"], "text": "no key" }))
+        .await;
+    let keys: i64 = t
+        .app
+        .db()
+        .query_row("SELECT count(*) FROM send_keys", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(keys, 0);
+}
+
+#[tokio::test]
 async fn failed_send_does_not_use_up_the_key() {
     let t = team(&["ana", "bob"]);
     let (status, _) = t
