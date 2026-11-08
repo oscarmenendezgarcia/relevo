@@ -24,6 +24,9 @@ PLATFORM_NAME = "relevo"
 # The gateway's own busy acknowledgements (interrupting, queued, steered, saved): chat chrome that a
 # teammate reading the thread has no use for.
 _GATEWAY_ACK_PREFIXES = ("⚡", "⏳", "⏩", "\U0001f4be")
+# The gateway drops a bare silence marker before sending (reply_expected=False); should one get
+# through anyway, it is still not a note.
+_SILENCE = frozenset({"[SILENT]", "SILENT", "NO_REPLY", "NO REPLY"})
 _SEEN_LIMIT = 2048
 _ERROR_KINDS = {
     "NOT_FOUND": "not_found", "THREAD_CLOSED": "forbidden", "FORBIDDEN": "forbidden",
@@ -175,7 +178,7 @@ class RelevoAdapter(BasePlatformAdapter):
 
     async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None,
                    metadata: Optional[dict[str, Any]] = None) -> SendResult:
-        if content.startswith(_GATEWAY_ACK_PREFIXES):
+        if content.startswith(_GATEWAY_ACK_PREFIXES) or content.strip().upper() in _SILENCE:
             return SendResult(success=True)
         if not content.strip():
             return SendResult(success=False, error="empty note", error_kind="unknown")

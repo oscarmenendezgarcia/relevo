@@ -275,10 +275,34 @@ class Outbound(Base):
 
         # The gateway's own busy acknowledgements are not notes.
         self.assertTrue((await a.send(opened["thread"], "⏳ Queued for the next turn")).success)
+        # Nor is a silence marker.
+        self.assertTrue((await a.send(opened["thread"], "[SILENT]")).success)
         self.assertEqual(len(self.ana.thread(opened["thread"])["notes"]), 2)
         # Our own reply does not come back as a message.
         await asyncio.sleep(1.0)
         self.assertEqual(len(self.events), 1)
+
+    async def test_the_gateway_reply_goes_back_through_the_base_adapter(self):
+        """No captured handle_message: the base class runs the turn and sends what it returns."""
+        a = new_adapter()
+        self.adapters.append(a)
+        seen: list = []
+
+        async def agent(event):
+            seen.append(event)
+            return "[SILENT]" if "ignore it" in event.text else "Looked at it: the cron runs at 03:00 UTC."
+
+        a.set_message_handler(agent)
+        await a.connect()
+        asked = self.ana.send(to=["oscar"], text="When does the nightly cron run?")
+        other = self.ana.send(to=["oscar"], text="This one is not for you, ignore it.")
+        await self.until(lambda: len(self.ana.thread(asked["thread"])["notes"]) == 2)
+        notes = self.ana.thread(asked["thread"])["notes"]
+        self.assertEqual(notes[-1]["author"], "oscar")
+        self.assertEqual(notes[-1]["text"], "Looked at it: the cron runs at 03:00 UTC.")
+        await self.until(lambda: len(seen) == 2)
+        await asyncio.sleep(0.5)
+        self.assertEqual(len(self.ana.thread(other["thread"])["notes"]), 1)
 
     async def test_a_refused_send_is_a_failed_result(self):
         a = self.make_adapter()
