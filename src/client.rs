@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -21,6 +22,8 @@ pub struct Client {
     fixed_context: Option<String>,
     /// Where git looks for the context.
     dir: PathBuf,
+    /// The handle of the person the token acts for (`you`), once an answer has said it.
+    you: Mutex<Option<String>>,
 }
 
 #[derive(Debug)]
@@ -83,6 +86,7 @@ impl Client {
             session: crate::db::random_id("mcp_"),
             fixed_context,
             dir,
+            you: Mutex::new(None),
         })
     }
 
@@ -127,7 +131,33 @@ impl Client {
 
     pub async fn people(&self) -> Result<Value, Error> {
         let req = self.http.get(format!("{}/api/people", self.url));
-        shaped(self.call(req, TIMEOUT).await, &[("team", Value::is_array)])
+        let v = shaped(
+            self.call(req, TIMEOUT).await,
+            &[("team", Value::is_array), ("you", Value::is_string)],
+        )?;
+        self.learn_you(&v["you"]);
+        Ok(v)
+    }
+
+    fn learn_you(&self, you: &Value) {
+        if let Some(you) = you.as_str() {
+            *self.you.lock().unwrap_or_else(|e| e.into_inner()) = Some(you.to_string());
+        }
+    }
+
+    /// The handle of the person the token acts for, if an answer has said it yet.
+    pub fn known_you(&self) -> Option<String> {
+        self.you.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// The handle of the person the token acts for: from an earlier answer, or else asked of
+    /// `GET /api/people`. `None` when the server does not say.
+    pub async fn you(&self) -> Option<String> {
+        if self.known_you().is_none() {
+            // `people` keeps it.
+            self.people().await.ok()?;
+        }
+        self.known_you()
     }
 
     /// `GET /api/inbox`; `wait` in seconds, 0 for none.
@@ -145,10 +175,12 @@ impl Client {
         }
         let req = self.http.get(url);
         let v = self.call(req, TIMEOUT + Duration::from_secs(wait)).await;
-        shaped(
+        let v = shaped(
             v,
             &[("threads", Value::is_array), ("team", Value::is_array)],
-        )
+        )?;
+        self.learn_you(&v["session"]["you"]);
+        Ok(v)
     }
 
     pub async fn thread(&self, id: &str) -> Result<Value, Error> {
@@ -377,6 +409,25 @@ mod tests {
         let err = client.send(body()).await.unwrap_err().to_string();
         assert_eq!(err, "THREAD_BUSY: busy");
         assert_eq!(server.await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn who_we_are_comes_from_the_answers_and_is_kept() {
+        let people = r#"{"team":[],"you":"ana"}"#;
+        let (config, server) = answering(vec![("200 OK", people)]).await;
+        let client = Client::new(&config, Some(String::new()), std::env::temp_dir()).unwrap();
+        assert_eq!(client.known_you(), None);
+        assert_eq!(client.you().await.as_deref(), Some("ana"));
+        // Kept: no second request.
+        assert_eq!(client.you().await.as_deref(), Some("ana"));
+        assert_eq!(server.await.unwrap().len(), 1);
+
+        let inbox = r#"{"team":[],"session":{"label":"x","context":null,"you":"bob"},"threads":[],"more":0}"#;
+        let (config, server) = answering(vec![("200 OK", inbox)]).await;
+        let client = Client::new(&config, Some(String::new()), std::env::temp_dir()).unwrap();
+        client.inbox(false, 0).await.unwrap();
+        assert_eq!(client.known_you().as_deref(), Some("bob"));
+        server.await.unwrap();
     }
 
     #[test]
