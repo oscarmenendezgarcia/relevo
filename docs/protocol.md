@@ -29,7 +29,7 @@ The server keeps each session with its token's label, its context and when it wa
 
 **Addressing.** In `to`, `ana` means Ana, any of her sessions; `ana/pagos-api` means Ana, in the repository `pagos-api`, on any branch; `ana/pagos-api@feat/refunds` means Ana, on that branch only. An address is split at its first `/`. The context does not need a live session: the thread waits for one.
 
-**Claiming.** For each participant a thread is *unclaimed* or *claimed* by one of their sessions. Claims break ties; they are not how a session decides whether a note is for it. Each session that sees a note judges, from its own context and work, whether it can answer; if it cannot, it stays silent; if it can, it claims the thread with a short note ("on it") before acting.
+**Claiming.** For each participant a thread is *unclaimed* or *claimed* by one of their sessions. Claims break ties; they are not how a session decides whether a note is for it. Each session that sees a note judges, from its own context and work, whether it can answer; if it cannot, it stays silent; if it can, it answers at once, or, when the note needs work first, claims the thread with a short note ("on it") before acting. Either note claims it.
 
 - Writing a note in an existing thread claims it for the writing session when nobody of its person holds it, or when the claim has lapsed. Opening a thread claims nothing: the person who asks has nothing to take on, and a claim by the session that asked would hide the answers from the person's next session. It never takes a live claim from another session of the same person: the note is written, but the claim stays where it was. `send` says which happened (`claimed`), so the session that lost steps aside.
 - A claim lapses when the claiming session has not been seen for 15 minutes. A lapsed claim counts as unclaimed everywhere: the thread shows again in the person's other sessions, and the next session to write takes it. It is gone for good: the session that held it, seen again, holds the thread again only by writing in it while nobody else of its person does. A session is seen with each request it makes; a waiting `inbox` request, when it arrives and when it answers.
@@ -88,7 +88,7 @@ What is new for this session, and what is waiting for its person, among the thre
 
 | Param | |
 |---|---|
-| `all` | bool (`1`, `true`, `0`, `false`), optional. Show every thread of the person, ignoring routing and claims. For when the person asks "do I have anything?" from any terminal. |
+| `all` | bool (`1`, `true`, `0`, `false`), optional. Show every thread of the person, ignoring routing and claims. It only matters to see threads held by the person's other sessions or addressed to their other contexts (and resolved team threads with new notes); what is new or waiting for this session shows without it. |
 | `wait` | seconds, 0 to 60, optional (HTTP only). If nothing is new for this session, hold the request until something is or the time runs out, then answer as usual. Waiting threads alone do not count as new. This is how bridges and bots learn of a note at once. |
 
 Returns:
@@ -106,6 +106,7 @@ Returns:
       "participants": ["oscar", "ana"],
       "status": "open" | "closed",
       "waiting_for_you": true,
+      "last_note": { "id": "n_…", "author": "ana", "via": "Claude Code laptop", "created_at": "…", "text": "…", "truncated": false },
       "context": "pagos-api",
       "claimed": "this-session",
       "new_notes": [
@@ -123,6 +124,7 @@ Returns:
 - A thread's `context` is the context it was addressed to for you, or `null`. `claimed` is `null` (unclaimed), `"this-session"`, or, only with `all` (and in `thread`, which also shows any thread of the person), `"other-session"`.
 - At most 20 threads: first those with new notes (waiting ones first among them), then waiting ones with nothing new; within each group, by latest note, newest first. `more` counts the rest. So threads that are only waiting, which stay until someone replies, never keep new notes out.
 - `new_notes` holds the notes that have not reached this session, oldest first. That may include the person's own (written without reading, or by another session of theirs), for context: they never make a thread new, but they are part of what this session has not seen. A note's `text` is cut to 4,000 characters with `truncated: true`; the agent reads it whole with `thread`.
+- `last_note` is the thread's latest note, whoever wrote it and whether or not it reached this session, cut like `new_notes`. So a session sees what a waiting thread is waiting on even when another of its person's sessions already fetched the answer. Showing it delivers nothing.
 - Returning a thread here delivers its new notes to this session. Threads counted in `more` are not delivered.
 - `from` is the person who opened the thread.
 
