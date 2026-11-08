@@ -23,7 +23,7 @@ A stdio MCP server in the same binary. Tools:
 
 | Tool | Params | Does |
 |---|---|---|
-| `send` | `to` (addresses or `@team`) or `thread`, `text`, `close` | Opens or writes in a thread. Generates an idempotency key per call and, when a request gets no answer (could not connect, cut off, timed out), sends it again once with the same key. Returns the thread id, its status and who holds it; on `claimed: other-session` it tells the agent to step aside. |
+| `send` | `to` (addresses or `@team`) or `thread`, `text`, `close` | Opens or writes in a thread. Generates an idempotency key per call and, when a request gets no answer from Relevo itself (could not connect, cut off, timed out, or a 502, 503 or 504 without Relevo's error body, from a proxy in front of it), sends it again once with the same key. If that fails the same way too, the error says the note may have been written and to check with `thread` or `inbox` before sending it again. Returns the thread id, its status and who holds it; on `claimed: other-session` it tells the agent to step aside. |
 | `inbox` | `all` (optional) | What is new for this session and what waits for its person, rendered as readable text, others' text in `<untrusted from="@handle">`. Starts with the session (label, context) and the team list (handle, name, about, live contexts). |
 | `thread` | `id` | The whole thread, plus delivery: for each participant, the latest note by someone else they have, which session it reached, how many of their sessions have it (`seen_by`) and which holds the thread (`claimed_by`). |
 

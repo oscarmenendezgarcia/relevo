@@ -164,16 +164,47 @@ impl Client {
     }
 
     /// `POST /api/send` with a fresh idempotency key, sent again once with the same key when the
-    /// first try got no answer.
+    /// first try got no answer from Relevo itself (no answer at all, or a gateway error from a
+    /// proxy in front of it): the server may have written the note, and a replay is safe.
     pub async fn send(&self, mut body: serde_json::Map<String, Value>) -> Result<Value, Error> {
         body.insert("key".into(), crate::db::random_id("k_").into());
         let body = Value::Object(body);
         let post = || self.http.post(format!("{}/api/send", self.url)).json(&body);
-        let v = match self.call(post(), TIMEOUT).await {
-            Err(Error::Network(_)) => self.call(post(), TIMEOUT).await,
-            other => other,
-        };
-        shaped(v, &[("thread", Value::is_string)])
+        let mut v = self.call(post(), TIMEOUT).await;
+        if unanswered(&v) {
+            v = self.call(post(), TIMEOUT).await;
+        }
+        let maybe = "; the note may have been written: check with thread or inbox before sending \
+                     it again";
+        match v {
+            Err(Error::Network(e)) => Err(Error::Network(format!("{e}{maybe}"))),
+            Err(Error::Api {
+                status,
+                code,
+                message,
+                body,
+            }) if is_gateway(status, &code) => Err(Error::Api {
+                status,
+                code,
+                message: format!("{message}{maybe}"),
+                body,
+            }),
+            v => shaped(v, &[("thread", Value::is_string)]),
+        }
+    }
+}
+
+/// A 502, 503 or 504 without Relevo's error body: a proxy's answer, not the server's.
+fn is_gateway(status: u16, code: &str) -> bool {
+    matches!(status, 502..=504) && code == "HTTP_ERROR"
+}
+
+/// Whether `v` failed before Relevo answered.
+fn unanswered(v: &Result<Value, Error>) -> bool {
+    match v {
+        Err(Error::Network(_)) => true,
+        Err(Error::Api { status, code, .. }) => is_gateway(*status, code),
+        _ => false,
     }
 }
 
@@ -281,6 +312,71 @@ mod tests {
         let second: Value = serde_json::from_str(&second).unwrap();
         assert!(first["key"].as_str().unwrap().starts_with("k_"));
         assert_eq!(first, second);
+    }
+
+    /// A server that answers the requests it gets with `answers` in turn, one per connection,
+    /// and returns the request bodies.
+    async fn answering(
+        answers: Vec<(&'static str, &'static str)>,
+    ) -> (Config, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut bodies = vec![];
+            for (status, body) in answers {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                bodies.push(read_request(&mut sock).await);
+                let res = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                sock.write_all(res.as_bytes()).await.unwrap();
+            }
+            bodies
+        });
+        let config = Config {
+            url: format!("http://{addr}"),
+            token: "rlv_test".into(),
+        };
+        (config, server)
+    }
+
+    fn body() -> serde_json::Map<String, Value> {
+        let mut body = serde_json::Map::new();
+        body.insert("thread".into(), "r_x".into());
+        body.insert("text".into(), "hi".into());
+        body
+    }
+
+    #[tokio::test]
+    async fn send_retries_a_gateway_error_and_says_the_note_may_be_written() {
+        let ok = r#"{"thread":"r_x","note":"n_x","status":"open","claimed":"this-session"}"#;
+        let (config, server) = answering(vec![
+            ("502 Bad Gateway", "<html>bad gateway</html>"),
+            ("200 OK", ok),
+        ])
+        .await;
+        let client = Client::new(&config, Some(String::new()), std::env::temp_dir()).unwrap();
+        let out = client.send(body()).await.unwrap();
+        assert_eq!(out["note"], "n_x");
+        let bodies = server.await.unwrap();
+        assert_eq!(bodies[0], bodies[1]);
+
+        let gateway = ("504 Gateway Timeout", "<html>timeout</html>");
+        let (config, server) = answering(vec![gateway, gateway]).await;
+        let client = Client::new(&config, Some(String::new()), std::env::temp_dir()).unwrap();
+        let err = client.send(body()).await.unwrap_err().to_string();
+        assert!(err.contains("504"), "{err}");
+        assert!(err.contains("the note may have been written"), "{err}");
+        server.await.unwrap();
+
+        // Relevo's own errors are final, and say nothing of the kind.
+        let busy = r#"{"error":{"code":"THREAD_BUSY","message":"busy"}}"#;
+        let (config, server) = answering(vec![("429 Too Many Requests", busy)]).await;
+        let client = Client::new(&config, Some(String::new()), std::env::temp_dir()).unwrap();
+        let err = client.send(body()).await.unwrap_err().to_string();
+        assert_eq!(err, "THREAD_BUSY: busy");
+        assert_eq!(server.await.unwrap().len(), 1);
     }
 
     #[test]
