@@ -145,8 +145,14 @@ class RelevoAdapter(BasePlatformAdapter):
         self._titles[thread_id] = str(thread.get("title") or thread_id)
         self._me = client.learn_self(thread, notes) or self._me
         if any(n.get("truncated") for n in notes):
-            full = {n.get("id"): n for n in (await self.api.athread(self._ensure_http(), thread_id)).get("notes") or []}
-            notes = [full.get(n.get("id"), n) for n in notes]
+            try:
+                whole = await self.api.athread(self._ensure_http(), thread_id)
+            except Exception as exc:
+                # The inbox already delivered these notes: hand them over cut rather than lose them.
+                logger.warning("[relevo] could not read thread %s whole: %s", thread_id, client.describe_error(exc))
+            else:
+                full = {n.get("id"): n for n in whole.get("notes") or []}
+                notes = [full.get(n.get("id"), n) for n in notes]
         for n in notes:
             self._remember(str(n.get("id")))
         others = [n for n in notes if n.get("author") != self._me]
