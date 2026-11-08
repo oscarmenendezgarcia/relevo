@@ -234,39 +234,46 @@ def learn_self(thread: dict, notes: list) -> Optional[str]:
 
 # -- rendering -------------------------------------------------------------------------------------
 
-_TAG = re.compile(r"<(/?)(untrusted)", re.IGNORECASE)
+# Whitespace and invisible characters a model may read through: "</ untrusted>", "<\u200b/yours>".
+_GAP = r"[\s\u00ad\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]*"
+_TAG = re.compile(rf"<(?={_GAP}/?{_GAP}(?:untrusted|yours))", re.IGNORECASE)
 
 
 def _defang(text: str) -> str:
-    """Others' text may not close or open an <untrusted> block of its own."""
-    return _TAG.sub(lambda m: "&lt;" + m.group(1) + m.group(2), text or "")
+    """Others' text may not open or close an <untrusted> or <yours> block of its own."""
+    return _TAG.sub("&lt;", text or "")
 
 
 def _attr(value: Any) -> str:
     return _defang(str(value or "")).replace('"', "'").replace("\n", " ")
 
 
+def _wrap(author: Any, me: Optional[str], attrs: str, body: str, sep: str = "\n") -> str:
+    """Text written by a person: <yours> for the person this agent acts for, else <untrusted>."""
+    tag = "yours" if me and author == me else "untrusted"
+    return f'<{tag} from="@{_attr(author or "?")}" {attrs}>{sep}{body}{sep}</{tag}>'
+
+
 def render_note(note: dict, me: Optional[str]) -> str:
-    author = note.get("author") or "?"
     body = _defang(note.get("text") or "")
     if note.get("truncated"):
         body += "\n[cut at 4,000 characters: read it whole with relevo_thread]"
-    meta = (f'from="@{_attr(author)}" via="{_attr(note.get("via"))}" '
-            f'at="{_attr(note.get("created_at"))}" note="{_attr(note.get("id"))}"')
-    if me and author == me:
-        return f"<yours {meta}>\n{body}\n</yours>"
-    return f"<untrusted {meta}>\n{body}\n</untrusted>"
+    attrs = (f'via="{_attr(note.get("via"))}" at="{_attr(note.get("created_at"))}" '
+             f'note="{_attr(note.get("id"))}"')
+    return _wrap(note.get("author"), me, attrs, body)
 
 
 def _handles(names: list) -> str:
     return ", ".join(f"@{n}" for n in names) or "nobody"
 
 
-def render_thread_head(thread: dict) -> str:
+def render_thread_head(thread: dict, me: Optional[str] = None) -> str:
     kind = thread.get("kind") or "?"
-    lines = [f"Thread {thread.get('id')} · {kind} · {thread.get('status')}"
-             f" · title (from the first note): \"{_attr(thread.get('title'))}\""]
     opener = thread.get("from")
+    # The title is the first line of the opener's first note: their text, wrapped like it.
+    title = _wrap(opener, me, 'field="title"', _defang(str(thread.get("title") or "")).replace("\n", " "), sep="")
+    lines = [f"Thread {thread.get('id')} · {kind} · {thread.get('status')}",
+             f"Title (the first line of the first note): {title}"]
     if kind == "team":
         lines.append(f"A question from @{opener} to the whole team.")
     else:
@@ -291,7 +298,7 @@ def render_event(thread: dict, notes: list, me: Optional[str]) -> str:
     """The text of the inbound message the gateway hands to the agent for new notes in a thread."""
     head = (f"New in Relevo thread {thread.get('id')}. Your reply in this chat is written in the "
             "thread; answer exactly [SILENT] if it is not for you.")
-    return "\n\n".join([head, render_thread_head(thread), *(render_note(n, me) for n in notes)])
+    return "\n\n".join([head, render_thread_head(thread, me), *(render_note(n, me) for n in notes)])
 
 
 def render_team(team: list) -> str:
@@ -313,7 +320,7 @@ def render_inbox(data: dict, me: Optional[str]) -> str:
         parts.append("Nothing new and nothing waiting.")
     for thread in threads:
         notes = thread.get("new_notes") or []
-        block = [render_thread_head(thread)]
+        block = [render_thread_head(thread, me)]
         block += [render_note(n, me) for n in notes] if notes else ["(nothing new; it waits for a reply)"]
         parts.append("\n\n".join(block))
     if data.get("more"):
@@ -328,7 +335,7 @@ def _session_desc(session: Optional[dict]) -> str:
 
 
 def render_thread(data: dict, me: Optional[str]) -> str:
-    parts = [render_thread_head(data), *(render_note(n, me) for n in data.get("notes") or [])]
+    parts = [render_thread_head(data, me), *(render_note(n, me) for n in data.get("notes") or [])]
     lines = ["Delivery (latest note by someone else that reached each participant):"]
     for d in data.get("delivery") or []:
         if d.get("note"):
