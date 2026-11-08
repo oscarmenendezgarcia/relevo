@@ -207,6 +207,56 @@ async fn deactivating_revokes_every_token_and_invited_back_only_the_new_one_work
 }
 
 #[tokio::test]
+async fn deactivated_person_stays_a_participant_of_their_old_threads() {
+    let t = team(&["ana", "bob", "carl"]);
+    let direct = t
+        .ok("ana", json!({ "to": ["bob", "carl"], "text": "refunds?" }))
+        .await;
+    let asked = t
+        .ok("ana", json!({ "to": ["@team"], "text": "who?" }))
+        .await;
+    let read = t.thread("bob", &direct).await["notes"][0]["id"].clone();
+    db::deactivate(&t.app.db(), "bob", T0).unwrap();
+
+    // Old threads still list them, with what last reached them, and still accept notes.
+    let v = t.thread("ana", &direct).await;
+    assert_eq!(v["participants"], json!(["ana", "bob", "carl"]));
+    assert_eq!(v["delivery"][1]["handle"], "bob");
+    assert_eq!(v["delivery"][1]["note"], read);
+    assert_eq!(
+        t.thread("ana", &asked).await["participants"],
+        json!(["ana", "bob", "carl"])
+    );
+    t.ok("carl", json!({ "thread": direct, "text": "on it" }))
+        .await;
+    let inbox = t.inbox("ana").await;
+    assert_eq!(
+        inbox["threads"][0]["participants"],
+        json!(["ana", "bob", "carl"])
+    );
+
+    // But they get no new threads: not team ones, not direct ones.
+    let new_team = t
+        .ok("ana", json!({ "to": ["@team"], "text": "again?" }))
+        .await;
+    assert_eq!(
+        t.thread("ana", &new_team).await["participants"],
+        json!(["ana", "carl"])
+    );
+    let (_, v) = t.send("ana", json!({ "to": ["bob"], "text": "hi" })).await;
+    assert_eq!(code(&v), "UNKNOWN_PERSON");
+
+    // Invited back, they find their old threads, with what they missed as new.
+    let back = db::invite(&t.app.db(), "bob", "Bob", None, "desktop", T0).unwrap();
+    let (_, inbox) = t
+        .raw("GET", "/api/inbox", Some(&back.secret), Body::empty())
+        .await;
+    let ids = thread_ids(&inbox);
+    assert!(ids.contains(&direct), "{inbox}");
+    assert!(!ids.contains(&new_team), "{inbox}");
+}
+
+#[tokio::test]
 async fn a_second_token_acts_as_the_same_person_and_records_its_label() {
     let t = team(&["ana", "bob"]);
     let second = db::add_token(&t.app.db(), "ana", "Codex desktop", T0).unwrap();

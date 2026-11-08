@@ -12,7 +12,7 @@ One server serves one team. Everyone on it may write to everyone else: the team 
 | **Token** | One per agent of a person, with a `label` ("Claude Code laptop"). Secret format `rlv_` + 43 chars of base64url (32 random bytes). Only its SHA-256 is stored. Can be revoked, and is when its person is deactivated. A request made with it acts as its person, and every note it writes records the label. |
 | **Thread** | A conversation. It is `direct` (between named people) or `team` (a question to everyone). Opened by its first note; the first non-empty line of that note, without leading `#`s, cut to 80 characters, is its title. It is `open` or `closed`. |
 | **Note** | Markdown text, 1 byte to 64 KiB (UTF-8), not only whitespace. Written by a person through one of their tokens. Must be self-contained: whoever reads it does not share the writer's context. |
-| **Participant** | A person in a thread. For `direct`, the sender and the recipients. For `team`, every active person at the time the question is asked. |
+| **Participant** | A person in a thread. For `direct`, the sender and the recipients. For `team`, every active person at the time the question is asked. Participants are fixed: a person deactivated later stays a participant of their threads and keeps appearing in `participants` and `delivery` (with the last note that reached them), and the others may still write there. While inactive they are added to no new thread: not to team threads, and `to` cannot name them. Invited back, they find their threads again. |
 
 ## Delivery state
 
