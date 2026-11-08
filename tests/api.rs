@@ -1939,3 +1939,197 @@ async fn session_inboxes_hold_order_and_more_over_hundreds_of_routed_threads() {
         }
     }
 }
+
+// ---------- waiting inbox ----------
+
+/// Yields until `n` inbox requests are waiting.
+async fn until_waiting(app: &App, n: usize) {
+    let start = std::time::Instant::now();
+    while app.waiting() != n {
+        assert!(
+            start.elapsed().as_secs() < 5,
+            "{} waiting, not {n}",
+            app.waiting()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+}
+
+#[tokio::test]
+async fn wait_returns_as_soon_as_a_note_arrives() {
+    let t = team(&["ana", "bob"]);
+    let bob = t.agent("bob", "bridge-01", "");
+    let started = std::time::Instant::now();
+    let waiter = tokio::spawn({
+        let bob = bob.clone();
+        async move { bob.inbox_at("/api/inbox?wait=30").await }
+    });
+    until_waiting(&t.app, 1).await;
+    // The waiting request holds no database lock: everyone else goes on.
+    assert!(thread_ids(&t.inbox("ana").await).is_empty());
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "now" })).await;
+    let v = waiter.await.unwrap();
+    assert!(started.elapsed().as_secs() < 10);
+    assert_eq!(new_texts(&v, &id), Some(vec!["now".to_string()]));
+    assert_eq!(t.app.waiting(), 0);
+}
+
+#[tokio::test]
+async fn wait_answers_at_once_when_something_is_already_new() {
+    let t = team(&["ana", "bob"]);
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
+    let started = std::time::Instant::now();
+    let v = t.agent("bob", "", "").inbox_at("/api/inbox?wait=60").await;
+    assert!(started.elapsed().as_secs() < 10);
+    assert_eq!(thread_ids(&v), vec![id]);
+    for uri in ["/api/inbox?wait=0", "/api/inbox"] {
+        let started = std::time::Instant::now();
+        let v = t.agent("bob", "", "").inbox_at(uri).await;
+        assert!(started.elapsed().as_millis() < 500, "{uri}");
+        assert_eq!(v["threads"][0]["new_notes"], json!([]));
+    }
+}
+
+#[tokio::test]
+async fn wait_times_out_with_the_usual_answer_and_waiting_threads_do_not_count() {
+    let t = team(&["ana", "bob"]);
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
+    t.inbox("bob").await;
+    let started = std::time::Instant::now();
+    let v = t.agent("bob", "", "").inbox_at("/api/inbox?wait=1").await;
+    assert!(started.elapsed().as_millis() >= 1000);
+    assert_eq!(thread_ids(&v), vec![id]);
+    assert_eq!(v["threads"][0]["waiting_for_you"], true);
+    assert_eq!(v["threads"][0]["new_notes"], json!([]));
+}
+
+#[tokio::test]
+async fn a_note_this_session_does_not_see_wakes_it_but_it_keeps_waiting() {
+    let t = team(&["ana", "bob"]);
+    let front = t.agent("bob", "term-front", "frontend");
+    front.inbox().await;
+    let started = std::time::Instant::now();
+    let waiter = tokio::spawn({
+        let front = front.clone();
+        async move { front.inbox_at("/api/inbox?wait=1").await }
+    });
+    until_waiting(&t.app, 1).await;
+    // For another context: front looks again, finds nothing of its own, and waits on.
+    t.ok("ana", json!({ "to": ["bob/pagos-api"], "text": "x" }))
+        .await;
+    // Bob's own notes are never new for his sessions.
+    t.agent("bob", "term-other", "")
+        .ok(json!({ "to": ["ana"], "text": "mine" }))
+        .await;
+    let v = waiter.await.unwrap();
+    assert!(started.elapsed().as_millis() >= 1000);
+    assert!(thread_ids(&v).is_empty(), "{v}");
+}
+
+#[tokio::test]
+async fn the_eleventh_wait_of_a_token_is_rate_limited() {
+    let t = team(&["ana", "bob"]);
+    let mut waiters = Vec::new();
+    for i in 0..10 {
+        let bob = t.agent("bob", &format!("bridge-{i:02}"), "");
+        waiters.push(tokio::spawn(async move {
+            bob.inbox_at("/api/inbox?wait=30").await
+        }));
+    }
+    until_waiting(&t.app, 10).await;
+    let (status, v) = t
+        .agent("bob", "bridge-10", "")
+        .get("/api/inbox?wait=30")
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(code(&v), "RATE_LIMITED");
+    // Without waiting, the same token is served; another token may wait.
+    assert_eq!(
+        t.agent("bob", "bridge-10", "").get("/api/inbox").await.0,
+        StatusCode::OK
+    );
+    let ana = tokio::spawn({
+        let ana = t.agent("ana", "", "");
+        async move { ana.inbox_at("/api/inbox?wait=30").await }
+    });
+    until_waiting(&t.app, 11).await;
+    // One note wakes every waiting session of Bob's; Ana's own note does not wake her.
+    let id = t
+        .ok("ana", json!({ "to": ["bob"], "text": "all of you" }))
+        .await;
+    for waiter in waiters {
+        let v = waiter.await.unwrap();
+        assert_eq!(new_texts(&v, &id), Some(vec!["all of you".to_string()]));
+    }
+    until_waiting(&t.app, 1).await;
+    t.ok("bob", json!({ "thread": id, "text": "got it" })).await;
+    assert_eq!(
+        new_texts(&ana.await.unwrap(), &id),
+        Some(vec!["got it".to_string()])
+    );
+    assert_eq!(t.app.waiting(), 0);
+}
+
+#[tokio::test]
+async fn a_client_that_goes_away_frees_its_wait() {
+    let t = team(&["ana", "bob"]);
+    let waiters: Vec<_> = (0..10)
+        .map(|i| {
+            let bob = t.agent("bob", &format!("bridge-{i:02}"), "");
+            tokio::spawn(async move { bob.get("/api/inbox?wait=60").await })
+        })
+        .collect();
+    until_waiting(&t.app, 10).await;
+    for waiter in &waiters {
+        waiter.abort();
+    }
+    until_waiting(&t.app, 0).await;
+    let waiter = tokio::spawn({
+        let bob = t.agent("bob", "", "");
+        async move { bob.get("/api/inbox?wait=60").await }
+    });
+    until_waiting(&t.app, 1).await;
+    waiter.abort();
+}
+
+#[tokio::test]
+async fn bad_wait_values_are_bad_requests() {
+    let t = team(&["ana"]);
+    for wait in ["61", "-1", "1.5", "", "abc"] {
+        let (status, v) = t.get("ana", &format!("/api/inbox?wait={wait}")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{wait}");
+        assert_eq!(code(&v), "BAD_REQUEST");
+    }
+    let (status, _) = t.get("ana", "/api/inbox?wait=1&wait=1").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = t.get("ana", "/api/inbox?wait=0&all=1").await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_forgotten_session_releasing_a_thread_wakes_the_others() {
+    let t = team(&["ana", "bob"]);
+    let pagos = t.agent("bob", "term-pagos", "pagos-api");
+    let front = t.agent("bob", "term-front", "frontend");
+    front.inbox().await;
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
+    pagos.inbox().await;
+    pagos.ok(json!({ "thread": id, "text": "mine" })).await;
+    t.app.clock.advance(7 * 24 * 3600 - 10);
+    front.inbox().await;
+    let started = std::time::Instant::now();
+    let waiter = tokio::spawn({
+        let front = front.clone();
+        async move { front.inbox_at("/api/inbox?wait=30").await }
+    });
+    until_waiting(&t.app, 1).await;
+    t.app.clock.advance(10);
+    // Any request forgets pagos; front, which never got the thread, now sees it.
+    t.inbox("ana").await;
+    let v = waiter.await.unwrap();
+    assert!(started.elapsed().as_secs() < 10);
+    assert_eq!(
+        new_texts(&v, &id),
+        Some(vec!["q".to_string(), "mine".to_string()])
+    );
+}

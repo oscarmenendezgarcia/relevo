@@ -85,12 +85,8 @@ impl ApiError {
         )
     }
 
-    pub fn rate_limited() -> Self {
-        Self::new(
-            StatusCode::TOO_MANY_REQUESTS,
-            "RATE_LIMITED",
-            "at most 60 notes per minute; slow down",
-        )
+    pub fn rate_limited(message: &str) -> Self {
+        Self::new(StatusCode::TOO_MANY_REQUESTS, "RATE_LIMITED", message)
     }
 
     pub fn thread_busy() -> Self {

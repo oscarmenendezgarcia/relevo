@@ -145,7 +145,7 @@ GET  /api/people          { "team": [...] }  (same list as inbox)
 GET  /health              no token; { "ok": true }
 ```
 
-A token may hold at most 10 waiting `inbox` requests at once; beyond that, `RATE_LIMITED`. A waiting request holds no database lock.
+A token may hold at most 10 waiting `inbox` requests at once (requests with `wait` above 0, counted from when they arrive until they answer or the client goes away); beyond that, `RATE_LIMITED`. A waiting request holds no database lock; it looks again whenever a note lands in a thread of its person, or a forgotten session releases one of their threads.
 
 Errors: `{ "error": { "code": "…", "message": "…", …extra } }` with these statuses:
 

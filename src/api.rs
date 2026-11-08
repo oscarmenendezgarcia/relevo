@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::rejection::{BytesRejection, PathRejection, QueryRejection};
@@ -14,11 +15,11 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, param
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::App;
 use crate::auth::Caller;
 use crate::db::{RESERVED_HANDLES, random_id, rfc3339, valid_context};
 use crate::error::ApiError;
 use crate::session::{Session, SessionOut, touch};
+use crate::{App, MAX_WAITS_PER_TOKEN};
 
 const MAX_TEXT: usize = 64 * 1024;
 /// Room for 64 KiB of text even when every byte is JSON-escaped as `\u00XX` (6 bytes), plus the
@@ -32,6 +33,7 @@ const INBOX_TEXT_CHARS: usize = 4000;
 const THREAD_NOTES_PER_HOUR: i64 = 20;
 const PERSON_NOTES_PER_MINUTE: i64 = 60;
 const KEY_LIFETIME_SECS: i64 = 24 * 3600;
+const MAX_WAIT_SECS: u64 = 60;
 /// A person's `contexts` in the team list are those of their sessions seen this recently.
 const CONTEXT_WINDOW_SECS: i64 = 15 * 60;
 
@@ -516,12 +518,12 @@ fn delivery(conn: &Connection, thread: &str) -> Result<Vec<Delivery>, ApiError> 
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// `inbox`'s query string: `all` (`1`/`true` or `0`/`false`).
+/// `inbox`'s query string: `all` (`1`/`true` or `0`/`false`) and `wait` (0 to 60 seconds).
 fn inbox_params(
     query: Result<Query<Vec<(String, String)>>, QueryRejection>,
-) -> Result<bool, ApiError> {
+) -> Result<(bool, u64), ApiError> {
     let Query(pairs) = query.map_err(|e| ApiError::bad_request(e.body_text()))?;
-    let mut all = None;
+    let (mut all, mut wait) = (None, None);
     for (name, value) in pairs {
         match name.as_str() {
             "all" if all.is_none() => {
@@ -531,11 +533,20 @@ fn inbox_params(
                     _ => return Err(ApiError::bad_request("'all' must be 1, 0, true or false")),
                 })
             }
-            "all" => return Err(ApiError::bad_request("'all' given twice")),
+            "wait" if wait.is_none() => {
+                wait = Some(
+                    value
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|w| *w <= MAX_WAIT_SECS)
+                        .ok_or_else(|| ApiError::bad_request("'wait' must be 0 to 60 seconds"))?,
+                )
+            }
+            "all" | "wait" => return Err(ApiError::bad_request(format!("'{name}' given twice"))),
             _ => return Err(ApiError::bad_request(format!("unknown parameter '{name}'"))),
         }
     }
-    Ok(all.unwrap_or(false))
+    Ok((all.unwrap_or(false), wait.unwrap_or(0)))
 }
 
 // ---------- handlers ----------
@@ -544,7 +555,7 @@ async fn people(State(app): State<Arc<App>>, caller: Caller) -> Result<Json<Valu
     let mut conn = app.db();
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let now = app.clock.now();
-    touch(&tx, &caller, now)?;
+    touch(&tx, &app, &caller, now)?;
     let team = team(&tx, now)?;
     tx.commit()?;
     Ok(Json(json!({ "team": team })))
@@ -555,12 +566,49 @@ async fn inbox(
     caller: Caller,
     query: Result<Query<Vec<(String, String)>>, QueryRejection>,
 ) -> Result<Json<Value>, ApiError> {
-    let all = inbox_params(query)?;
+    let (all, wait) = inbox_params(query)?;
+    if wait > 0 {
+        let _slot = app.wait_slot(&caller.token_id).ok_or_else(|| {
+            ApiError::rate_limited(&format!(
+                "at most {MAX_WAITS_PER_TOKEN} waiting inbox requests per token; wait for one to answer"
+            ))
+        })?;
+        // Subscribed before the first look, so a note landing in between still wakes us.
+        let mut news = app.news(caller.person_id);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(wait);
+        loop {
+            news.borrow_and_update();
+            if anything_new(&app, &caller, all)? {
+                break;
+            }
+            // The database lock is not held here: `anything_new` let it go.
+            match tokio::time::timeout_at(deadline, news.changed()).await {
+                Ok(Ok(())) => continue,
+                _ => break,
+            }
+        }
+    }
+    Ok(Json(answer_inbox(&app, &caller, all)?))
+}
+
+/// Whether the caller's session has a thread with new notes, without delivering anything.
+fn anything_new(app: &App, caller: &Caller, all: bool) -> Result<bool, ApiError> {
+    let mut conn = app.db();
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let now = app.clock.now();
+    let session = touch(&tx, app, caller, now)?;
+    let new = page(&tx, &session, all)?.first().is_some_and(|c| c.new);
+    tx.commit()?;
+    Ok(new)
+}
+
+/// The inbox as it is now, delivering the threads it returns.
+fn answer_inbox(app: &App, caller: &Caller, all: bool) -> Result<Value, ApiError> {
     let mut conn = app.db();
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     // Read under the lock, so that times follow the order of `seq`.
     let now = app.clock.now();
-    let session = touch(&tx, &caller, now)?;
+    let session = touch(&tx, app, caller, now)?;
     let page = page(&tx, &session, all)?;
     let more = inbox_count(&tx, &session, all)?.saturating_sub(page.len());
     let mut threads = Vec::new();
@@ -587,12 +635,12 @@ async fn inbox(
         more,
         "inbox"
     );
-    Ok(Json(json!({
+    Ok(json!({
         "team": team,
         "session": session.out(),
         "threads": threads,
         "more": more,
-    })))
+    }))
 }
 
 async fn thread(
@@ -605,7 +653,7 @@ async fn thread(
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     // Read under the lock, so that times follow the order of `seq`.
     let now = app.clock.now();
-    let session = touch(&tx, &caller, now)?;
+    let session = touch(&tx, &app, &caller, now)?;
     let row = find_thread(&tx, &session, &id)?;
     deliver(&tx, &session, &row.id, row.last_seq, now)?;
     refresh(&tx, &row.id)?;
@@ -635,7 +683,8 @@ async fn send(
         Value::Object(fields) => serde_json::from_value(Value::Object(fields)).map_err(invalid)?,
         _ => return Err(ApiError::bad_request("the send body must be a JSON object")),
     };
-    let result = write(&app, &caller, req)?;
+    let (result, woken) = write(&app, &caller, req)?;
+    app.announce(woken);
     tracing::info!(
         person = %caller.handle,
         thread = %result.thread,
@@ -647,7 +696,8 @@ async fn send(
 }
 
 /// The whole of `send`, in one transaction so that idempotency and the limits cannot race.
-fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<SendResult, ApiError> {
+/// Returns the result and the people to wake: the other participants, when a note was written.
+fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<(SendResult, Vec<i64>), ApiError> {
     if let Some(key) = &req.key
         && (key.is_empty() || key.chars().count() > MAX_KEY_CHARS)
     {
@@ -679,7 +729,7 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<SendResult, Api
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     // Read under the lock, so that times follow the order of `seq`.
     let now = app.clock.now();
-    let session = touch(&tx, caller, now)?;
+    let session = touch(&tx, app, caller, now)?;
 
     // Keys expire 24 hours after the send that used them. Forgetting them here keeps the table
     // small, and lets an expired key be used again as a fresh send.
@@ -702,7 +752,7 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<SendResult, Api
             )
             .optional()?;
         if let Some(first) = first {
-            return Ok(first);
+            return Ok((first, Vec::new()));
         }
     }
 
@@ -744,7 +794,9 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<SendResult, Api
                 |r| r.get(0),
             )?;
             if recent >= PERSON_NOTES_PER_MINUTE {
-                return Err(ApiError::rate_limited());
+                return Err(ApiError::rate_limited(
+                    "at most 60 notes per minute; slow down",
+                ));
             }
             let id = random_id("n_");
             tx.execute(
@@ -806,8 +858,15 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<SendResult, Api
             ],
         )?;
     }
+    let woken: Vec<i64> = match result.note {
+        Some(_) => tx
+            .prepare("SELECT person_id FROM participants WHERE thread_id = ?1 AND person_id != ?2")?
+            .query_map(params![result.thread, caller.person_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?,
+        None => Vec::new(),
+    };
     tx.commit()?;
-    Ok(result)
+    Ok((result, woken))
 }
 
 /// Creates a `direct` or `team` thread with its participants (the writer first). Returns its id.

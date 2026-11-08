@@ -4,6 +4,7 @@
 use rusqlite::{Connection, params};
 use serde::Serialize;
 
+use crate::App;
 use crate::auth::Caller;
 use crate::db::SESSION_LIFETIME_SECS;
 use crate::error::ApiError;
@@ -35,8 +36,8 @@ impl Session {
 
 /// Records that the caller's session was seen now, with the context it sent (the latest one
 /// wins), and returns it. First forgets sessions not seen for 7 days.
-pub fn touch(conn: &Connection, caller: &Caller, now: i64) -> Result<Session, ApiError> {
-    forget(conn, now)?;
+pub fn touch(conn: &Connection, app: &App, caller: &Caller, now: i64) -> Result<Session, ApiError> {
+    forget(conn, app, now)?;
     let id = conn.query_row(
         "INSERT INTO sessions (token_id, client_id, person_id, context, last_seen)
          VALUES (?1, ?2, ?3, ?4, ?5)
@@ -61,13 +62,16 @@ pub fn touch(conn: &Connection, caller: &Caller, now: i64) -> Result<Session, Ap
 }
 
 /// Forgets every session not seen for 7 days, and its claims: the threads it claimed go back to
-/// every session of the person that sees them.
-fn forget(conn: &Connection, now: i64) -> Result<(), ApiError> {
-    let expired: Vec<i64> = conn
-        .prepare("SELECT id FROM sessions WHERE last_seen <= ?1")?
-        .query_map([now - SESSION_LIFETIME_SECS], |r| r.get(0))?
+/// every session of the person that sees them, so those sessions' waiting requests look again.
+fn forget(conn: &Connection, app: &App, now: i64) -> Result<(), ApiError> {
+    let expired: Vec<(i64, i64)> = conn
+        .prepare("SELECT id, person_id FROM sessions WHERE last_seen <= ?1")?
+        .query_map([now - SESSION_LIFETIME_SECS], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
         .collect::<rusqlite::Result<_>>()?;
-    for id in expired {
+    app.announce(expired.iter().map(|(_, person)| *person));
+    for (id, _) in expired {
         conn.execute(
             "UPDATE participants SET claimed_by = NULL WHERE claimed_by = ?1",
             [id],
