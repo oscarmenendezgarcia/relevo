@@ -371,8 +371,19 @@ async fn people_lists_every_active_person_with_about() {
         json!({ "team": [
             { "handle": "ana", "name": "ANA", "about": "ana things", "contexts": [] },
             { "handle": "bob", "name": "BOB", "about": "bob things", "contexts": [] },
-        ]})
+        ], "you": "ana" })
     );
+    // `you` is the caller's person, whichever of their tokens and sessions asks.
+    let (_, v) = t
+        .agent("bob", "term-0001", "pagos-api")
+        .get("/api/people")
+        .await;
+    assert_eq!(v["you"], "bob");
+    let codex = db::add_token(&t.app.db(), "bob", "Codex desktop", T0).unwrap();
+    let (_, v) = t
+        .raw("GET", "/api/people", Some(&codex.secret), Body::empty())
+        .await;
+    assert_eq!(v["you"], "bob");
 }
 
 // ---------- direct threads and delivery ----------
@@ -1442,7 +1453,10 @@ async fn malformed_session_headers_are_bad_requests() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(v["session"], json!({ "label": "laptop", "context": null }));
+    assert_eq!(
+        v["session"],
+        json!({ "label": "laptop", "context": null, "you": "ana" })
+    );
     // A bad token is still UNAUTHORIZED, whatever the headers say.
     let (status, _) = call(
         &t.app,
@@ -1460,19 +1474,32 @@ async fn malformed_session_headers_are_bad_requests() {
 
 #[tokio::test]
 async fn inbox_names_its_session_and_the_latest_context_wins() {
-    let t = team(&["ana"]);
+    let t = team(&["ana", "bob"]);
     let v = t.inbox("ana").await;
-    assert_eq!(v["session"], json!({ "label": "laptop", "context": null }));
+    assert_eq!(
+        v["session"],
+        json!({ "label": "laptop", "context": null, "you": "ana" })
+    );
+    // `you` names the caller's person among `team`.
+    let v = t.agent("bob", "term-0009", "frontend").inbox().await;
+    assert_eq!(v["session"]["you"], "bob");
+    assert!(
+        v["team"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["handle"] == "bob")
+    );
     let v = t.agent("ana", "term-0001", "pagos-api").inbox().await;
     assert_eq!(
         v["session"],
-        json!({ "label": "laptop", "context": "pagos-api" })
+        json!({ "label": "laptop", "context": "pagos-api", "you": "ana" })
     );
     // Contexts are lowercased and trimmed.
     let v = t.agent("ana", "term-0001", " Front.End ").inbox().await;
     assert_eq!(
         v["session"],
-        json!({ "label": "laptop", "context": "front.end" })
+        json!({ "label": "laptop", "context": "front.end", "you": "ana" })
     );
     let v = t.agent("ana", "term-0001", "").inbox().await;
     assert_eq!(v["session"]["context"], Value::Null);
@@ -1526,7 +1553,7 @@ async fn the_same_session_id_under_two_tokens_is_two_sessions() {
     let v = other.inbox().await;
     assert_eq!(
         v["session"],
-        json!({ "label": "Codex desktop", "context": "frontend" })
+        json!({ "label": "Codex desktop", "context": "frontend", "you": "ana" })
     );
     let sessions = db::list_sessions(&t.app.db(), Some("ana"), T0).unwrap();
     let mut seen: Vec<(String, Option<String>)> = sessions

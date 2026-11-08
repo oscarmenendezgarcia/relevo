@@ -628,7 +628,7 @@ fn as_session<T>(
 
 async fn people(State(app): State<Arc<App>>, caller: Caller) -> Result<Json<Value>, ApiError> {
     let team = as_session(&app, &caller, true, |tx, _, now| team(tx, now))?;
-    Ok(Json(json!({ "team": team })))
+    Ok(Json(json!({ "team": team, "you": caller.handle })))
 }
 
 async fn inbox(
@@ -740,7 +740,12 @@ fn answer_inbox(app: &App, caller: &Caller, all: bool, arrived: bool) -> Result<
         );
         Ok(json!({
             "team": team,
-            "session": session.out(),
+            // `you`: which member of `team` this session speaks for.
+            "session": {
+                "label": session.label,
+                "context": session.context,
+                "you": caller.handle,
+            },
             "threads": threads,
             "more": more,
         }))

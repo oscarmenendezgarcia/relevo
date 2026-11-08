@@ -29,15 +29,6 @@ pub struct SessionOut {
     pub context: Option<String>,
 }
 
-impl Session {
-    pub fn out(&self) -> SessionOut {
-        SessionOut {
-            label: self.label.clone(),
-            context: self.context.clone(),
-        }
-    }
-}
-
 /// The token is checked again whenever a request looks: a waiting `inbox` request looks and
 /// answers long after it was authenticated, and must not answer for a token revoked (or a person
 /// deactivated) since.
