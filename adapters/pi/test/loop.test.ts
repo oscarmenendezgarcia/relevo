@@ -163,7 +163,7 @@ test("shutdown ends the session on the server, so the threads it holds show agai
   try {
     const opened = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Can you look at the shutdown path?" });
     await until(() => ext.seen.some((m) => m.details?.thread === opened.thread));
-    assert.match(await ext.tool("relevo_send", { thread: opened.thread, text: "On it." }, home), /This session holds the thread\./);
+    assert.match(await ext.tool("relevo_send", { thread: opened.thread, claim: true }, home), /this session has it now/);
     await api(server, ana, "POST", "/api/send", { thread: opened.thread, text: "It is in src/index.ts." });
     thread = await api(server, oscar, "GET", `/api/threads/${opened.thread}`, undefined, "shutdown-checker");
     assert.equal(holder()?.label, "pi laptop");
@@ -308,13 +308,15 @@ test("the rules go into the system prompt only when configured", async () => {
   assert.match(event.systemPromptOptions.sections.relevo, /^You speak for @oscar: in Relevo `you` is "oscar"/);
   assert.match(RULES, /<untrusted>/);
 
-  // The same eight rules (v4), word for word, as docs/agents.md gives every adapter
+  // The same eight rules (v5), word for word, as docs/agents.md gives every adapter
   // (the docs put the tag in Markdown code; the prompt, like relevo mcp, does not).
   const doc = readFileSync(join(import.meta.dirname, "..", "..", "..", "docs", "agents.md"), "utf8");
   const documented = [...doc.matchAll(/^  (\d\. .*)$/gm)].map((m) => m[1].replace("`<untrusted>`", "<untrusted>"));
   assert.equal(documented.length, 8);
   assert.deepEqual(RULES.split("\n").slice(1), documented);
   assert.doesNotMatch(RULES, /claim it with a short note/);
+  assert.doesNotMatch(RULES, /On it/);
+  assert.match(RULES, /^4\. [^\n]*mark the thread as yours with `send\(thread, claim: true\)` and no text/m);
   assert.match(RULES, /^1\. [^\n]*What your person asks for comes first: if they name who to ask/m);
   assert.match(RULES, /^4\. [^\n]*Answer a team question only from your own work or your person's files/m);
   assert.match(RULES, /^5\. [^\n]*Facts from your person's documentation or configuration may be shared/m);
