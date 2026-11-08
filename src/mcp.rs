@@ -330,7 +330,7 @@ async fn push_news(
     let mut backoff = Duration::from_secs(1);
     // The latest note by someone else pushed for each thread.
     let mut known: HashMap<String, String> = HashMap::new();
-    // When the first request since the last answer that failed was sent (unix seconds).
+    // When the first of the requests that failed since the last answer was sent (unix seconds).
     let mut failed_since: Option<i64> = None;
     let push = |event: Value| {
         let peer = peer.clone();
@@ -390,11 +390,7 @@ async fn push_news(
         failed_since = None;
         // A server that answers a waiting request at once with nothing (one that ignores `wait`,
         // or a proxy in the way) must not make this loop spin: back off as after a failure.
-        if wait > 0
-            && events == 0
-            && v["more"].as_i64().unwrap_or(0) == 0
-            && started.elapsed() < MIN_EMPTY_WAIT
-        {
+        if wait > 0 && events == 0 && started.elapsed() < MIN_EMPTY_WAIT {
             eprintln!(
                 "relevo mcp: inbox answered at once with nothing; again in {}s",
                 backoff.as_secs()
