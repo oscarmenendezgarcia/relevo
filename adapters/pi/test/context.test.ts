@@ -44,6 +44,17 @@ test("a detached HEAD gives the repository alone", async () => {
   assert.equal(await detectContext(dir, noOverride), "frontend");
 });
 
+test("a tag with the same name as the branch does not change the context", async () => {
+  const dir = repo("release", "main");
+  git(dir, "commit", "-q", "--allow-empty", "-m", "first");
+  git(dir, "tag", "main");
+  git(dir, "checkout", "-q", "-b", "v1.2");
+  git(dir, "tag", "v1.2");
+  assert.equal(await detectContext(dir, noOverride), "release@v1.2");
+  git(dir, "checkout", "-q", "main");
+  assert.equal(await detectContext(dir, noOverride), "release@main");
+});
+
 test("a repository name the server would refuse leaves the session general", async () => {
   const dir = repo(".dotfiles", "main");
   assert.equal(await detectContext(dir, noOverride), null);

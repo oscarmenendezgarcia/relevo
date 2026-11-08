@@ -31,13 +31,15 @@ export function branchName(branch: string): string {
  */
 export async function detectContext(cwd: string, env: NodeJS.ProcessEnv = process.env): Promise<string | null> {
   if (env.RELEVO_CONTEXT !== undefined) return env.RELEVO_CONTEXT.trim() || null;
-  const [top, branch] = await Promise.all([
+  const [top, ref] = await Promise.all([
     git(cwd, ["rev-parse", "--show-toplevel"]),
-    git(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"]),
+    // Not --short: with a tag of the same name it prints "heads/<branch>".
+    git(cwd, ["symbolic-ref", "--quiet", "HEAD"]),
   ]);
   if (!top) return null;
   const repo = repoName(top);
   if (!REPO.test(repo)) return null;
+  const branch = ref?.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : null;
   if (!branch) return repo;
   const b = branchName(branch);
   return BRANCH.test(b) ? `${repo}@${b}` : repo;
