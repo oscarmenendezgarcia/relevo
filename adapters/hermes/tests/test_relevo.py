@@ -668,12 +668,46 @@ class Tools(Base):
             self.assertTrue(settings.token == SERVER.tokens["oscar"], "the token is not the saved one")
             self.assertIn("Team:", tools.relevo_inbox({}))
 
+            self.assertEqual(settings.unpaired, "RELEVO_TOKEN")
+            self.assertEqual(settings.source, str(saved))
+
             os.environ.pop("RELEVO_TOKEN")
             os.environ["RELEVO_URL"] = "http://127.0.0.1:9"  # another server, without its token
             settings = client.resolve_settings()
             self.assertEqual(settings.url, SERVER.url)
             self.assertTrue(settings.token == SERVER.tokens["oscar"], "the token is not the saved one")
+            self.assertEqual(settings.unpaired, "RELEVO_URL")
             self.assertIn("Team:", tools.relevo_inbox({}))
+        finally:
+            saved.unlink()
+
+    async def test_the_gateway_refuses_a_server_without_its_token(self):
+        """config.yaml names server A, the token is missing: the saved server B is not used instead."""
+        saved = client.saved_config_path()
+        saved.parent.mkdir(parents=True, exist_ok=True)
+        saved.write_text(json.dumps({"url": SERVER.url, "token": SERVER.tokens["oscar"]}))
+        try:
+            os.environ.pop("RELEVO_URL")
+            os.environ.pop("RELEVO_TOKEN")
+            config = PlatformConfig(enabled=True, extra={"url": "https://relevo-a.example.com"})
+            self.assertFalse(ENTRY.validate_config(config))
+            a = ENTRY.adapter_factory(config)
+            self.adapters.append(a)
+            self.assertEqual(a.settings.unpaired, "RELEVO_URL")
+            self.assertFalse(await a.connect())
+            self.assertTrue(a.has_fatal_error)
+            self.assertFalse(a.fatal_error_retryable)
+            self.assertIn("RELEVO_URL is set without RELEVO_TOKEN", a.fatal_error_message)
+            self.assertIsNone(a._poll_task)
+            # Both in config.yaml and env, or both saved: it connects.
+            os.environ["RELEVO_TOKEN"] = SERVER.tokens["oscar"]
+            b = self.make_adapter(url=SERVER.url)
+            self.assertEqual((b.settings.unpaired, b.settings.source), ("", client.CONFIGURED_HERE))
+            self.assertTrue(await b.connect())
+            os.environ.pop("RELEVO_TOKEN")
+            c = self.make_adapter()
+            self.assertEqual((c.settings.unpaired, c.settings.source), ("", str(saved)))
+            self.assertTrue(ENTRY.validate_config(PlatformConfig(enabled=True, extra={})))
         finally:
             saved.unlink()
 

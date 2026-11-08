@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote
+
+logger = logging.getLogger(__name__)
 
 WAIT_SECONDS = 55
 # A waiting inbox answers within `wait`; leave room for the network on top.
@@ -56,6 +59,10 @@ class Settings:
     token: str
     context: str
     session: str
+    # Where url and token came from: "env or config.yaml", or the file `relevo connect` writes.
+    source: str = ""
+    # The one of RELEVO_URL / RELEVO_TOKEN set (env or config.yaml) without the other, or "".
+    unpaired: str = ""
 
     @property
     def configured(self) -> bool:
@@ -129,21 +136,41 @@ def session_id() -> str:
     return process_session_id()
 
 
+CONFIGURED_HERE = "env or config.yaml"
+_warned_unpaired: set[str] = set()
+
+
 def resolve_settings(extra: Optional[dict] = None, *, session: Optional[str] = None) -> Settings:
     """The server and token as a pair: RELEVO_URL and RELEVO_TOKEN (profile-scoped env, or the
     platform's config.yaml extra) when both are set there, otherwise both from the file `relevo
     connect` writes. Never one from each: a token only goes to the server it came with.
-    RELEVO_CONTEXT sets the context; without it the session is general."""
+    RELEVO_CONTEXT sets the context; without it the session is general.
+
+    One set without the other is named in `unpaired` and logged once: the gateway platform
+    refuses it, and the tools fall back to the saved pair."""
     from gateway.platforms._shared import extra_or_secret
 
     url = str(extra_or_secret(extra, "url", "RELEVO_URL") or "").strip()
     token = str(extra_or_secret(extra, "token", "RELEVO_TOKEN") or "").strip()
+    unpaired = ("RELEVO_URL" if url else "RELEVO_TOKEN") if bool(url) != bool(token) else ""
+    source = CONFIGURED_HERE
     if not (url and token):
         saved = _saved_config()
         url = str(saved.get("url") or "").strip()
         token = str(saved.get("token") or "").strip()
+        source = str(saved_config_path())
+    if unpaired and unpaired not in _warned_unpaired:
+        _warned_unpaired.add(unpaired)
+        logger.warning("relevo: %s is set (env or config.yaml) without %s; the server and token come as "
+                       "a pair, so neither is used from there (the gateway platform will not start; the "
+                       "tools use %s)", unpaired, partner(unpaired), saved_config_path())
     context = str(extra_or_secret(extra, "context", "RELEVO_CONTEXT") or "").strip()
-    return Settings(url=url.rstrip("/"), token=token, context=context, session=session or session_id())
+    return Settings(url=url.rstrip("/"), token=token, context=context, session=session or session_id(),
+                    source=source, unpaired=unpaired)
+
+
+def partner(name: str) -> str:
+    return "RELEVO_TOKEN" if name == "RELEVO_URL" else "RELEVO_URL"
 
 
 _REPO = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")

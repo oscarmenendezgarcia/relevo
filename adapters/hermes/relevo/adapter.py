@@ -247,6 +247,13 @@ class RelevoAdapter(BasePlatformAdapter):
     # -- lifecycle ------------------------------------------------------------------------------
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
+        unpaired = self.settings.unpaired
+        if unpaired:
+            # Connecting with the saved pair would talk to another server than the one configured.
+            self._set_fatal_error(
+                "relevo_unpaired", f"{unpaired} is set without {client.partner(unpaired)}: set both (env or "
+                f"config.yaml), or neither to use the server saved by `relevo connect`", retryable=False)
+            return False
         if not self.settings.configured:
             self._set_fatal_error("relevo_not_configured",
                                   "Relevo needs RELEVO_URL and RELEVO_TOKEN", retryable=False)
@@ -265,8 +272,8 @@ class RelevoAdapter(BasePlatformAdapter):
         self._poll_task = asyncio.create_task(self._poll_loop(), name="relevo-inbox")
         client.use_gateway_session(self.settings.session)
         self._mark_connected()
-        logger.info("[relevo] connected; session %s, context %s", self.settings.session,
-                    self.settings.context or "general")
+        logger.info("[relevo] connected; server and token from %s, session %s, context %s", self.settings.source,
+                    self.settings.session, self.settings.context or "general")
         return True
 
     async def disconnect(self) -> None:

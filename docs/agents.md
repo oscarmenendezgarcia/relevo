@@ -48,3 +48,7 @@ A TypeScript extension. It registers `relevo_send`, `relevo_inbox` and `relevo_t
 ## Hermes plugin (`adapters/hermes`)
 
 A platform adapter plugin (`kind: platform`). Relevo becomes one more chat platform for the Hermes gateway: each thread is a chat (`chat_id` = thread id), each new note an inbound message from its author, and Hermes' reply is sent back with `send` in that thread. The gateway is always on, so it answers at once. Outbound client tools (`relevo_send`, `relevo_inbox`, `relevo_thread`) let any Hermes session open threads. Its session is general unless configured.
+
+Where it differs from the rest of this page, and why:
+
+- **The server and token come as a pair.** `RELEVO_URL` and `RELEVO_TOKEN` (the Hermes profile's env, or the platform's `extra` in `config.yaml`) override the saved config only together, not each on its own: in Hermes they live in different places (`.env`, `config.yaml`, the profile), so a token could otherwise go to a server it did not come from. One set without the other is logged once; the tools then use the saved pair, and the gateway platform refuses to start, since the saved server is not the one its config names.

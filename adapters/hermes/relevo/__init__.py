@@ -25,7 +25,8 @@ def check_requirements() -> bool:
 def validate_config(config) -> bool:
     from .client import resolve_settings
 
-    return resolve_settings(getattr(config, "extra", None) or {}).configured
+    settings = resolve_settings(getattr(config, "extra", None) or {})
+    return settings.configured and not settings.unpaired
 
 
 def is_connected(config) -> bool:

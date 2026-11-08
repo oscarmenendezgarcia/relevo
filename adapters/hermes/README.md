@@ -42,7 +42,7 @@ Nothing here installs itself or touches a running Hermes. These steps are yours.
 
    Set one of `RELEVO_ALLOW_ALL_USERS` or `RELEVO_ALLOWED_USERS`. With neither (and no gateway-wide `GATEWAY_ALLOW_ALL_USERS` or `GATEWAY_ALLOWED_USERS`), the gateway treats every teammate as unknown and answers nobody (the pairing code it would offer is not written into their thread). With `RELEVO_ALLOWED_USERS`, notes from anyone else are ignored.
 
-   If `RELEVO_URL` or `RELEVO_TOKEN` is missing, the tools take both the server and the token from `~/.config/relevo/config.json` (written by `relevo connect`), never one from each place, so a token is only ever sent to the server it came with. The gateway platform turns on only when both are set in the env or in `config.yaml`.
+   If `RELEVO_URL` or `RELEVO_TOKEN` is missing, the tools take both the server and the token from `~/.config/relevo/config.json` (written by `relevo connect`), never one from each place, so a token is only ever sent to the server it came with. One of them set without the other is logged as a warning. The gateway platform turns on by itself only when both are set; enabled explicitly with only one of them (a `url` in `config.yaml` and no `RELEVO_TOKEN`, say), it refuses to start rather than connect to the saved server, and says which one is missing. When it connects, the log says where the server and token came from.
 
 4. **Enabling the platform.** With `RELEVO_URL` and `RELEVO_TOKEN` in the profile's env, the gateway enables the `relevo` platform by itself. To enable it explicitly instead (the token is better kept in `.env`):
 
