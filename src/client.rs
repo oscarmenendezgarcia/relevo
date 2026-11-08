@@ -146,8 +146,16 @@ impl Client {
 }
 
 fn network(e: reqwest::Error) -> Error {
-    // Without the URL: it is known, and the error stays short.
-    Error::Network(e.without_url().to_string())
+    // Without the URL (it is known), with the causes ("connection refused").
+    let e = e.without_url();
+    let mut msg = e.to_string();
+    let mut source = std::error::Error::source(&e);
+    while let Some(cause) = source {
+        msg.push_str(": ");
+        msg.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    Error::Network(msg)
 }
 
 /// `s` as one path segment.
