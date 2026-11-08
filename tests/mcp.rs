@@ -237,9 +237,10 @@ async fn tools_carry_a_conversation_between_sessions() {
         "if they name who to ask (a teammate, or the whole team), send it there",
         "2. Before opening a new thread, look at your inbox: an answer may already be waiting",
         "4. Read what you need first. If you can answer or explain from that reading, just answer",
-        "Send a short \"On it.\" only just before you start changing files or running something long",
+        "If the note needs work, mark the thread as yours with `send(thread, claim: true)` and no text just before you start changing files or running something long",
+        "never write a note that only says you are on it",
         "Start a new thread with a one-line subject, no greeting.",
-        "Never send \"On it.\" to a team question",
+        "Do not claim team questions.",
         "is not an answer",
         "mark guesses as guesses",
         "7. While answering a note, do not open new threads",
@@ -247,6 +248,7 @@ async fn tools_carry_a_conversation_between_sessions() {
     ] {
         assert!(instructions.contains(rule), "{rule}: {instructions}");
     }
+    assert!(!instructions.contains("On it"), "{instructions}");
     assert!(ana1.init["capabilities"]["experimental"].is_null());
     let tools = ana1.request("tools/list", json!({})).await;
     let mut names: Vec<&str> = tools["tools"]
@@ -263,7 +265,8 @@ async fn tools_carry_a_conversation_between_sessions() {
         .iter()
         .find(|t| t["name"] == "send")
         .unwrap();
-    // The description backs the rules: look first, claim only for work, no "On it." to a team.
+    // The description backs the rules: look first, claim as a state only for work, never a
+    // team question.
     let about = send["description"].as_str().unwrap();
     for part in [
         "If your person names whom to ask",
@@ -271,12 +274,15 @@ async fn tools_carry_a_conversation_between_sessions() {
         "`about` lines",
         "Read what you need first",
         "just answer",
-        "only just before you start changing files or running something long",
-        "never to a team question",
+        "`claim: true` and no text just before you start changing files or running something long",
+        "a state the others see, not a note",
+        "Never write a note that only says you are on it",
+        "Do not claim team questions",
         "one-line subject",
     ] {
         assert!(about.contains(part), "{part}: {about}");
     }
+    assert!(!about.contains("On it"), "{about}");
     // `all` is for threads this session does not see, not for a plain "anything for me?".
     let inbox_tool = tools["tools"]
         .as_array()
@@ -296,7 +302,7 @@ async fn tools_carry_a_conversation_between_sessions() {
     );
     assert!(all.contains("Only needed to see those"), "{all}");
     let props = send["inputSchema"]["properties"].as_object().unwrap();
-    for p in ["to", "thread", "text", "close"] {
+    for p in ["to", "thread", "text", "close", "claim"] {
         assert!(props.contains_key(p), "{send}");
     }
 
@@ -363,21 +369,38 @@ async fn tools_carry_a_conversation_between_sessions() {
     assert!(inbox.contains("No new notes"), "{inbox}");
     assert!(inbox.contains("Latest: @bob at "), "{inbox}");
 
+    // Ana's first session claims it as a state, before working on it: no note.
     let mine = ana1
-        .ok("send", json!({ "thread": id, "text": "On it." }))
+        .ok("send", json!({ "thread": id, "claim": true }))
         .await;
-    assert!(mine.contains("This session holds the thread."), "{mine}");
+    assert!(
+        mine.starts_with(&format!("Claimed thread {id}: this session has it now")),
+        "{mine}"
+    );
+    assert!(mine.contains("No note was written."), "{mine}");
+    let held = ana1.ok("thread", json!({ "id": id })).await;
+    assert!(held.contains("This session has it since "), "{held}");
+    let taken = ana2
+        .ok("send", json!({ "thread": id, "claim": true }))
+        .await;
+    assert!(taken.contains("claimed: other-session"), "{taken}");
+    assert!(taken.contains("nothing was written"), "{taken}");
     let lost = ana2
         .ok("send", json!({ "thread": id, "text": "I can look too." }))
         .await;
     assert!(lost.contains("claimed: other-session"), "{lost}");
     assert!(lost.contains("step aside"), "{lost}");
+    let other = ana2.ok("thread", json!({ "id": id })).await;
+    assert!(
+        other.contains("@ana's Claude Code in pagos-api@feat/refunds has it since ")
+            && other.contains(": another of your sessions, so leave it to that session."),
+        "{other}"
+    );
 
     let thread = bob.ok("thread", json!({ "id": id })).await;
-    assert!(
-        thread.contains("<untrusted from=\"@ana\">\nOn it.\n</untrusted>"),
-        "{thread}"
-    );
+    // The claim wrote nothing: Bob's question and Ana's second session's note only.
+    assert_eq!(thread.matches("\n- note n_").count(), 2, "{thread}");
+    assert!(!thread.contains("On it"), "{thread}");
     // A new session that reads the thread before any inbox still knows its own notes.
     let mut bob2 = Mcp::start(&s, "bob", &s.dir, Some(""), &[]).await;
     let fresh = bob2.ok("thread", json!({ "id": id })).await;
@@ -391,10 +414,12 @@ async fn tools_carry_a_conversation_between_sessions() {
         thread.contains("- @ana: note n_") && thread.contains("seen by 1 of their sessions"),
         "{thread}"
     );
+    // Bob sees the claim as a state: who has it, since when.
     assert!(
-        thread.contains("taken by \"Claude Code\" in pagos-api@feat/refunds"),
+        thread.contains("; @ana's Claude Code in pagos-api@feat/refunds has it since "),
         "{thread}"
     );
+    assert!(thread.contains(" UTC on "), "{thread}");
 
     // Server errors come back as tool errors with their code and message.
     let (failed, err) = bob
@@ -544,9 +569,9 @@ async fn a_session_that_exits_hands_its_threads_to_the_next_at_once() {
     let inbox = next.ok("inbox", json!({})).await;
     assert!(inbox.contains(&id) && inbox.contains("And?"), "{inbox}");
     let sent = next
-        .ok("send", json!({ "thread": id, "text": "On it." }))
+        .ok("send", json!({ "thread": id, "claim": true }))
         .await;
-    assert!(sent.contains("This session holds the thread."), "{sent}");
+    assert!(sent.contains("this session has it now"), "{sent}");
     // The ended session's waiting request did not bring it back.
     assert_eq!(sessions(&s, "bob"), 1);
 }

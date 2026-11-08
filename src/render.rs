@@ -97,6 +97,30 @@ fn session(v: &Value) -> String {
     }
 }
 
+/// `since` (RFC 3339, UTC) as `10:47 UTC on 2026-11-08`, or as it is if it is not that.
+fn since(at: &str) -> String {
+    match (at.get(..10), at.get(10..11), at.get(11..16)) {
+        (Some(date), Some("T"), Some(time)) => format!("{time} UTC on {date}"),
+        _ => at.to_string(),
+    }
+}
+
+/// A claim as a state: `@ana's Claude Code in pagos-api has it since 10:47 UTC on 2026-11-08`.
+fn claim_state(handle: &str, c: &Value) -> String {
+    let mut out = format!("@{handle}'s {}", s(&c["label"]));
+    match c["context"].as_str() {
+        Some(context) => {
+            let _ = write!(out, " in {context}");
+        }
+        None => out.push_str(" (general)"),
+    }
+    out.push_str(" has it");
+    if let Some(at) = c["since"].as_str() {
+        let _ = write!(out, " since {}", since(at));
+    }
+    out
+}
+
 /// One thread, with its notes (`notes` or `new_notes`) and, from `thread`, its delivery.
 pub fn thread(t: &Value, me: Option<&str>) -> String {
     let id = s(&t["id"]);
@@ -129,16 +153,45 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
     if t["waiting_for_you"] == true {
         out.push_str("Waiting for a reply from you. ");
     }
-    out.push_str(match t["claimed"].as_str() {
-        Some("this-session") => "This session holds it.\n",
-        Some("other-session") => "Another of your sessions holds it: leave it to that session.\n",
-        _ => "Nobody of yours has taken it.\n",
-    });
+    // Who of the person has it, and since when: only `thread`'s delivery says.
+    let mine = t["delivery"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|d| me.is_some_and(|me| s(&d["handle"]) == me) && d["claimed_by"].is_object());
+    match (t["claimed"].as_str(), mine) {
+        (Some("this-session"), Some(d)) => match d["claimed_by"]["since"].as_str() {
+            Some(at) => {
+                let _ = writeln!(out, "This session has it since {}.", since(at));
+            }
+            None => out.push_str("This session has it.\n"),
+        },
+        (Some("this-session"), None) => out.push_str("This session has it.\n"),
+        (Some("other-session"), Some(d)) => {
+            let _ = writeln!(
+                out,
+                "{}: another of your sessions, so leave it to that session.",
+                claim_state(s(&d["handle"]), &d["claimed_by"])
+            );
+        }
+        (Some("other-session"), None) => {
+            out.push_str("Another of your sessions has it: leave it to that session.\n")
+        }
+        // Team questions are not claimed.
+        _ if t["waiting_for_you"] == true && s(&t["kind"]) == "direct" => {
+            let _ = writeln!(
+                out,
+                "Nobody of yours has it. If it needs work first, claim it with \
+                 send(thread=\"{id}\", claim=true) and no text just before you start."
+            );
+        }
+        _ => out.push_str("Nobody of yours has it.\n"),
+    }
     if s(&t["kind"]) == "team" && s(&t["status"]) == "open" && Some(opener) != me {
         out.push_str(
             "A team question: answer it only from your own work or your person's files \
-             (repeating a teammate's `about` line, or guessing who might know, is not an answer), \
-             never with \"On it.\".\n",
+             (repeating a teammate's `about` line, or guessing who might know, is not an answer); \
+             do not claim it.\n",
         );
     }
 
@@ -200,9 +253,9 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
                 );
             }
             if d["claimed_by"].is_object() {
-                let _ = write!(out, "; taken by {}", session(&d["claimed_by"]));
+                let _ = write!(out, "; {}", claim_state(s(&d["handle"]), &d["claimed_by"]));
             } else if d["seen_by"].as_i64().unwrap_or(0) > 0 {
-                out.push_str("; nobody has taken it");
+                out.push_str("; nobody of theirs has it");
             }
             out.push('\n');
         }
@@ -314,8 +367,24 @@ pub fn sent(v: &Value) -> String {
             s(&v["status"])
         ),
         // A close without text took nothing: another session holding it changes nothing here.
-        None if v["claimed"] == "other-session" => return format!("Closed thread {id}."),
-        None => format!("Closed thread {id}."),
+        None if s(&v["status"]) == "closed" && v["claimed"] == "other-session" => {
+            return format!("Closed thread {id}.");
+        }
+        None if s(&v["status"]) == "closed" => format!("Closed thread {id}."),
+        // A claim without text: a state, nothing written.
+        None => {
+            return match v["claimed"].as_str() {
+                Some("this-session") => format!(
+                    "Claimed thread {id}: this session has it now, and the others in the thread \
+                     see that. No note was written."
+                ),
+                Some("other-session") => format!(
+                    "claimed: other-session. Another of your person's sessions already has thread \
+                     {id}: step aside and leave it to that session (nothing was written)."
+                ),
+                _ => format!("Nothing was written in thread {id}, and nobody of yours has it."),
+            };
+        }
     };
     out.push(' ');
     out.push_str(match v["claimed"].as_str() {
@@ -402,10 +471,8 @@ mod tests {
             out.contains("answer it only from your own work or your person's files"),
             "{out}"
         );
-        assert!(
-            out.contains("is not an answer), never with \"On it.\""),
-            "{out}"
-        );
+        assert!(out.contains("is not an answer); do not claim it."), "{out}");
+        assert!(!out.contains("claim=true"), "{out}");
         // Not to the one who asked, nor once closed.
         assert!(!thread(&t, Some("ana")).contains("A team question"));
         t["status"] = "closed".into();
@@ -487,7 +554,17 @@ mod tests {
         );
         assert!(out.contains("addressed to you in pagos-api"), "{out}");
         assert!(out.contains("Waiting for a reply from you."), "{out}");
-        assert!(out.contains("Nobody of yours has taken it."), "{out}");
+        // Waiting for a reply: how to claim it, as a state, if it needs work.
+        assert!(
+            out.contains(
+                "Nobody of yours has it. If it needs work first, claim it with \
+                 send(thread=\"r_1\", claim=true) and no text just before you start.\n"
+            ),
+            "{out}"
+        );
+        let mut quiet = sample();
+        quiet["waiting_for_you"] = false.into();
+        assert!(thread(&quiet, None).contains("Nobody of yours has it.\n"));
         assert!(out.contains("note n_1 by @ana via \"Claude Code\", 2026-11-08T10:41:00Z"));
         assert!(
             out.contains("<untrusted from=\"@ana\">\nIs the refund endpoint live?\n</untrusted>")
@@ -503,7 +580,7 @@ mod tests {
             "context": null, "claimed": "this-session",
             "notes": [{ "id": "n_1", "author": "oscar", "via": "cli", "created_at": "t", "text": "mine", "truncated": false }],
             "delivery": [
-                { "handle": "oscar", "note": null, "delivered_at": null, "by": null, "claimed_by": { "label": "cli", "context": null }, "seen_by": 0 },
+                { "handle": "oscar", "note": null, "delivered_at": null, "by": null, "claimed_by": { "label": "cli", "context": null, "since": "2026-11-08T10:45:00Z" }, "seen_by": 0 },
                 { "handle": "ana", "note": "n_1", "delivered_at": "t2", "by": { "label": "Claude Code", "context": "pagos-api" }, "claimed_by": null, "seen_by": 2 }
             ]
         });
@@ -513,14 +590,66 @@ mod tests {
             "{out}"
         );
         assert!(!out.contains("<untrusted"), "{out}");
-        assert!(out.contains("This session holds it."), "{out}");
         assert!(
-            out.contains("- @oscar: nothing yet; taken by \"cli\" (general)"),
+            out.contains("This session has it since 10:45 UTC on 2026-11-08.\n"),
             "{out}"
         );
         assert!(
-            out.contains("- @ana: note n_1 reached \"Claude Code\" in pagos-api at t2; seen by 2 of their sessions; nobody has taken it"),
+            out.contains(
+                "- @oscar: nothing yet; @oscar's cli (general) has it since 10:45 UTC on 2026-11-08\n"
+            ),
             "{out}"
+        );
+        assert!(
+            out.contains("- @ana: note n_1 reached \"Claude Code\" in pagos-api at t2; seen by 2 of their sessions; nobody of theirs has it"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_claim_shows_as_a_state_with_who_and_since_when() {
+        let claim = json!({ "label": "Claude Code", "context": "pagos-api", "since": "2026-11-08T10:47:00Z" });
+        let mut t = sample();
+        t["claimed"] = "other-session".into();
+        t["notes"] = t["new_notes"].take();
+        t["delivery"] = json!([
+            { "handle": "ana", "note": null, "delivered_at": null, "by": null, "claimed_by": null, "seen_by": 0 },
+            { "handle": "oscar", "note": "n_1", "delivered_at": "2026-11-08T10:46:00Z",
+              "by": { "label": "Claude Code", "context": "pagos-api" }, "claimed_by": claim, "seen_by": 1 }
+        ]);
+        // To the asker: who of the other person has it, since when.
+        let out = thread(&t, Some("ana"));
+        assert!(
+            out.contains(
+                "; @oscar's Claude Code in pagos-api has it since 10:47 UTC on 2026-11-08\n"
+            ),
+            "{out}"
+        );
+        // To another session of the person who has it: that session has it, so step aside.
+        let out = thread(&t, Some("oscar"));
+        assert!(
+            out.contains(
+                "@oscar's Claude Code in pagos-api has it since 10:47 UTC on 2026-11-08: another of \
+                 your sessions, so leave it to that session.\n"
+            ),
+            "{out}"
+        );
+        // In the inbox, which does not say who or since when.
+        let mut listed = sample();
+        listed["claimed"] = "other-session".into();
+        assert!(
+            thread(&listed, Some("oscar"))
+                .contains("Another of your sessions has it: leave it to that session.\n")
+        );
+        listed["claimed"] = "this-session".into();
+        assert!(thread(&listed, Some("oscar")).contains("This session has it.\n"));
+        // A server that does not say since when.
+        let mut old = t.clone();
+        old["delivery"][1]["claimed_by"] = json!({ "label": "Claude Code", "context": null });
+        assert!(
+            thread(&old, Some("ana")).contains("; @oscar's Claude Code (general) has it\n"),
+            "{}",
+            thread(&old, Some("ana"))
         );
     }
 
@@ -579,5 +708,20 @@ mod tests {
         // Closed while another session holds it: nothing to step aside from, no note written.
         let held = json!({ "thread": "r_1", "note": null, "status": "closed", "claimed": "other-session" });
         assert_eq!(sent(&held), "Closed thread r_1.");
+        // Claimed without a note: a state, nothing written.
+        let claimed =
+            json!({ "thread": "r_1", "note": null, "status": "open", "claimed": "this-session" });
+        let out = sent(&claimed);
+        assert!(
+            out.starts_with("Claimed thread r_1: this session has it now"),
+            "{out}"
+        );
+        assert!(out.contains("No note was written."), "{out}");
+        let lost =
+            json!({ "thread": "r_1", "note": null, "status": "open", "claimed": "other-session" });
+        let out = sent(&lost);
+        assert!(out.contains("claimed: other-session"), "{out}");
+        assert!(out.contains("step aside"), "{out}");
+        assert!(out.contains("nothing was written"), "{out}");
     }
 }
