@@ -134,6 +134,11 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
         Some("other-session") => "Another of your sessions holds it: leave it to that session.\n",
         _ => "Nobody of yours has taken it.\n",
     });
+    if s(&t["kind"]) == "team" && s(&t["status"]) == "open" && Some(opener) != me {
+        out.push_str(
+            "A team question: answer it only if you have something useful, never with \"On it.\".\n",
+        );
+    }
 
     let (notes, partial) = match t.get("notes") {
         Some(n) => (n, false),
@@ -323,6 +328,27 @@ mod tests {
         // A title of our own is ours.
         let mine = thread(&t, Some("ana"));
         assert!(mine.contains("Title (yours): x\""), "{mine}");
+    }
+
+    #[test]
+    fn team_questions_ask_for_something_useful_only() {
+        let mut t = sample();
+        t["kind"] = "team".into();
+        let out = thread(&t, Some("oscar"));
+        assert!(
+            out.contains("team question from @ana to everyone; open"),
+            "{out}"
+        );
+        assert!(
+            out.contains("answer it only if you have something useful, never with \"On it.\""),
+            "{out}"
+        );
+        // Not to the one who asked, nor once closed.
+        assert!(!thread(&t, Some("ana")).contains("A team question"));
+        t["status"] = "closed".into();
+        assert!(!thread(&t, Some("oscar")).contains("A team question"));
+        // Direct threads have no such line.
+        assert!(!thread(&sample(), Some("oscar")).contains("A team question"));
     }
 
     #[test]

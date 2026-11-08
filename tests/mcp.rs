@@ -225,11 +225,16 @@ async fn tools_carry_a_conversation_between_sessions() {
 
     assert_eq!(ana1.init["serverInfo"]["name"], "relevo");
     let instructions = ana1.init["instructions"].as_str().unwrap();
-    assert!(
-        instructions.contains("6. Ask the team (`@team`)"),
-        "{instructions}"
-    );
-    assert!(instructions.contains("7. Without push notifications"));
+    for rule in [
+        "1. You speak for one person: `you` in the inbox",
+        "look at your inbox (an answer may already be waiting)",
+        "3. If you can answer at once, just answer",
+        "Never send \"On it.\" to a team question",
+        "6. While answering a note, do not open new threads",
+        "7. Without push notifications",
+    ] {
+        assert!(instructions.contains(rule), "{rule}: {instructions}");
+    }
     assert!(ana1.init["capabilities"]["experimental"].is_null());
     let tools = ana1.request("tools/list", json!({})).await;
     let mut names: Vec<&str> = tools["tools"]
@@ -246,6 +251,17 @@ async fn tools_carry_a_conversation_between_sessions() {
         .iter()
         .find(|t| t["name"] == "send")
         .unwrap();
+    // The description backs the rules: look first, claim only for work, no "On it." to a team.
+    let about = send["description"].as_str().unwrap();
+    for part in [
+        "look at your inbox",
+        "`about` lines",
+        "just answer",
+        "only when the note needs work",
+        "never to a team question",
+    ] {
+        assert!(about.contains(part), "{part}: {about}");
+    }
     let props = send["inputSchema"]["properties"].as_object().unwrap();
     for p in ["to", "thread", "text", "close"] {
         assert!(props.contains_key(p), "{send}");
