@@ -45,9 +45,9 @@ A thread is **new for a session** when it holds notes, not written by the sessio
 
 A thread is **waiting** for a person when it is `direct`, `open`, and its latest note is not theirs. It stays in the inbox of the sessions that see it until the person replies or someone closes it, even after it was delivered.
 
-A `team` thread is never "waiting": it shows only while it has notes new for the session. So a teammate's agent with nothing to add does not keep seeing it.
+A `team` thread is never "waiting": it shows only while it is `open` and has notes new for the session. So a teammate's agent with nothing to add does not keep seeing it, and once the asker closes it (resolved), it leaves every inbox, even with notes the session has not fetched; `inbox` with `all` and `thread` still show it. A closed `direct` thread with new notes still shows until they are fetched, since a closing note is often meant to be read.
 
-For others, a participant's delivery is the latest note that reached any of their sessions, which session (its label, and its context at that moment), and how many of their sessions that note has reached (`seen_by`, counting a session first seen after it reached the person, which starts with it, and not counting forgotten sessions): "picked up by Claude Code in pagos-api, 5 minutes ago", or "seen by 2 of Ana's sessions, none has taken it" when `seen_by` > 0 and there is no live claim.
+For others, a participant's delivery is about the latest note *written by someone else* that reached any of their sessions (their own notes say nothing about whether they read the others'): which session (its label, and its context at that moment), and how many of their sessions that note has reached (`seen_by`, counting a session first seen after it reached the person, which starts with it, and not counting forgotten sessions): "picked up by Claude Code in pagos-api, 5 minutes ago", or "seen by 2 of Ana's sessions, none has taken it" when `seen_by` > 0 and there is no live claim.
 
 ## Operations
 
@@ -130,7 +130,7 @@ Returns:
 
 The whole history of one thread your person takes part in, from any of their sessions. Delivers all its notes to this session. Does not claim it.
 
-Returns the same thread object as `inbox`, with `notes` (every note, in full, oldest first, `truncated: false`) in place of `new_notes`, plus `delivery`: for each participant, in the order of `participants`, the latest note they have, when it reached them and which session it reached (`by`), which session of theirs claimed the thread (`claimed_by`), or `null`s, and how many of their sessions that note has reached (`seen_by`, 0 when none has). Each session shows its label and its context at that moment: when the note reached it, when it claimed the thread. This is how a writer sees "picked up by her agent 5 minutes ago".
+Returns the same thread object as `inbox`, with `notes` (every note, in full, oldest first, `truncated: false`) in place of `new_notes`, plus `delivery`: for each participant, in the order of `participants`, the latest note by someone else that they have, when it reached them and which session it reached (`by`), which session of theirs claimed the thread (`claimed_by`), or `null`s, and how many of their sessions that note has reached (`seen_by`, 0 when none has). Each session shows its label and its context at that moment: when the note reached it, when it claimed the thread. This is how a writer sees "picked up by her agent 5 minutes ago".
 
 ```json
 "delivery": [ { "handle": "ana", "note": "n_…", "delivered_at": "2026-11-08T10:46:00Z", "by": { "label": "Claude Code laptop", "context": "pagos-api" }, "claimed_by": { "label": "Claude Code laptop", "context": "pagos-api" }, "seen_by": 1 },
