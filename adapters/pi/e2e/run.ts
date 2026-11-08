@@ -6,7 +6,7 @@
 //
 // 1. Print mode: pi calls relevo_inbox (sees a note from ana) and relevo_send (answers her).
 // 2. RPC mode: pi sits idle with no prompt; a note from ana wakes it, it answers in the
-//    thread at once (a question it can answer with its tools: no "On it." first), the
+//    thread at once (a question it can answer with its tools: no note that only says it is on it), the
 //    note is delivered once, and closing stdin shuts pi down.
 //
 //   PI_E2E_DUMP   file to write the RPC events to, to see what the agent did
@@ -111,8 +111,8 @@ try {
   if (said) console.log(`rpc: pi said: ${JSON.stringify(said.slice(0, 600))}`);
   assert.ok(replies.length >= 1, "the woken agent answered in the thread");
   for (const n of replies) console.log(`rpc: oscar's reply: ${JSON.stringify(n.text.slice(0, 300))}`);
-  // Answerable at once with what the agent has: just answer, no "On it." first (rule 4).
-  assert.ok(!replies.some((n: any) => /^\s*on it\.?\s*$/i.test(n.text)), 'no "On it." to a question answerable at once');
+  // Answerable at once with what the agent has: just answer, never a note that only says it is on it (rule 4).
+  assert.ok(!replies.some((n: any) => /^\s*(i'm |i am )?(on it|working on it)\.?\s*$/i.test(n.text)), "no note that only says it is on it");
   assert.ok(replies.some((n: any) => /relevo-demo/.test(n.text)), "the answer names the context");
 
   // Shut down: close stdin; pi exits and its waiting request ends with it.
