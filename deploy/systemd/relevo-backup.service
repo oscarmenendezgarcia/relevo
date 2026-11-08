@@ -1,0 +1,27 @@
+# Daily backup of the Relevo database (started by relevo-backup.timer): a consistent copy into
+# ~/.local/share/relevo/backups/YYYYMMDD-HHMMSS.db (UTC), keeping the newest 14.
+# Run one now with `systemctl --user start relevo-backup`.
+[Unit]
+Description=Back up the Relevo database
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/relevo backup --keep 14 %h/.local/share/relevo/backups
+Environment=RELEVO_DB=%h/.local/share/relevo/relevo.db
+StandardOutput=journal
+StandardError=journal
+Nice=10
+IOSchedulingClass=idle
+
+MemoryMax=128M
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.local/share/relevo
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native

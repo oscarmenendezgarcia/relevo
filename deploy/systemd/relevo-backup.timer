@@ -1,0 +1,12 @@
+# Starts relevo-backup.service once a day. Persistent: a backup missed while the machine was off
+# (or the owner logged out, without lingering) runs at the next start.
+[Unit]
+Description=Daily backup of the Relevo database
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
