@@ -50,7 +50,8 @@ export interface Thread {
 
 export interface Inbox {
   team: Person[];
-  session: SessionRef;
+  /** `you`: the handle of this session's person (servers before it leave it out). */
+  session: SessionRef & { you?: string };
   threads: Thread[];
   more: number;
 }
@@ -148,6 +149,11 @@ export class Client {
     const query = params.size ? `?${params}` : "";
     // A waiting request may be held up to `wait` seconds before it answers.
     return this.request("GET", `/api/inbox${query}`, undefined, signal, TIMEOUT_MS + (options.wait ?? 0) * 1000);
+  }
+
+  /** The team, and `you`: the handle of this token's person. */
+  people(signal?: AbortSignal, timeoutMs = TIMEOUT_MS): Promise<{ team: Person[]; you?: string }> {
+    return this.request("GET", "/api/people", undefined, signal, timeoutMs);
   }
 
   thread(id: string, signal?: AbortSignal): Promise<Thread> {

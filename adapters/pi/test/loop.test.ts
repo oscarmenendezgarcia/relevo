@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
-import { RULES } from "../src/index.ts";
+import { RULES, systemSection } from "../src/index.ts";
 import { loadExtension, until } from "./mock-pi.ts";
 import { api, startServer, type TestServer } from "./server.ts";
 
@@ -245,7 +245,9 @@ test("the rules go into the system prompt only when configured", async () => {
   const ext = extension();
   const event = { systemPromptOptions: { sections: {} as Record<string, string> } };
   await ext.emit("before_agent_start", event, ext.ctx(home));
-  assert.equal(event.systemPromptOptions.sections.relevo, RULES);
+  assert.equal(event.systemPromptOptions.sections.relevo, systemSection("oscar"));
+  assert.ok(systemSection("oscar").endsWith(RULES));
+  assert.match(event.systemPromptOptions.sections.relevo, /^You speak for @oscar: in Relevo `you` is "oscar"/);
   assert.match(RULES, /<untrusted>/);
 
   const bare = loadExtension({ env: {}, home });

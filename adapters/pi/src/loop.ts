@@ -8,7 +8,8 @@ import { RelevoError, type Client, type Thread } from "./client.ts";
 
 export interface LoopOptions {
   client: Client;
-  deliver: (thread: Thread) => void;
+  /** `you` is the handle of the session's person, when the server says it. */
+  deliver: (thread: Thread, you?: string) => void;
   /** Told about each failed request; `fatal` when the loop stops because of it. */
   onError?: (err: unknown, fatal: boolean) => void;
   wait?: number;
@@ -96,7 +97,7 @@ export class InboxLoop {
           this.delivered.set(thread.id, last);
           handed++;
           try {
-            this.options.deliver(thread);
+            this.options.deliver(thread, inbox.session?.you);
           } catch (err) {
             this.options.onError?.(err, false);
           }

@@ -19,6 +19,12 @@ export const RULES = `Relevo carries notes between the agents of your person's t
 6. Ask the team (@team) only when you do not know who knows; answer a team question only if you have something useful.
 7. Without push notifications, look at your inbox when you start a task and before you finish one.`;
 
+/** The system prompt section: who the agent speaks for, when known, and the rules. */
+export function systemSection(me?: string): string {
+  if (!me) return RULES;
+  return `You speak for @${me}: in Relevo \`you\` is "${me}", and notes by @${me} are your person's own.\n${RULES}`;
+}
+
 const NOT_CONFIGURED =
   "Relevo is not configured: run `relevo connect <url> <token>` (it writes ~/.config/relevo/config.json) or set RELEVO_URL and RELEVO_TOKEN.";
 
@@ -54,6 +60,33 @@ export function relevoExtension(options: Options = {}) {
     const session = newSessionId();
     let sessionCwd = process.cwd();
     let loop: InboxLoop | null = null;
+
+    /**
+     * The handle of each token's person (the server's `you`), learnt from every
+     * inbox and, when a thread or the system prompt needs it first, from /api/people.
+     */
+    const identity = new Map<string, string>();
+    /** When /api/people last failed, per token: not asked again for a minute. */
+    const unknownSince = new Map<string, number>();
+
+    function learn(c: Client, you: unknown): void {
+      if (typeof you === "string" && you) identity.set(c.config.token, you);
+    }
+
+    /** Who this token speaks for, or undefined if the server cannot say now. Never throws. */
+    async function whoami(c: Client, timeoutMs = 5000): Promise<string | undefined> {
+      const token = c.config.token;
+      const known = identity.get(token);
+      if (known) return known;
+      if (Date.now() - (unknownSince.get(token) ?? -Infinity) < 60_000) return undefined;
+      try {
+        learn(c, (await c.people(undefined, timeoutMs)).you);
+      } catch {
+        // An older server, or none: notes stay wrapped, the prompt says nothing of who.
+      }
+      if (!identity.has(token)) unknownSince.set(token, Date.now());
+      return identity.get(token);
+    }
 
     function client(cwd: string): Client {
       const config = loadConfig(env, home);
@@ -113,7 +146,11 @@ export function relevoExtension(options: Options = {}) {
         additionalProperties: false,
       } as any,
       async execute(_id: string, params: any, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: any) {
-        const inbox = await call(ctx?.cwd, (c) => c.inbox({ all: params?.all === true }, signal));
+        const inbox = await call(ctx?.cwd, async (c) => {
+          const inbox = await c.inbox({ all: params?.all === true }, signal);
+          learn(c, inbox.session?.you);
+          return inbox;
+        });
         const warning = overrideWarning(env);
         const text = renderInbox(inbox);
         return result(warning ? `${warning}\n\n${text}` : text, { threads: inbox.threads.map((t) => t.id), more: inbox.more });
@@ -137,15 +174,16 @@ export function relevoExtension(options: Options = {}) {
         additionalProperties: false,
       } as any,
       async execute(_id: string, params: any, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: any) {
-        const thread = await call(ctx?.cwd, (c) => c.thread(params.id, signal));
+        const [thread, me] = await call(ctx?.cwd, (c) => Promise.all([c.thread(params.id, signal), whoami(c)]));
         const before = typeof params.before === "string" && params.before ? params.before : undefined;
-        return result(renderThread(thread, { before }), { thread: thread.id });
+        return result(renderThread(thread, { before, me }), { thread: thread.id });
       },
     } as any);
 
-    pi.on("before_agent_start", (event: any) => {
+    pi.on("before_agent_start", async (event: any, ctx: any) => {
       if (!loadConfig(env, home)) return;
-      event.systemPromptOptions.sections.relevo = RULES;
+      const me = await whoami(client(ctx?.cwd ?? sessionCwd));
+      event.systemPromptOptions.sections.relevo = systemSection(me);
     });
 
     // Threads fetched in the background that the agent has not seen yet. They are
@@ -183,7 +221,7 @@ export function relevoExtension(options: Options = {}) {
       const notes = thread.new_notes ?? [];
       return {
         customType: "relevo",
-        content: renderArrival(thread),
+        content: renderArrival(thread, loop ? identity.get(loop.options.client.config.token) : undefined),
         display: true,
         details: { thread: thread.id, from: notes[notes.length - 1]?.author, kind: thread.kind },
       };
@@ -248,13 +286,14 @@ export function relevoExtension(options: Options = {}) {
       sessionCtx = ctx;
       const warning = overrideWarning(env);
       if (warning && ctx.hasUI) ctx.ui.notify(`Relevo: ${warning}`, "warning");
-      const cwd = sessionCwd;
+      const loopClient = client(sessionCwd);
       loop = new InboxLoop({
-        client: client(cwd),
+        client: loopClient,
         wait: options.wait,
         minBackoffMs: options.minBackoffMs,
         maxBackoffMs: options.maxBackoffMs,
-        deliver(thread: Thread) {
+        deliver(thread: Thread, you?: string) {
+          learn(loopClient, you);
           hold(thread);
           flush();
         },
