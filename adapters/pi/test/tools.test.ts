@@ -43,7 +43,8 @@ test("send opens a thread that the other person receives", async () => {
   const out = await ext.tool("relevo_send", { to: ["ana"], text: "Does /refunds accept partial amounts?" }, work);
   const id = out.match(/thread (r_\w+)/)?.[1];
   assert.ok(id, out);
-  assert.match(out, /This session holds the thread/);
+  // Opening a thread claims nothing (docs/protocol.md): only writing in one does.
+  assert.doesNotMatch(out, /holds the thread/);
 
   const inbox = await api(server, ana, "GET", "/api/inbox");
   const thread = inbox.threads.find((t: any) => t.id === id);
