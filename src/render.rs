@@ -239,10 +239,21 @@ pub fn inbox(v: &Value, me: Option<&str>) -> String {
         out.push_str(&thread(t, me));
     }
     let more = v["more"].as_i64().unwrap_or(0);
-    if more > 0 {
+    let had_new = threads
+        .iter()
+        .any(|t| t["new_notes"].as_array().is_some_and(|n| !n.is_empty()));
+    if more > 0 && had_new {
+        // Those shown are delivered now, so the rest come up next.
         let _ = write!(
             out,
             "\n{more} more thread(s) not shown: call inbox again to see them.\n"
+        );
+    } else if more > 0 {
+        // Only waiting threads, which stay until answered: another call shows the same ones.
+        let _ = write!(
+            out,
+            "\n{more} more thread(s) not shown: older ones, also waiting for a reply. Calling \
+             inbox again shows the same threads; replying to or closing those above makes room.\n"
         );
     }
     out
@@ -446,7 +457,19 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("- @oscar (Oscar, you)\n"), "{out}");
-        assert!(out.contains("3 more thread(s)"), "{out}");
+        assert!(
+            out.contains("3 more thread(s) not shown: call inbox again"),
+            "{out}"
+        );
+        // Only waiting threads shown: calling again would show the same ones.
+        let mut waiting = v.clone();
+        waiting["threads"][0]["new_notes"] = json!([]);
+        let out = inbox(&waiting, Some("oscar"));
+        assert!(!out.contains("call inbox again"), "{out}");
+        assert!(
+            out.contains("3 more thread(s) not shown: older ones, also waiting"),
+            "{out}"
+        );
         let empty = json!({ "team": [], "session": { "label": "x", "context": "a" }, "threads": [], "more": 0 });
         assert!(inbox(&empty, None).contains("Nothing new"));
 
