@@ -632,3 +632,25 @@ async fn a_server_that_is_not_relevo_is_an_error() {
     assert!(failed, "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channel_backs_off_when_inbox_does_not_wait() {
+    // A server (or a proxy) that drops `wait` and answers at once with nothing.
+    let empty = r#"{"team":[],"session":{"label":"x","context":null},"threads":[],"more":0}"#;
+    let (url, count) = fake("application/json", empty).await;
+    let dir = std::env::temp_dir().join(db::random_id("relevo-mcp-"));
+    std::fs::create_dir(&dir).unwrap();
+    let mut cmd = relevo(&dir);
+    cmd.args(["mcp", "--channel"])
+        .env("RELEVO_URL", &url)
+        .env("RELEVO_TOKEN", "rlv_x")
+        .env("RELEVO_CONTEXT", "");
+    let mcp = Mcp::spawn(cmd).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let n = count.load(std::sync::atomic::Ordering::SeqCst);
+    // 1 s, 2 s, ...: a handful, not thousands.
+    assert!(n <= 4, "{n} requests in 3 seconds");
+    assert!(n >= 1, "{n}");
+    drop(mcp);
+    let _ = std::fs::remove_dir_all(&dir);
+}

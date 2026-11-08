@@ -21,6 +21,8 @@ use crate::{config, render};
 const CHANNEL_WAIT: u64 = 55;
 /// The longest pause between failed background requests.
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
+/// A waiting request that brings nothing faster than this did not wait.
+const MIN_EMPTY_WAIT: Duration = Duration::from_secs(1);
 
 const RULES: &str = "\
 Relevo carries notes between the people of a team; each person reaches it through their own \
@@ -270,6 +272,7 @@ pub fn channel_event(thread: &Value, me: Option<&str>) -> Option<Value> {
 async fn push_news(client: Arc<Client>, me: Arc<Mutex<Option<String>>>, peer: Peer<RoleServer>) {
     let mut backoff = Duration::from_secs(1);
     loop {
+        let started = tokio::time::Instant::now();
         let v = match client.inbox(false, CHANNEL_WAIT).await {
             Ok(v) => v,
             Err(e) => {
@@ -280,13 +283,14 @@ async fn push_news(client: Arc<Client>, me: Arc<Mutex<Option<String>>>, peer: Pe
                 continue;
             }
         };
-        backoff = Duration::from_secs(1);
         let threads: Vec<&Value> = v["threads"].as_array().into_iter().flatten().collect();
         let me = learn(&me, &threads);
+        let mut pushed = 0;
         for t in threads {
             let Some(event) = channel_event(t, me.as_deref()) else {
                 continue;
             };
+            pushed += 1;
             let note = CustomNotification::new("notifications/claude/channel", Some(event));
             if peer
                 .send_notification(ServerNotification::CustomNotification(note))
@@ -295,6 +299,19 @@ async fn push_news(client: Arc<Client>, me: Arc<Mutex<Option<String>>>, peer: Pe
             {
                 return;
             }
+        }
+        // A server that answers a waiting request at once with nothing (one that ignores `wait`,
+        // or a proxy in the way) must not make this loop spin: back off as after a failure.
+        if pushed == 0 && v["more"].as_i64().unwrap_or(0) == 0 && started.elapsed() < MIN_EMPTY_WAIT
+        {
+            eprintln!(
+                "relevo mcp: inbox answered at once with nothing; again in {}s",
+                backoff.as_secs()
+            );
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(MAX_BACKOFF);
+        } else {
+            backoff = Duration::from_secs(1);
         }
     }
 }
