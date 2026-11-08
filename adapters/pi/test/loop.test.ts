@@ -31,14 +31,15 @@ function extension(extra: Record<string, unknown> = {}) {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-test("a note is delivered once as a follow-up that triggers a turn, and shutdown stops the loop", async () => {
+test("a note is delivered once with a message that triggers a turn, and shutdown stops the loop", async () => {
   const ext = extension();
   await ext.emit("session_start", { reason: "startup" }, ext.ctx(home, "rpc"));
   try {
     const opened = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Is the refunds migration safe to run?" });
     await until(() => ext.sent.length === 1);
     const [{ message, options }] = ext.sent;
-    assert.deepEqual(options, { triggerTurn: true, deliverAs: "followUp" });
+    assert.deepEqual(options, { triggerTurn: true });
+    await until(() => ext.seen.length === 1);
     assert.equal(message.customType, "relevo");
     assert.equal(message.display, true);
     assert.deepEqual(message.details, { thread: opened.thread, from: "ana", kind: "direct" });
@@ -67,6 +68,61 @@ test("a note is delivered once as a follow-up that triggers a turn, and shutdown
   assert.equal(ext.sent.length, 2);
   const inbox = await api(server, oscar, "GET", "/api/inbox?all=1", undefined, "checker-session");
   assert.equal(inbox.threads.find((t: any) => t.id === late.thread).new_notes.length, 1);
+});
+
+test("a note that lands while the agent is busy reaches it even if the person presses Esc", async () => {
+  const ext = extension();
+  await ext.emit("session_start", { reason: "startup" }, ext.ctx(home, "tui"));
+  try {
+    await sleep(300);
+    await ext.session.userPrompt();
+    await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Busy check: is the deploy frozen?" });
+    await sleep(1500); // Several waits of the loop.
+    assert.equal(ext.session.followUps.length, 0, "nothing goes into pi's follow-up queue");
+    await ext.session.escape(); // Empties pi's queues.
+    await until(() => ext.seen.some((m) => m.content.includes("Busy check: is the deploy frozen?")));
+  } finally {
+    await ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, "tui"));
+  }
+});
+
+test("while the agent is busy notes stay new on the server, so relevo_inbox shows them", async () => {
+  const ext = extension();
+  await ext.emit("session_start", { reason: "startup" }, ext.ctx(home, "tui"));
+  try {
+    await sleep(300);
+    await ext.session.userPrompt();
+    const opened = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Mid-turn: which region?" });
+    await sleep(1500);
+    assert.equal(ext.sent.length, 0);
+    const out = await ext.tool("relevo_inbox", {}, home);
+    assert.match(out, new RegExp(`## Thread ${opened.thread}[\\s\\S]*New notes \\(1\\):[\\s\\S]*Mid-turn: which region\\?`));
+    // The agent has read it: after the turn the loop has nothing to hand over.
+    await ext.session.finishTurn();
+    await sleep(1500);
+    assert.equal(ext.sent.length, 0);
+  } finally {
+    await ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, "tui"));
+  }
+});
+
+test("a turn that ends before pi shows the note keeps it: it is added to the session without another turn", async () => {
+  const ext = extension();
+  await ext.emit("session_start", { reason: "startup" }, ext.ctx(home, "tui"));
+  try {
+    ext.session.dropNextStart();
+    const opened = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Dropped start: still there?" });
+    await until(() => ext.seen.length === 1);
+    assert.equal(ext.sent.length, 2);
+    assert.deepEqual(ext.sent[0].options, { triggerTurn: true });
+    assert.deepEqual(ext.sent[1].options, { triggerTurn: false });
+    assert.equal(ext.seen[0].details.thread, opened.thread);
+    assert.match(ext.seen[0].content, /Dropped start: still there\?/);
+    await sleep(1500);
+    assert.equal(ext.sent.length, 2, "once");
+  } finally {
+    await ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, "tui"));
+  }
 });
 
 test("a note arriving during the wait wakes the loop at once", async () => {

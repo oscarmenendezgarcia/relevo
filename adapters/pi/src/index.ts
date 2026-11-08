@@ -142,11 +142,94 @@ export function relevoExtension(options: Options = {}) {
       event.systemPromptOptions.sections.relevo = RULES;
     });
 
+    // Threads fetched in the background that the agent has not seen yet. They are
+    // delivered on the server already, so they must not go into pi's follow-up
+    // queue, which Esc, dequeue and moving in the tree empty without a word: they
+    // wait here and are handed over one at a time while the agent is idle, and
+    // leave only when pi shows the message to the agent (message_start).
+    const pending = new Map<string, Thread>();
+    /** The thread whose turn was started, until pi shows it. */
+    let handed: Thread | null = null;
+    let sessionCtx: any = null;
+
+    function idle(): boolean {
+      try {
+        return sessionCtx?.isIdle?.() !== false;
+      } catch {
+        return false; // A context from a session that ended.
+      }
+    }
+
+    /** Adds a thread to the pending list, merging it with what is already there. */
+    function hold(thread: Thread): void {
+      const before = pending.get(thread.id);
+      if (!before) return void pending.set(thread.id, thread);
+      const seen = new Set((before.new_notes ?? []).map((n) => n.id));
+      const notes = [...(before.new_notes ?? []), ...(thread.new_notes ?? []).filter((n) => !seen.has(n.id))];
+      pending.set(thread.id, { ...thread, new_notes: notes });
+    }
+
+    function arrival(thread: Thread) {
+      const notes = thread.new_notes ?? [];
+      return {
+        customType: "relevo",
+        content: renderArrival(thread),
+        display: true,
+        details: { thread: thread.id, from: notes[notes.length - 1]?.author, kind: thread.kind },
+      };
+    }
+
+    /**
+     * Hands the next pending thread to pi if the agent is idle: it starts a turn
+     * at once. `quiet` adds every pending thread to the session without starting
+     * a turn instead: the agent sees them on its next one.
+     */
+    function flush(quiet = false): void {
+      if (handed || !pending.size || !idle()) return;
+      if (quiet) {
+        for (const thread of pending.values()) pi.sendMessage(arrival(thread), { triggerTurn: false });
+        pending.clear();
+        return;
+      }
+      const thread = pending.values().next().value as Thread;
+      pending.delete(thread.id);
+      handed = thread;
+      pi.sendMessage(arrival(thread), { triggerTurn: true });
+    }
+
+    pi.on("message_start", (event: any) => {
+      const m = event?.message;
+      if (m?.role !== "custom" || m.customType !== "relevo" || !handed) return;
+      if (m.details?.thread === handed.id) handed = null;
+    });
+
+    pi.on("agent_start", () => {
+      // Busy: nothing is fetched until the agent settles, so notes that land now
+      // stay new on the server (relevo_inbox shows them) instead of in a queue.
+      loop?.pause();
+    });
+
+    pi.on("agent_settled", (event: any) => {
+      const missed = handed;
+      handed = null;
+      if (missed) {
+        // The turn ended (Esc, an error) before pi showed the thread: keep it, first.
+        const rest = [...pending.values()];
+        pending.clear();
+        [missed, ...rest].forEach(hold);
+      }
+      // After Esc, or a turn that never showed its thread, starting another turn
+      // would go against the person or fail again: add the threads without one.
+      flush(event?.aborted === true || missed !== null);
+      loop?.resume();
+    });
+
     pi.on("session_start", (_event: any, ctx: any) => {
       sessionCwd = ctx.cwd ?? sessionCwd;
       // Print and JSON runs answer one prompt and exit: nothing to wait for.
       if (ctx.mode === "print" || ctx.mode === "json") return;
       if (loop || !loadConfig(env, home)) return;
+      sessionCtx = ctx;
       const warning = overrideWarning(env);
       if (warning && ctx.hasUI) ctx.ui.notify(`Relevo: ${warning}`, "warning");
       const cwd = sessionCwd;
@@ -156,16 +239,8 @@ export function relevoExtension(options: Options = {}) {
         minBackoffMs: options.minBackoffMs,
         maxBackoffMs: options.maxBackoffMs,
         deliver(thread: Thread) {
-          const notes = thread.new_notes ?? [];
-          pi.sendMessage(
-            {
-              customType: "relevo",
-              content: renderArrival(thread),
-              display: true,
-              details: { thread: thread.id, from: notes[notes.length - 1]?.author, kind: thread.kind },
-            },
-            { triggerTurn: true, deliverAs: "followUp" },
-          );
+          hold(thread);
+          flush();
         },
         onError(err: unknown, fatal: boolean) {
           if (fatal && ctx.hasUI) {
@@ -173,6 +248,7 @@ export function relevoExtension(options: Options = {}) {
           }
         },
       });
+      if (!idle()) loop.pause();
       loop.start();
     });
 

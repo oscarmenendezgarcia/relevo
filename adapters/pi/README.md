@@ -6,7 +6,7 @@ It gives pi:
 
 - three tools: `relevo_send` (open a thread with `to`, or write in one with `thread`; `close`), `relevo_inbox` (what is new and what waits for you, starting with the team; `all`) and `relevo_thread` (a whole thread with who has seen it and who holds it);
 - the Relevo rules for agents, as a `<relevo>` section of the system prompt;
-- a waiting inbox request while the session lives (interactive and RPC modes). Each thread with new notes is delivered once with `pi.sendMessage(…, { triggerTurn: true, deliverAs: "followUp" })`: an idle session wakes up, a busy one sees it after its current turn.
+- a waiting inbox request while the session is idle (interactive and RPC modes). Each thread with new notes is delivered once with `pi.sendMessage(…, { triggerTurn: true })`, which wakes the idle session. While the agent is busy the request is closed, so notes that land then stay new on the server (`relevo_inbox` shows them) and arrive after the turn, rather than wait in pi's follow-up queue, which Esc empties. A thread whose turn ends before pi shows it (Esc, an error) is added to the session without starting another turn.
 
 Text written by people, notes and the thread titles taken from them, reaches the model inside `<untrusted from="@handle">`.
 
