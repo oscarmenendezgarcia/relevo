@@ -225,11 +225,16 @@ async fn tools_carry_a_conversation_between_sessions() {
 
     assert_eq!(ana1.init["serverInfo"]["name"], "relevo");
     let instructions = ana1.init["instructions"].as_str().unwrap();
-    assert!(
-        instructions.contains("6. Ask the team (`@team`)"),
-        "{instructions}"
-    );
-    assert!(instructions.contains("7. Without push notifications"));
+    for rule in [
+        "1. You speak for one person: `you` in the inbox",
+        "look at your inbox (an answer may already be waiting)",
+        "3. If you can answer at once, just answer",
+        "Never send \"On it.\" to a team question",
+        "6. While answering a note, do not open new threads",
+        "7. Without push notifications",
+    ] {
+        assert!(instructions.contains(rule), "{rule}: {instructions}");
+    }
     assert!(ana1.init["capabilities"]["experimental"].is_null());
     let tools = ana1.request("tools/list", json!({})).await;
     let mut names: Vec<&str> = tools["tools"]
@@ -246,16 +251,33 @@ async fn tools_carry_a_conversation_between_sessions() {
         .iter()
         .find(|t| t["name"] == "send")
         .unwrap();
+    // The description backs the rules: look first, claim only for work, no "On it." to a team.
+    let about = send["description"].as_str().unwrap();
+    for part in [
+        "look at your inbox",
+        "`about` lines",
+        "just answer",
+        "only when the note needs work",
+        "never to a team question",
+    ] {
+        assert!(about.contains(part), "{part}: {about}");
+    }
     let props = send["inputSchema"]["properties"].as_object().unwrap();
     for p in ["to", "thread", "text", "close"] {
         assert!(props.contains_key(p), "{send}");
     }
 
     let inbox = ana1.ok("inbox", json!({})).await;
+    // The agent is told whom it speaks for (`you`), and the team list marks it.
     assert!(
-        inbox.contains("You are session \"Claude Code\" in pagos-api@feat/refunds."),
+        inbox.starts_with("You speak for @ana (your person): "),
         "{inbox}"
     );
+    assert!(
+        inbox.contains("This is session \"Claude Code\" in pagos-api@feat/refunds."),
+        "{inbox}"
+    );
+    assert!(inbox.contains("- @ana (Ana, you): ana things"), "{inbox}");
     assert!(inbox.contains("- @bob (Bob): bob things\n"), "{inbox}");
     assert!(inbox.contains("Nothing new"), "{inbox}");
     // Ana's live contexts show in the team list.
@@ -310,6 +332,11 @@ async fn tools_carry_a_conversation_between_sessions() {
         thread.contains("<untrusted from=\"@ana\">\nOn it.\n</untrusted>"),
         "{thread}"
     );
+    // A new session that reads the thread before any inbox still knows its own notes.
+    let mut bob2 = Mcp::start(&s, "bob", &s.dir, Some(""), &[]).await;
+    let fresh = bob2.ok("thread", json!({ "id": id })).await;
+    assert!(fresh.contains("Title (yours): Is refunds live?"), "{fresh}");
+    assert!(fresh.contains("by @bob (you) via"), "{fresh}");
     assert!(
         thread.contains("by @bob (you) via \"Claude Code\""),
         "{thread}"
@@ -337,11 +364,12 @@ async fn tools_carry_a_conversation_between_sessions() {
     let (failed, err) = bob.call("thread", json!({ "id": "../people" })).await;
     assert!(failed && err.starts_with("NOT_FOUND: "), "{err}");
 
-    let closed = bob.ok("send", json!({ "thread": id, "close": true })).await;
-    assert!(
-        closed.starts_with(&format!("Closed thread {id}.")),
-        "{closed}"
-    );
+    // Ana's other session closes it while the first holds it: it only says it closed it, not to
+    // step aside nor that a note was written.
+    let closed = ana2
+        .ok("send", json!({ "thread": id, "close": true }))
+        .await;
+    assert_eq!(closed, format!("Closed thread {id}."));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -395,15 +423,24 @@ async fn channel_pushes_notes_from_others() {
     );
 
     // The push delivered the note, and nothing tells whether Claude Code showed the event
-    // (started without the channels flag, it drops it): the next inbox shows it once more.
+    // (started without the channels flag, it drops it): the next inbox shows it once more, in
+    // the thread's own entry, since the thread still waits for a reply: once, not twice.
     let inbox = ana.ok("inbox", json!({})).await;
-    let at = inbox.find("Pushed to this session earlier").expect(&inbox);
+    assert_eq!(
+        inbox.matches(&format!("### Thread {id}")).count(),
+        1,
+        "{inbox}"
+    );
+    assert!(!inbox.contains("Pushed to this session"), "{inbox}");
+    assert!(inbox.contains("(pushed earlier)"), "{inbox}");
     assert!(
-        inbox[at..].contains("<untrusted from=\"@bob\">\nDeploy at 5?\n</untrusted>"),
+        inbox.contains("<untrusted from=\"@bob\">\nDeploy at 5?\n</untrusted>"),
         "{inbox}"
     );
     let inbox = ana.ok("inbox", json!({})).await;
-    assert!(!inbox.contains("Pushed to this session"), "{inbox}");
+    assert!(inbox.contains(&format!("### Thread {id}")), "{inbox}");
+    assert!(!inbox.contains("pushed earlier"), "{inbox}");
+    assert!(!inbox.contains("Deploy at 5?\n"), "{inbox}");
 
     // A reply in the same thread is pushed too, and its own notes are not.
     ana.ok("send", json!({ "thread": id, "text": "Yes." }))
@@ -420,6 +457,7 @@ async fn channel_pushes_notes_from_others() {
     ana.ok("thread", json!({ "id": id })).await;
     let inbox = ana.ok("inbox", json!({})).await;
     assert!(!inbox.contains("Pushed to this session"), "{inbox}");
+    assert!(!inbox.contains("pushed earlier"), "{inbox}");
 
     // Gone with its client, even with an inbox request waiting.
     assert!(ana.close().await.success());
@@ -772,6 +810,18 @@ async fn channel_pushes_again_what_a_dropped_answer_delivered() {
     assert!(content.contains("Or at 6?"), "{content}");
     assert!(!content.contains("\nDeploy at 5?\n"), "{content}");
     assert!(!content.contains("Pushed again"), "{content}");
+
+    // In case neither event reached the agent, the inbox shows the thread once, with both.
+    let inbox = ana.ok("inbox", json!({})).await;
+    assert_eq!(
+        inbox.matches(&format!("### Thread {id}")).count(),
+        1,
+        "{inbox}"
+    );
+    assert!(!inbox.contains("Pushed to this session"), "{inbox}");
+    for text in ["\nDeploy at 5?\n", "\nOr at 6?\n"] {
+        assert_eq!(inbox.matches(text).count(), 1, "{text}: {inbox}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

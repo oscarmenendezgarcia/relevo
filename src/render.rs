@@ -66,29 +66,6 @@ fn handles(v: &Value) -> String {
         .unwrap_or_default()
 }
 
-/// The person this client acts for, when a thread shows it: a `direct` open thread is waiting
-/// for a person exactly when its latest note is not theirs.
-pub fn learn_me(thread: &Value) -> Option<String> {
-    if s(&thread["kind"]) != "direct" || s(&thread["status"]) != "open" {
-        return None;
-    }
-    // `new_notes` are the notes past what reached this session: they end at the latest note.
-    let notes = thread.get("notes").or_else(|| thread.get("new_notes"))?;
-    let latest = s(&notes.as_array()?.last()?["author"]);
-    if latest.is_empty() {
-        return None;
-    }
-    if thread["waiting_for_you"] == false {
-        return Some(latest.to_string());
-    }
-    // Waiting, so the latest author is not us: in a thread of two, we are the other one.
-    match thread["participants"].as_array().map(Vec::as_slice) {
-        Some([a, b]) if s(a) == latest => Some(s(b).to_string()),
-        Some([a, b]) if s(b) == latest => Some(s(a).to_string()),
-        _ => None,
-    }
-}
-
 /// The team list: handle, name, about, and where their agents work now.
 pub fn team(team: &Value, me: Option<&str>) -> String {
     let mut out = String::from("Team (their agents' live contexts in brackets):\n");
@@ -157,6 +134,11 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
         Some("other-session") => "Another of your sessions holds it: leave it to that session.\n",
         _ => "Nobody of yours has taken it.\n",
     });
+    if s(&t["kind"]) == "team" && s(&t["status"]) == "open" && Some(opener) != me {
+        out.push_str(
+            "A team question: answer it only if you have something useful, never with \"On it.\".\n",
+        );
+    }
 
     let (notes, partial) = match t.get("notes") {
         Some(n) => (n, false),
@@ -168,6 +150,11 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
             out,
             "No new notes (call thread with id \"{id}\" for the history)."
         );
+    } else if partial && notes.iter().any(|n| n["pushed"] == true) {
+        out.push_str(
+            "New notes (those marked \"pushed earlier\" reached this session as channel events; \
+             shown again in case they did not reach you):\n",
+        );
     } else if partial {
         out.push_str("New notes:\n");
     }
@@ -176,11 +163,16 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
         let mine = Some(author) == me;
         let _ = writeln!(
             out,
-            "\n- note {} by @{author}{} via \"{}\", {}",
+            "\n- note {} by @{author}{} via \"{}\", {}{}",
             s(&n["id"]),
             if mine { " (you)" } else { "" },
             s(&n["via"]),
-            s(&n["created_at"])
+            s(&n["created_at"]),
+            if n["pushed"] == true {
+                " (pushed earlier)"
+            } else {
+                ""
+            }
         );
         if mine {
             out.push_str(&neutralise(s(&n["text"])));
@@ -223,9 +215,16 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
     out
 }
 
-/// A whole inbox answer.
+/// A whole inbox answer; `me` is the person the token acts for (`you`).
 pub fn inbox(v: &Value, me: Option<&str>) -> String {
-    let mut out = format!("You are session {}.\n\n", session(&v["session"]));
+    let mut out = match me {
+        Some(me) => format!(
+            "You speak for @{me} (your person): notes by @{me} are theirs, from this session or \
+             another of theirs. This is session {}.\n\n",
+            session(&v["session"])
+        ),
+        None => format!("You are session {}.\n\n", session(&v["session"])),
+    };
     out.push_str(&team(&v["team"], me));
     let threads = v["threads"]
         .as_array()
@@ -239,9 +238,12 @@ pub fn inbox(v: &Value, me: Option<&str>) -> String {
         out.push_str(&thread(t, me));
     }
     let more = v["more"].as_i64().unwrap_or(0);
-    let had_new = threads
-        .iter()
-        .any(|t| t["new_notes"].as_array().is_some_and(|n| !n.is_empty()));
+    // Notes pushed earlier were delivered then: they do not make room for the rest.
+    let had_new = threads.iter().any(|t| {
+        t["new_notes"]
+            .as_array()
+            .is_some_and(|n| n.iter().any(|n| n["pushed"] != true))
+    });
     if more > 0 && had_new {
         // Those shown are delivered now, so the rest come up next.
         let _ = write!(
@@ -284,6 +286,8 @@ pub fn sent(v: &Value) -> String {
             "Written: note {note} in thread {id}, which is {}.",
             s(&v["status"])
         ),
+        // A close without text took nothing: another session holding it changes nothing here.
+        None if v["claimed"] == "other-session" => return format!("Closed thread {id}."),
         None => format!("Closed thread {id}."),
     };
     out.push(' ');
@@ -339,6 +343,44 @@ mod tests {
         // A title of our own is ours.
         let mine = thread(&t, Some("ana"));
         assert!(mine.contains("Title (yours): x\""), "{mine}");
+    }
+
+    #[test]
+    fn notes_pushed_earlier_are_marked_and_make_no_room() {
+        let mut t = sample();
+        t["new_notes"][0]["pushed"] = true.into();
+        let out = thread(&t, Some("oscar"));
+        assert!(out.contains("those marked \"pushed earlier\""), "{out}");
+        assert!(
+            out.contains("2026-11-08T10:41:00Z (pushed earlier)\n"),
+            "{out}"
+        );
+        // Delivered when pushed: another inbox call would show the same threads.
+        let v = json!({ "team": [], "session": { "label": "x", "context": null },
+                        "threads": [t], "more": 2 });
+        let out = inbox(&v, Some("oscar"));
+        assert!(out.contains("older ones, also waiting"), "{out}");
+    }
+
+    #[test]
+    fn team_questions_ask_for_something_useful_only() {
+        let mut t = sample();
+        t["kind"] = "team".into();
+        let out = thread(&t, Some("oscar"));
+        assert!(
+            out.contains("team question from @ana to everyone; open"),
+            "{out}"
+        );
+        assert!(
+            out.contains("answer it only if you have something useful, never with \"On it.\""),
+            "{out}"
+        );
+        // Not to the one who asked, nor once closed.
+        assert!(!thread(&t, Some("ana")).contains("A team question"));
+        t["status"] = "closed".into();
+        assert!(!thread(&t, Some("oscar")).contains("A team question"));
+        // Direct threads have no such line.
+        assert!(!thread(&sample(), Some("oscar")).contains("A team question"));
     }
 
     #[test]
@@ -403,7 +445,6 @@ mod tests {
                 { "handle": "ana", "note": "n_1", "delivered_at": "t2", "by": { "label": "Claude Code", "context": "pagos-api" }, "claimed_by": null, "seen_by": 2 }
             ]
         });
-        assert_eq!(learn_me(&t).as_deref(), Some("oscar"));
         let out = thread(&t, Some("oscar"));
         assert!(
             out.contains("by @oscar (you) via \"cli\", t\nmine\n"),
@@ -422,21 +463,6 @@ mod tests {
     }
 
     #[test]
-    fn who_we_are_follows_from_waiting() {
-        // Waiting for us, latest by ana, two participants: we are oscar.
-        assert_eq!(learn_me(&sample()).as_deref(), Some("oscar"));
-        let mut team = sample();
-        team["kind"] = "team".into();
-        assert_eq!(learn_me(&team), None);
-        let mut three = sample();
-        three["participants"] = json!(["ana", "oscar", "bob"]);
-        assert_eq!(learn_me(&three), None);
-        let mut closed = sample();
-        closed["status"] = "closed".into();
-        assert_eq!(learn_me(&closed), None);
-    }
-
-    #[test]
     fn inbox_and_send_results() {
         let v = json!({
             "team": [
@@ -449,7 +475,10 @@ mod tests {
         });
         let out = inbox(&v, Some("oscar"));
         assert!(
-            out.starts_with("You are session \"Claude Code\" (general)."),
+            out.starts_with(
+                "You speak for @oscar (your person): notes by @oscar are theirs, from this \
+                 session or another of theirs. This is session \"Claude Code\" (general).\n"
+            ),
             "{out}"
         );
         assert!(
@@ -471,7 +500,9 @@ mod tests {
             "{out}"
         );
         let empty = json!({ "team": [], "session": { "label": "x", "context": "a" }, "threads": [], "more": 0 });
-        assert!(inbox(&empty, None).contains("Nothing new"));
+        let out = inbox(&empty, None);
+        assert!(out.starts_with("You are session \"x\" in a."), "{out}");
+        assert!(out.contains("Nothing new"), "{out}");
 
         let other =
             json!({ "thread": "r_1", "note": "n_2", "status": "open", "claimed": "other-session" });
@@ -483,5 +514,8 @@ mod tests {
             sent(&closed),
             "Closed thread r_1. Nobody of yours holds the thread."
         );
+        // Closed while another session holds it: nothing to step aside from, no note written.
+        let held = json!({ "thread": "r_1", "note": null, "status": "closed", "claimed": "other-session" });
+        assert_eq!(sent(&held), "Closed thread r_1.");
     }
 }
