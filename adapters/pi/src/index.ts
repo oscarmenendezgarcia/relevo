@@ -111,6 +111,8 @@ export function relevoExtension(options: Options = {}) {
         "or write in an existing one with `thread`. `close: true` closes the thread after writing; `text` may then be left out. " +
         "Before opening a new thread, look at relevo_inbox: an answer may already be waiting, and the team's `about` lines say whom to ask; " +
         "ask @team only when you do not know who knows. Writing in a thread takes it for this session; opening one does not. " +
+        'If you can answer at once, just answer: no "On it." first. Send "On it." only when the note needs work before you can answer, ' +
+        "and never to a team question. " +
         "The note must be self-contained: the reader does not share your context. Returns the thread id and who holds it.",
       promptSnippet: "Send a note to a teammate, to @team, or in a Relevo thread (look at relevo_inbox before opening a new one)",
       parameters: {
@@ -139,9 +141,10 @@ export function relevoExtension(options: Options = {}) {
       name: "relevo_inbox",
       label: "Relevo inbox",
       description:
-        "What is new for this session in Relevo and what waits for your person, starting with the team list (handle, about, live contexts). " +
+        "What is new for this session in Relevo and what waits for your person, starting with the team list (handle, about, live contexts) " +
+        "and whom you speak for (`you`). Look here before opening a new thread: an answer may already be waiting. " +
         "Reading it marks the notes shown as delivered to this session. `all: true` shows every thread of your person, from any session.",
-      promptSnippet: "Read the Relevo inbox: new notes, threads waiting for a reply, the team",
+      promptSnippet: "Read the Relevo inbox: whom you speak for, new notes, threads waiting for a reply, the team",
       parameters: {
         type: "object",
         properties: { all: { type: "boolean", description: "Every thread of your person, ignoring routing and claims." } },

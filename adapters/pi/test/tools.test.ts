@@ -128,6 +128,15 @@ test("send tells the agent to look at its inbox before opening a thread", () => 
   assert.match(send.description, /Before opening a new thread, look at relevo_inbox: an answer may already be waiting/);
   assert.match(send.description, /ask @team only when you do not know who knows/);
   assert.match(send.promptSnippet, /look at relevo_inbox before opening a new one/);
+  assert.match(send.description, /If you can answer at once, just answer: no "On it\." first\./);
+  assert.match(send.description, /Send "On it\." only when the note needs work before you can answer, and never to a team question\./);
+});
+
+test("the inbox says it tells whom you speak for, and to look there before opening a thread", () => {
+  const inbox = extension().tools.get("relevo_inbox");
+  assert.match(inbox.description, /whom you speak for \(`you`\)/);
+  assert.match(inbox.description, /Look here before opening a new thread: an answer may already be waiting\./);
+  assert.match(inbox.promptSnippet, /whom you speak for/);
 });
 
 test("without configuration the tools say how to connect", async () => {
