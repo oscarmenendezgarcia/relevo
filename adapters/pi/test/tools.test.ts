@@ -5,6 +5,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
+import { RULES } from "../src/index.ts";
 import { loadExtension } from "./mock-pi.ts";
 import { api, startServer, type TestServer } from "./server.ts";
 
@@ -122,6 +123,13 @@ test("errors name the code, and an unknown person lists the team", async () => {
   await assert.rejects(extension("rlv_" + "x".repeat(43)).tool("relevo_inbox", {}, work), /Relevo UNAUTHORIZED/);
 });
 
+test("send tells the agent to look at its inbox before opening a thread", () => {
+  const send = extension().tools.get("relevo_send");
+  assert.match(send.description, /Before opening a new thread, look at relevo_inbox: an answer may already be waiting/);
+  assert.match(send.description, /ask @team only when you do not know who knows/);
+  assert.match(send.promptSnippet, /look at relevo_inbox before opening a new one/);
+});
+
 test("without configuration the tools say how to connect", async () => {
   const ext = loadExtension({ env: {}, home });
   await assert.rejects(ext.tool("relevo_inbox", {}, work), /relevo connect <url> <token>/);
@@ -205,7 +213,7 @@ test("a server that does not say `you` leaves every note wrapped and the prompt 
     assert.match(out, /by @oscar via "pi laptop"[^\n]*\n<untrusted from="@oscar">\nMine\n<\/untrusted>/);
     const event = { systemPromptOptions: { sections: {} as Record<string, string> } };
     await ext.emit("before_agent_start", event, ext.ctx(work));
-    assert.doesNotMatch(event.systemPromptOptions.sections.relevo, /You speak for/);
+    assert.equal(event.systemPromptOptions.sections.relevo, RULES);
     assert.equal(people, 1, "not asked again at once after an answer without `you`");
   } finally {
     fake.close();

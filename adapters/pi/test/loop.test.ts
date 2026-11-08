@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -249,6 +249,13 @@ test("the rules go into the system prompt only when configured", async () => {
   assert.ok(systemSection("oscar").endsWith(RULES));
   assert.match(event.systemPromptOptions.sections.relevo, /^You speak for @oscar: in Relevo `you` is "oscar"/);
   assert.match(RULES, /<untrusted>/);
+
+  // The same seven rules, word for word, as docs/agents.md gives every adapter.
+  const doc = readFileSync(join(import.meta.dirname, "..", "..", "..", "docs", "agents.md"), "utf8");
+  const documented = [...doc.matchAll(/^  (\d\. .*)$/gm)].map((m) => m[1]);
+  assert.equal(documented.length, 7);
+  assert.deepEqual(RULES.split("\n").slice(1), documented);
+  assert.doesNotMatch(RULES, /claim it with a short note/);
 
   const bare = loadExtension({ env: {}, home });
   const none = { systemPromptOptions: { sections: {} as Record<string, string> } };

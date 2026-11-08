@@ -129,3 +129,48 @@ test("an arrival with many new notes keeps the latest whole and points to relevo
   assert.match(out, /New notes \(20\), the latest \d+ shown:/);
   assert.match(out, /\d+ earlier new note\(s\) not shown here: read them with relevo_thread \{ id: "r_aaaaaaaaaaaa" \}\./);
 });
+
+function arrivalThread(kind: "direct" | "team", claimed: Thread["claimed"] = null): Thread {
+  return {
+    id: "r_bbbbbbbbbbbb",
+    kind,
+    title: "Which queue?",
+    from: "ana",
+    participants: kind === "team" ? ["ana"] : ["ana", "oscar"],
+    status: "open",
+    waiting_for_you: kind === "direct",
+    context: null,
+    claimed,
+    new_notes: [{ id: "n_bbbbbbbbbbbb", author: "ana", via: "pi test", created_at: "2026-11-08T10:41:00Z", text: "Which queue?", truncated: false }],
+  };
+}
+
+test("a direct arrival says who you are, to answer at once if you can, and when to send On it.", () => {
+  const out = renderArrival(arrivalThread("direct"), "oscar");
+  assert.match(out, /^Relevo: new in thread r_bbbbbbbbbbbb\. You speak for @oscar\. /);
+  assert.match(out, /If you can answer at once, just answer with relevo_send \{ thread: "r_bbbbbbbbbbbb", text: … \}: your reply takes the thread\./);
+  assert.match(out, /If it needs work first, send a short "On it\." there before changing anything/);
+  assert.match(out, /ask your person, unless they already told you to handle this thread/);
+  assert.doesNotMatch(out, /claim it first/);
+  assert.doesNotMatch(out, /step aside/);
+});
+
+test("a team arrival never asks for On it.", () => {
+  const out = renderArrival(arrivalThread("team"), "oscar");
+  assert.match(out, /^Relevo: a team question in thread r_bbbbbbbbbbbb, to everyone\. You speak for @oscar\. /);
+  assert.match(out, /only if you have something useful; otherwise stay silent\. Never send "On it\." to a team question\./);
+  assert.doesNotMatch(out, /send a short "On it\."/);
+});
+
+test("an arrival held by another of your sessions says to step aside, and your own new notes are not wrapped", () => {
+  const t = arrivalThread("direct", "other-session");
+  t.new_notes!.unshift({ id: "n_aaaaaaaaaaab", author: "oscar", via: "pi laptop", created_at: "2026-11-08T10:40:00Z", text: "Mine first", truncated: false });
+  const out = renderArrival(t, "oscar");
+  assert.match(out, /Another of your person's sessions holds this thread: step aside\./);
+  assert.match(out, /by @oscar \(you\) via "pi laptop"[^\n]*\nMine first\n/);
+  assert.match(out, /<untrusted from="@ana">\nWhich queue\?\n<\/untrusted>/);
+  // Without `you`, nothing is taken for yours.
+  const unknown = renderArrival(t);
+  assert.doesNotMatch(unknown, /You speak for/);
+  assert.match(unknown, /<untrusted from="@oscar">\nMine first\n<\/untrusted>/);
+});
