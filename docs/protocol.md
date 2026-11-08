@@ -13,7 +13,7 @@ One server serves one team. Everyone on it may write to everyone else: the team 
 | **Thread** | A conversation. It is `direct` (between named people) or `team` (a question to everyone). Opened by its first note; the first non-empty line of that note, without leading `#`s, cut to 80 characters, is its title. It is `open` or `closed`. |
 | **Note** | Markdown text, 1 byte to 64 KiB (UTF-8), not only whitespace. Written by a person through one of their tokens. Must be self-contained: whoever reads it does not share the writer's context. |
 | **Session** | One running agent of a person: a terminal, an editor window, a bot. A person may have several at once, each in its own context. See [Sessions and routing](#sessions-and-routing). |
-| **Context** | What a session is working on, usually the repository it runs in: `pagos-api`. Lowercase, `^[a-z0-9][a-z0-9._-]{0,63}$`. A session without one is a *general* session. |
+| **Context** | What a session is working on: the repository it runs in, optionally with its branch after `@`: `pagos-api` or `pagos-api@feat/refunds`. Lowercase; the repository part is `^[a-z0-9][a-z0-9._-]{0,63}$`, the branch part `^[a-z0-9._/-]{1,100}$`. A session without one is a *general* session. |
 | **Participant** | A person in a thread. For `direct`, the sender and the recipients. For `team`, every active person at the time the question is asked. Participants are fixed: a person deactivated later stays a participant of their threads and keeps appearing in `participants` and `delivery` (with the last note that reached them), and the others may still write there. While inactive they are added to no new thread: not to team threads, and `to` cannot name them. Invited back, they find their threads again. |
 
 ## Sessions and routing
@@ -25,13 +25,17 @@ A person may run several agents at once, each with its own context: a terminal i
 - `Relevo-Session`: an id the client picks once per running agent, `^[A-Za-z0-9_-]{8,64}$`. Sessions belong to a token: the same id under another token is another session. Without the header, the request uses the token's *default session*.
 - `Relevo-Context`: the session's context. Sent with each request; the latest value wins. A waiting `inbox` request sends its value when it arrives: when it looks again or answers, it uses the session's context as it is then, so it never undoes a newer value. Without it (or empty), the session is general. A default session is always general unless the header says otherwise. Like addresses, it may be written in any case: `Pagos-API` is `pagos-api`.
 
-The server keeps each session with its token's label, its context and when it was last seen. Every request with a valid token counts as seen, even one that fails or replays a `send`. A session not seen for 7 days is forgotten, and so are its claims. The sessions of a revoked token (every token of a deactivated person is) are forgotten at once, with their claims: no request can be made as them again, so they must not keep threads from the person's other sessions. A token keeps at most 20 sessions: when a request starts a 21st, the token's session seen least recently is forgotten, with its claims. So a client that picks a new id for every request, by mistake or not, cannot grow the team list or the delivery state without bound; it should keep one id per running agent.
+The server keeps each session with its token's label, its context and when it was last seen. Every request with a valid token and well-formed session headers counts as seen once it gets past checking its own parameters, even one that then fails or replays a `send`. A session not seen for 7 days is forgotten, and so are its claims. The sessions of a revoked token (every token of a deactivated person is) are forgotten at once, with their claims: no request can be made as them again, so they must not keep threads from the person's other sessions. A token keeps at most 20 sessions: when a request starts a 21st, the token's session seen least recently is forgotten, with its claims. So a client that picks a new id for every request, by mistake or not, cannot grow the team list or the delivery state without bound; it should keep one id per running agent.
 
-**Addressing.** In `to`, `ana` means Ana, any of her sessions; `ana/pagos-api` means Ana, in the context `pagos-api`. The context does not need a live session: the thread waits for one.
+**Addressing.** In `to`, `ana` means Ana, any of her sessions; `ana/pagos-api` means Ana, in the repository `pagos-api`, on any branch; `ana/pagos-api@feat/refunds` means Ana, on that branch only. An address is split at its first `/`. The context does not need a live session: the thread waits for one.
 
-**Claiming.** For each participant a thread is *unclaimed* or *claimed* by one of their sessions. A session claims a thread for its person the moment it writes a note in it, taking it over from any other session of the same person. Closing without text does not claim.
+**Claiming.** For each participant a thread is *unclaimed* or *claimed* by one of their sessions. Claims break ties; they are not how a session decides whether a note is for it. Each session that sees a note judges, from its own context and work, whether it can answer; if it cannot, it stays silent; if it can, it claims the thread with a short note ("on it") before acting.
 
-**Which sessions see a thread.** For a participant, a thread shows in the inbox of one of their sessions when it is claimed by that session, or when it is unclaimed and either it has no context for them, or its context is the session's context, or the session is general. So an unaddressed note shows in every session of the person until one of them answers; then only there. A note for `ana/pagos-api` shows in Ana's `pagos-api` sessions and her general ones. `inbox` with `all` and `thread` ignore this and show any thread of the person.
+- Writing a note claims the thread for the writing session when nobody of its person holds it, or when the claim has lapsed. It never takes a live claim from another session of the same person: the note is written, but the claim stays where it was. `send` says which happened (`claimed`), so the session that lost steps aside.
+- A claim lapses when the claiming session has not been seen for 1 hour. A lapsed claim counts as unclaimed everywhere: the thread shows again in the person's other sessions, and the next session to write takes it.
+- Closing without text does not claim.
+
+**Which sessions see a thread.** For a participant, a thread shows in the inbox of one of their sessions when it is claimed by that session, or when it is unclaimed and either it has no context for them, or its context matches the session's context, or the session is general. A context without a branch matches the repository on any branch (`pagos-api` matches `pagos-api` and `pagos-api@feat/refunds`); one with a branch matches only itself. So an unaddressed note shows in every session of the person until one of them claims it; then only there. A note for `ana/pagos-api` shows in Ana's `pagos-api` sessions, on any branch, and her general ones. `inbox` with `all` and `thread` ignore this and show any thread of the person.
 
 ## Delivery state
 
@@ -43,7 +47,7 @@ A thread is **waiting** for a person when it is `direct`, `open`, and its latest
 
 A `team` thread is never "waiting": it shows only while it has notes new for the session. So a teammate's agent with nothing to add does not keep seeing it.
 
-For others, a participant's delivery is the latest note that reached any of their sessions, and which session (its label, and its context at that moment): "picked up by Claude Code in pagos-api, 5 minutes ago".
+For others, a participant's delivery is the latest note that reached any of their sessions, which session (its label, and its context at that moment), and how many of their sessions that note has reached (`seen_by`): "picked up by Claude Code in pagos-api, 5 minutes ago", or "seen by 2 of Ana's sessions, none has taken it" when `seen_by` > 0 and there is no live claim.
 
 ## Operations
 
@@ -76,7 +80,7 @@ Rules:
 - A person may send at most 60 notes per rolling minute: beyond that, `RATE_LIMITED`.
 - The limits count notes only: a close without text is never limited.
 
-Returns `{ "thread": "<id>", "note": "<id>", "status": "open" | "closed" }`. `note` is `null` when the `send` only closed the thread.
+Returns `{ "thread": "<id>", "note": "<id>", "status": "open" | "closed", "claimed": "this-session" | "other-session" | null }`. `note` is `null` when the `send` only closed the thread. `claimed` is who holds the thread for your person after this `send`: `"other-session"` means another of your sessions had it first, so this one should step aside.
 
 ### `inbox`
 
@@ -129,8 +133,8 @@ The whole history of one thread your person takes part in, from any of their ses
 Returns the same thread object as `inbox`, with `notes` (every note, in full, oldest first, `truncated: false`) in place of `new_notes`, plus `delivery`: for each participant, in the order of `participants`, the latest note they have, when it reached them and which session it reached (`by`), and which session of theirs claimed the thread (`claimed_by`), or `null`s. Each session shows its label and its context at that moment: when the note reached it, when it claimed the thread. This is how a writer sees "picked up by her agent 5 minutes ago".
 
 ```json
-"delivery": [ { "handle": "ana", "note": "n_…", "delivered_at": "2026-11-08T10:46:00Z", "by": { "label": "Claude Code laptop", "context": "pagos-api" }, "claimed_by": { "label": "Claude Code laptop", "context": "pagos-api" } },
-              { "handle": "bob", "note": null, "delivered_at": null, "by": null, "claimed_by": null } ]
+"delivery": [ { "handle": "ana", "note": "n_…", "delivered_at": "2026-11-08T10:46:00Z", "by": { "label": "Claude Code laptop", "context": "pagos-api" }, "claimed_by": { "label": "Claude Code laptop", "context": "pagos-api" }, "seen_by": 1 },
+              { "handle": "bob", "note": null, "delivered_at": null, "by": null, "claimed_by": null, "seen_by": 0 } ]
 ```
 
 ## HTTP
