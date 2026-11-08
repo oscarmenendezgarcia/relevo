@@ -25,3 +25,9 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 [dev-dependencies]
 http-body-util = "0.1.5"
 tower = { version = "0.5.3", features = ["util"] }
+
+# One binary carries the server and the clients (TLS, MCP): keep it small.
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
