@@ -923,9 +923,12 @@ fn write_as(
             }
             // Writing claims the thread for this session, unless another session of the person
             // holds it: a claim is never taken from a session that still has it.
-            // (A lapsed claim was already ended when this request was seen.)
+            // (A lapsed claim was already ended when this request was seen.) A note from the
+            // holder is not a new claim: `claimed_context` stays the context it claimed in.
             let claimed = tx.execute(
-                "UPDATE participants SET claimed_by = ?3, claimed_context = ?4
+                "UPDATE participants SET claimed_by = ?3,
+                        claimed_context = CASE WHEN claimed_by IS NULL THEN ?4
+                                               ELSE claimed_context END
                  WHERE thread_id = ?1 AND person_id = ?2
                    AND (claimed_by IS NULL OR claimed_by = ?3)",
                 params![thread_id, caller.person_id, session.id, session.context],

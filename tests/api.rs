@@ -2074,6 +2074,26 @@ async fn claimed_by_shows_the_context_the_session_claimed_in() {
 }
 
 #[tokio::test]
+async fn the_holder_writing_from_another_context_keeps_the_claims_first_context() {
+    let t = team(&["ana", "bob"]);
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
+    let pagos = t.agent("bob", "term-0001", "pagos-api");
+    pagos.inbox().await;
+    pagos.ok(json!({ "thread": id, "text": "mine" })).await;
+    // The same session, now elsewhere, writes again: that is not a new claim.
+    let (_, v) = t
+        .agent("bob", "term-0001", "acquisition")
+        .send(json!({ "thread": id, "text": "still mine" }))
+        .await;
+    assert_eq!(v["claimed"], "this-session");
+    let d = &t.thread("ana", &id).await["delivery"][1];
+    assert_eq!(
+        d["claimed_by"],
+        json!({ "label": "laptop", "context": "pagos-api" })
+    );
+}
+
+#[tokio::test]
 async fn a_session_seen_within_the_hour_keeps_its_claim_until_it_stops() {
     let t = team(&["ana", "bob"]);
     let pagos = t.agent("bob", "term-pagos", "pagos-api");
