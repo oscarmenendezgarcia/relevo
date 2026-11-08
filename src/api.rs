@@ -122,8 +122,11 @@ struct ThreadRow {
 
 // ---------- queries shared by the handlers ----------
 
-/// Threads of person `?1`, with what `inbox` and `thread` need to know about each.
-const THREADS_OF: &str = "
+/// Threads of person `?1` that match `filter` (on `p`, their participant row, and `t`, the
+/// thread), with what `inbox` and `thread` need to know about each.
+fn threads_of(filter: &str) -> String {
+    format!(
+        "
 SELECT id, kind, title, opener, opener_id, status, delivered_seq, last_seq,
        (kind = 'direct' AND status = 'open' AND last_author != ?1) AS waiting
 FROM (
@@ -135,8 +138,36 @@ FROM (
     FROM participants p
     JOIN threads t ON t.id = p.thread_id
     JOIN people o ON o.id = t.opener_id
-    WHERE p.person_id = ?1
-)";
+    WHERE p.person_id = ?1 AND ({filter})
+)"
+    )
+}
+
+/// The threads `inbox` shows, in its order.
+fn inbox_sql() -> String {
+    format!(
+        "{} WHERE waiting OR last_seq > delivered_seq
+         ORDER BY last_seq > delivered_seq DESC, waiting DESC, last_seq DESC",
+        threads_of("p.inbox = 1")
+    )
+}
+
+/// Recomputes the `inbox` flag of every participant of a thread: set while the thread holds
+/// notes not delivered to them, or is waiting for them. Runs after every change to the thread.
+fn refresh(conn: &Connection, thread: &str) -> Result<(), ApiError> {
+    conn.execute(
+        "UPDATE participants SET inbox = (
+             coalesce(delivered_seq, 0) < (SELECT coalesce(max(seq), 0) FROM notes
+                                           WHERE thread_id = ?1)
+             OR EXISTS (SELECT 1 FROM threads
+                        WHERE id = ?1 AND kind = 'direct' AND status = 'open'
+                          AND (SELECT author_id FROM notes WHERE thread_id = ?1
+                               ORDER BY seq DESC LIMIT 1) != participants.person_id))
+         WHERE thread_id = ?1",
+        [thread],
+    )?;
+    Ok(())
+}
 
 fn thread_row(r: &rusqlite::Row) -> rusqlite::Result<ThreadRow> {
     Ok(ThreadRow {
@@ -153,8 +184,7 @@ fn thread_row(r: &rusqlite::Row) -> rusqlite::Result<ThreadRow> {
 }
 
 fn find_thread(conn: &Connection, me: i64, id: &str) -> Result<ThreadRow, ApiError> {
-    let sql = format!("{THREADS_OF} WHERE id = ?2");
-    conn.query_row(&sql, params![me, id], thread_row)
+    conn.query_row(&threads_of("t.id = ?2"), params![me, id], thread_row)
         .optional()?
         .ok_or_else(|| ApiError::not_found("no such thread"))
 }
@@ -224,7 +254,7 @@ fn deliver(
          WHERE thread_id = ?1 AND person_id = ?2 AND coalesce(delivered_seq, 0) < ?3",
         params![thread, person, seq, now],
     )?;
-    Ok(())
+    refresh(conn, thread)
 }
 
 fn thread_out(conn: &Connection, row: &ThreadRow) -> Result<ThreadOut, ApiError> {
@@ -253,12 +283,8 @@ async fn inbox(State(app): State<Arc<App>>, caller: Caller) -> Result<Json<Value
     let now = app.clock.now();
     let mut conn = app.db();
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let sql = format!(
-        "{THREADS_OF} WHERE waiting OR last_seq > delivered_seq
-         ORDER BY last_seq > delivered_seq DESC, waiting DESC, last_seq DESC"
-    );
     let rows: Vec<ThreadRow> = tx
-        .prepare(&sql)?
+        .prepare(&inbox_sql())?
         .query_map([caller.person_id], thread_row)?
         .collect::<rusqlite::Result<_>>()?;
     let more = rows.len().saturating_sub(INBOX_THREADS);
@@ -470,6 +496,7 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<SendResult, Api
             [&thread_id],
         )?;
     }
+    refresh(&tx, &thread_id)?;
     let result = SendResult {
         thread: thread_id,
         note: note_id,
@@ -597,7 +624,27 @@ fn title_of(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::title_of;
+    use super::{inbox_sql, title_of};
+
+    /// The inbox must not visit every thread a person ever took part in: agents poll it, and
+    /// it runs under the lock every request needs.
+    #[test]
+    fn inbox_reads_only_the_rows_flagged_for_the_inbox() {
+        let conn = crate::db::open(":memory:").unwrap();
+        let mut stmt = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", inbox_sql()))
+            .unwrap();
+        let plan: Vec<String> = stmt
+            .query_map([1], |r| r.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("p USING INDEX participants_inbox")),
+            "{plan:#?}"
+        );
+    }
 
     #[test]
     fn titles() {

@@ -897,7 +897,10 @@ async fn waiting_threads_with_nothing_new_never_hide_new_notes() {
         .ok("carl", json!({ "to": ["@team"], "text": "urgent" }))
         .await;
     let closed = t
-        .ok("carl", json!({ "to": ["bob"], "text": "fyi", "close": true }))
+        .ok(
+            "carl",
+            json!({ "to": ["bob"], "text": "fyi", "close": true }),
+        )
         .await;
     let inbox = t.inbox("bob").await;
     let shown = thread_ids(&inbox);
