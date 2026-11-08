@@ -296,12 +296,18 @@ pub fn set_about(conn: &Connection, handle: &str, about: &str) -> Result<()> {
     Ok(())
 }
 
-/// Deactivated people can no longer authenticate nor receive new threads.
-/// Their tokens are kept, so `invite` can bring them back.
-pub fn deactivate(conn: &Connection, handle: &str) -> Result<()> {
+/// Deactivated people can no longer authenticate nor receive new threads. Every token of theirs
+/// is revoked for good: `invite` brings them back with a new one. Returns how many it revoked.
+pub fn deactivate(conn: &Connection, handle: &str, now: i64) -> Result<usize> {
     let id = person_id(conn, handle)?;
-    conn.execute("UPDATE people SET active = 0 WHERE id = ?1", [id])?;
-    Ok(())
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("UPDATE people SET active = 0 WHERE id = ?1", [id])?;
+    let revoked = tx.execute(
+        "UPDATE tokens SET revoked_at = ?2 WHERE person_id = ?1 AND revoked_at IS NULL",
+        params![id, now],
+    )?;
+    tx.commit()?;
+    Ok(revoked)
 }
 
 #[cfg(test)]
@@ -334,7 +340,7 @@ mod tests {
     fn invite_reuses_and_reserves() {
         let conn = open(":memory:").unwrap();
         invite(&conn, "ana", "Ana", Some("payments"), "laptop", 0).unwrap();
-        deactivate(&conn, "ana").unwrap();
+        deactivate(&conn, "ana", 0).unwrap();
         invite(&conn, "ana", "Ana B", None, "desktop", 0).unwrap();
         let people = list_people(&conn).unwrap();
         assert_eq!(people.len(), 1);
@@ -369,7 +375,7 @@ mod tests {
     fn failed_invite_changes_nothing() {
         let conn = open(":memory:").unwrap();
         invite(&conn, "ana", "Ana", None, "laptop", 0).unwrap();
-        deactivate(&conn, "ana").unwrap();
+        deactivate(&conn, "ana", 0).unwrap();
         assert!(invite(&conn, "ana", "Ana B", None, "  ", 0).is_err());
         assert!(invite(&conn, "zoe", "Zoe", None, "a\nb", 0).is_err());
         let people = list_people(&conn).unwrap();

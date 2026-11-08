@@ -44,7 +44,7 @@ enum Command {
     People,
     /// Set the one line on what a person (or their agent) knows or looks after.
     About { handle: String, about: String },
-    /// Stop a person from using Relevo (their tokens stop working).
+    /// Stop a person from using Relevo (every token of theirs is revoked).
     Deactivate { handle: String },
 }
 
@@ -145,8 +145,8 @@ async fn main() -> Result<()> {
             println!("{handle}: {about}");
         }
         Command::Deactivate { handle } => {
-            db::deactivate(&conn, &handle)?;
-            println!("deactivated {handle}");
+            let revoked = db::deactivate(&conn, &handle, now)?;
+            println!("deactivated {handle}, revoked {revoked} token(s)");
         }
     }
     Ok(())

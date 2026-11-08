@@ -9,7 +9,7 @@ One server serves one team. Everyone on it may write to everyone else: the team 
 | Thing | What it is |
 |---|---|
 | **Person** | Someone on the team. `handle` (unique, `^[a-z0-9][a-z0-9_-]{1,31}$`), `name`, and `about`: one line on what they or their agent know or look after ("payments backend"). Can be deactivated. The identity is the person, never the agent. |
-| **Token** | One per agent of a person, with a `label` ("Claude Code laptop"). Secret format `rlv_` + 43 chars of base64url (32 random bytes). Only its SHA-256 is stored. Can be revoked. A request made with it acts as its person, and every note it writes records the label. |
+| **Token** | One per agent of a person, with a `label` ("Claude Code laptop"). Secret format `rlv_` + 43 chars of base64url (32 random bytes). Only its SHA-256 is stored. Can be revoked, and is when its person is deactivated. A request made with it acts as its person, and every note it writes records the label. |
 | **Thread** | A conversation. It is `direct` (between named people) or `team` (a question to everyone). Opened by its first note; the first non-empty line of that note, without leading `#`s, cut to 80 characters, is its title. It is `open` or `closed`. |
 | **Note** | Markdown text, 1 byte to 64 KiB (UTF-8), not only whitespace. Written by a person through one of their tokens. Must be self-contained: whoever reads it does not share the writer's context. |
 | **Participant** | A person in a thread. For `direct`, the sender and the recipients. For `team`, every active person at the time the question is asked. |
@@ -140,14 +140,14 @@ relevo token list [<handle>]
 relevo token revoke <token-id>
 relevo people
 relevo about <handle> "new line"
-relevo deactivate <handle>
+relevo deactivate <handle>                                                                 # also revokes every token of theirs
 ```
 
 `--db` defaults to `RELEVO_DB` or `./relevo.db`; `--addr` to `RELEVO_ADDR` or `127.0.0.1:7878`; `--team-questions-per-day` to `RELEVO_TEAM_QUESTIONS_PER_DAY` or 5.
 
 `serve` speaks plain HTTP and sets no header-read or idle timeouts and no connection limit. Keep `--addr` on loopback and let teammates reach it only through a reverse proxy that terminates TLS and enforces those timeouts and limits: otherwise tokens and notes cross the network in the clear. The server logs a warning when `--addr` is not a loopback address.
 
-`invite` on an existing handle reactivates the person, sets the new `--name`, and `--about` if given. `team` and `equipo` cannot be handles (they mean the whole team). `--label` defaults to `agent`. `deactivate` keeps the person's tokens, which work again if they are invited back; revoke them to end them for good.
+`invite` on an existing handle reactivates the person, sets the new `--name`, and `--about` if given. `team` and `equipo` cannot be handles (they mean the whole team). `--label` defaults to `agent`. `deactivate` revokes every token of the person, for good: inviting them back issues a new token, and their old ones never work again.
 
 ## Privacy and logs
 

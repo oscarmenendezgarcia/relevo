@@ -166,7 +166,7 @@ async fn revoked_token_is_unauthorized() {
 #[tokio::test]
 async fn deactivated_person_is_unauthorized_and_unreachable() {
     let t = team(&["ana", "bob", "carl"]);
-    db::deactivate(&t.app.db(), "bob").unwrap();
+    db::deactivate(&t.app.db(), "bob", T0).unwrap();
     let (status, _) = t.get("bob", "/api/inbox").await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let (status, v) = t.send("ana", json!({ "to": ["bob"], "text": "hi" })).await;
@@ -184,12 +184,24 @@ async fn deactivated_person_is_unauthorized_and_unreachable() {
 }
 
 #[tokio::test]
-async fn invited_back_the_old_token_works_again() {
+async fn deactivating_revokes_every_token_and_invited_back_only_the_new_one_works() {
     let t = team(&["ana", "bob"]);
-    db::deactivate(&t.app.db(), "bob").unwrap();
-    assert_eq!(t.get("bob", "/api/inbox").await.0, StatusCode::UNAUTHORIZED);
-    db::invite(&t.app.db(), "bob", "Bob", None, "desktop", T0).unwrap();
-    assert_eq!(t.get("bob", "/api/inbox").await.0, StatusCode::OK);
+    let second = db::add_token(&t.app.db(), "bob", "Codex desktop", T0).unwrap();
+    db::deactivate(&t.app.db(), "bob", T0).unwrap();
+    let tokens = db::list_tokens(&t.app.db(), Some("bob")).unwrap();
+    assert_eq!(tokens.len(), 2);
+    assert!(tokens.iter().all(|t| t.revoked_at == Some(T0)));
+
+    let back = db::invite(&t.app.db(), "bob", "Bob", None, "desktop", T0).unwrap();
+    for old in [t.tokens["bob"].as_str(), second.secret.as_str()] {
+        let (status, v) = t.raw("GET", "/api/inbox", Some(old), Body::empty()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(code(&v), "UNAUTHORIZED");
+    }
+    let (status, _) = t
+        .raw("GET", "/api/inbox", Some(&back.secret), Body::empty())
+        .await;
+    assert_eq!(status, StatusCode::OK);
     t.ok("ana", json!({ "to": ["bob"], "text": "welcome back" }))
         .await;
 }
