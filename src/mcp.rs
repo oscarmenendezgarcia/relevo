@@ -345,7 +345,14 @@ pub fn channel_event(thread: &Value, me: Option<&str>) -> Option<Value> {
         .find(|a| Some(*a) != me)?;
     let id = thread["id"].as_str()?;
     let mut content = render::thread(thread, me);
-    if s(&thread["kind"]) == "team" {
+    if s(&thread["kind"]) == "team" && me.is_some_and(|me| s(&thread["from"]) == me) {
+        // Answers to the person's own question: theirs to read, not the agent's to answer.
+        content.push_str(&format!(
+            "\nThis is your person's own team question, and these notes answer it: tell your \
+             person what they say. Do not answer it yourself; write in it \
+             (send(thread=\"{id}\", …)) only to follow up for your person, or to close it."
+        ));
+    } else if s(&thread["kind"]) == "team" {
         content.push_str(&format!(
             "\nIf your own work or your person's files answer it, reply with \
              send(thread=\"{id}\", text=…); if not, stay silent."
@@ -565,6 +572,21 @@ mod tests {
             content.contains("If your own work or your person's files answer it"),
             "{content}"
         );
+
+        // Our own team question: its answers are for us, with nothing to answer.
+        let mut mine = team.clone();
+        mine["from"] = "oscar".into();
+        mine["new_notes"] = json!([t["new_notes"][0]]);
+        let e = channel_event(&mine, Some("oscar")).unwrap();
+        let content = e["content"].as_str().unwrap();
+        assert!(
+            content.contains("your person's own team question, and these notes answer it"),
+            "{content}"
+        );
+        assert!(content.contains("Do not answer it yourself"), "{content}");
+        for wrong in ["If your own work", "If it is for you", "A team question:"] {
+            assert!(!content.contains(wrong), "{wrong}: {content}");
+        }
     }
 
     #[test]
