@@ -162,6 +162,11 @@ export class Client {
     return this.request("GET", `/api/threads/${encodeURIComponent(id)}`, undefined, signal);
   }
 
+  /** Ends this session on the server: it is forgotten and its claims released (`DELETE /api/session`). */
+  async endSession(timeoutMs = TIMEOUT_MS): Promise<void> {
+    await this.request("DELETE", "/api/session", undefined, undefined, timeoutMs);
+  }
+
   /** One idempotency key per call; a request that fails on the way or on the server is retried once with it. */
   async send(fields: SendFields, signal?: AbortSignal): Promise<SendResult> {
     const body = { ...fields, key: randomUUID() };

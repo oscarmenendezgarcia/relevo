@@ -29,6 +29,9 @@ export function systemSection(me?: string): string {
 const NOT_CONFIGURED =
   "Relevo is not configured: run `relevo connect <url> <token>` (it writes ~/.config/relevo/config.json) or set RELEVO_URL and RELEVO_TOKEN.";
 
+/** How long session_shutdown waits for `DELETE /api/session`. */
+const END_SESSION_TIMEOUT_MS = 2000;
+
 export interface Options {
   env?: NodeJS.ProcessEnv;
   home?: string;
@@ -320,12 +323,23 @@ export function relevoExtension(options: Options = {}) {
       loop.start();
     });
 
+    let ended = false;
     pi.on("session_shutdown", async () => {
       const current = loop;
       loop = null;
       if (retry) clearTimeout(retry);
       retry = null;
       await current?.stop();
+      // End the session on the server, so the threads it holds show again in the
+      // person's other sessions now rather than when the claims lapse. Best effort:
+      // 2 seconds at most; a server out of reach only leaves the claims to lapse.
+      if (ended) return;
+      ended = true;
+      try {
+        await client(sessionCwd).endSession(END_SESSION_TIMEOUT_MS);
+      } catch {
+        // Not configured, or a server unreachable, slow or refusing: nothing more to do on the way out.
+      }
     });
   };
 }

@@ -155,6 +155,60 @@ test("a note arriving during the wait wakes the loop at once", async () => {
   }
 });
 
+test("shutdown ends the session on the server, so the threads it holds show again in the person's other sessions", async () => {
+  const ext = extension();
+  await ext.emit("session_start", { reason: "startup" }, ext.ctx(home, "tui"));
+  const holder = () => thread.delivery.find((d: any) => d.handle === "oscar").claimed_by;
+  let thread: any;
+  try {
+    const opened = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Can you look at the shutdown path?" });
+    await until(() => ext.seen.some((m) => m.details?.thread === opened.thread));
+    assert.match(await ext.tool("relevo_send", { thread: opened.thread, text: "On it." }, home), /This session holds the thread\./);
+    await api(server, ana, "POST", "/api/send", { thread: opened.thread, text: "It is in src/index.ts." });
+    thread = await api(server, oscar, "GET", `/api/threads/${opened.thread}`, undefined, "shutdown-checker");
+    assert.equal(holder()?.label, "pi laptop");
+    const before = await api(server, oscar, "GET", "/api/inbox", undefined, "shutdown-checker");
+    assert.equal(before.threads.find((t: any) => t.id === opened.thread), undefined, "held by the pi session");
+
+    await ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, "tui"));
+
+    thread = await api(server, oscar, "GET", `/api/threads/${opened.thread}`, undefined, "shutdown-checker");
+    assert.equal(holder(), null);
+    const shown = (await api(server, oscar, "GET", "/api/inbox", undefined, "shutdown-checker")).threads.find((t: any) => t.id === opened.thread);
+    assert.ok(shown, "the thread shows again in another session at once");
+    assert.equal(shown.claimed, null);
+    assert.equal(shown.waiting_for_you, true);
+  } finally {
+    await ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, "tui"));
+  }
+});
+
+test("ending the session on shutdown is best effort: a server that never answers holds it up 2 seconds at most", async () => {
+  const deletes: unknown[] = [];
+  // Answers nothing, not even the waiting inbox request.
+  const fake = createServer((req) => {
+    if (req.method === "DELETE" && req.url === "/api/session") deletes.push(req.headers["relevo-session"]);
+  });
+  await new Promise<void>((r) => fake.listen(0, "127.0.0.1", r));
+  const { port } = fake.address() as any;
+  try {
+    const ext = loadExtension({ env: { RELEVO_URL: `http://127.0.0.1:${port}`, RELEVO_TOKEN: "rlv_fake", RELEVO_CONTEXT: "" }, home });
+    await ext.emit("session_start", { reason: "startup" }, ext.ctx(home, "tui"));
+    await sleep(200);
+    const t = Date.now();
+    await ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, "tui"));
+    const took = Date.now() - t;
+    assert.ok(took >= 1500 && took < 3500, `shutdown took ${took} ms`);
+    assert.equal(deletes.length, 1);
+    assert.match(String(deletes[0]), /^pi-[A-Za-z0-9_-]+$/);
+    await ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, "tui")); // twice: no second request
+    assert.equal(deletes.length, 1);
+  } finally {
+    fake.closeAllConnections();
+    fake.close();
+  }
+});
+
 test("print and json runs start no loop", async () => {
   for (const mode of ["print", "json"]) {
     const ext = extension();
@@ -168,8 +222,8 @@ test("print and json runs start no loop", async () => {
 
 test("errors back off, and a refused token stops the loop with a notice", async () => {
   let hits = 0;
-  const fake = createServer((_req, res) => {
-    hits++;
+  const fake = createServer((req, res) => {
+    if (req.method === "GET") hits++; // Inbox requests; shutdown's DELETE is not one.
     res.statusCode = 500;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ error: { code: "INTERNAL", message: "down" } }));
