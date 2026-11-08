@@ -27,6 +27,8 @@ logger = logging.getLogger(__name__)
 PLATFORM_NAME = "relevo"
 # The one silence marker. The gateway already drops a bare one when reply_expected is False.
 _SILENCE = "[SILENT]"
+# The failure a send that is not a turn's final reply gets: nothing was written, nothing to retry.
+_KEPT_OUT = "kept out of the Relevo thread: only a turn's final reply becomes a note"
 _SEEN_LIMIT = 2048
 _ERROR_KINDS = {
     "NOT_FOUND": "not_found", "THREAD_CLOSED": "forbidden", "FORBIDDEN": "forbidden",
@@ -419,10 +421,16 @@ class RelevoAdapter(BasePlatformAdapter):
         """Write the agent's final reply in the thread, and nothing else. Teammates read every note,
         and each one claims the thread: tool progress, interim messages, busy acknowledgements,
         pairing codes and warnings stay out, whatever the owner's display settings say. The base
-        adapter marks a final reply with metadata["notify"]; everything else goes without it."""
-        if not (metadata or {}).get("notify"):
+        adapter marks a final reply with metadata["notify"]; everything else goes without it, and
+        a mid-turn send carries "_interim_send".
+
+        What stays out is not delivered, and says so: the stream consumer counts a successful
+        interim send as text the chat already has, and the gateway then skips a final reply that
+        repeats it (the codex runtime delivers its final answer as commentary)."""
+        meta = metadata or {}
+        if not meta.get("notify") or meta.get("_interim_send"):
             logger.debug("[relevo] kept a gateway message out of thread %s: not a final reply", chat_id)
-            return SendResult(success=True)
+            return SendResult(success=False, error=_KEPT_OUT, error_kind="unknown")
         if content.strip() == _SILENCE:
             return SendResult(success=True)
         text = note_text(content)

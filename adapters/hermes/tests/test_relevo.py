@@ -316,8 +316,12 @@ class Outbound(Base):
         self.assertEqual(notes[-1]["via"], "Hermes")
         self.assertEqual(notes[-1]["id"], result.message_id)
 
-        # The gateway's own busy acknowledgements (sent without the final-reply mark) are not notes.
-        self.assertTrue((await a.send(opened["thread"], "⏳ Queued for the next turn")).success)
+        # The gateway's own busy acknowledgements (sent without the final-reply mark) are not notes,
+        # and the send says it delivered nothing; nor is anything marked as mid-turn.
+        for metadata in (None, {"notify": True, "_interim_send": True}):
+            kept_out = await a.send(opened["thread"], "⏳ Queued for the next turn", metadata=metadata)
+            self.assertFalse(kept_out.success)
+            self.assertEqual(kept_out.error_kind, "unknown")
         # Nor is a silence marker.
         self.assertTrue((await a.send(opened["thread"], "[SILENT]", metadata=FINAL)).success)
         self.assertEqual(len(self.ana.thread(opened["thread"])["notes"]), 2)
@@ -397,7 +401,7 @@ class Outbound(Base):
         chat = opened["thread"]
         # Tool progress goes out as plain sends with the thread metadata (no edit_message here).
         for line in ("💻 terminal: \"ls /var/log\"", "📖 read_file: \"cron.log\"", "⏳ Still working... (10 min)"):
-            self.assertTrue((await a.send(chat, line, metadata={"thread_id": None})).success)
+            self.assertFalse((await a.send(chat, line, metadata={"thread_id": None})).success)
         # Interim commentary goes through the stream consumer, as the gateway wires it.
         consumer = GatewayStreamConsumer(a, chat, StreamConsumerConfig(cursor=""))
         consumer.stream_deltas_enabled = False
@@ -410,6 +414,37 @@ class Outbound(Base):
         self.assertTrue(final.success, final.error)
         notes = self.ana.thread(chat)["notes"]
         self.assertEqual([n["text"] for n in notes[1:]], ["The nightly job failed at 03:02: disk full on /var."])
+
+    async def test_a_final_that_was_also_commentary_is_still_written(self):
+        """The codex runtime and the stop gate deliver the final answer as commentary too. A dropped
+        commentary send that reported success would count as delivered, and the gateway would skip
+        the real final send."""
+        from gateway.dead_targets import classify_dead_error
+        from gateway.run_turn import GatewayTurnMixin
+        from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
+
+        a = self.make_adapter()
+        await a.connect()
+        opened = self.ana.send(to=["oscar"], text="Which port does staging use?")
+        await self.until(lambda: len(self.events) == 1)
+        chat = opened["thread"]
+        answer = "Staging listens on 8443."
+        consumer = GatewayStreamConsumer(a, chat, StreamConsumerConfig(cursor=""))
+        consumer.stream_deltas_enabled = False
+        runner = asyncio.create_task(consumer.run())
+        consumer.on_commentary(answer)
+        consumer.finish()
+        await asyncio.wait_for(runner, 5)
+        self.assertFalse(consumer.has_durably_delivered_text(answer))
+        self.assertFalse(GatewayTurnMixin._run_agent_stream_confirmed_final_delivery(consumer, answer))
+        self.assertEqual(len(self.ana.thread(chat)["notes"]), 1)
+        # So the gateway sends the final, and that one is written.
+        final = await a._send_with_retry(chat_id=chat, content=answer, metadata=FINAL)
+        self.assertTrue(final.success, final.error)
+        self.assertEqual([n["text"] for n in self.ana.thread(chat)["notes"][1:]], [answer])
+        # A kept-out send never makes the gateway think the chat is gone.
+        kept_out = await a.send(chat, "⏳ Still working...")
+        self.assertIsNone(classify_dead_error(kept_out.error))
 
     async def test_a_failed_turn_writes_nothing_and_claims_nothing(self):
         a = new_adapter()
