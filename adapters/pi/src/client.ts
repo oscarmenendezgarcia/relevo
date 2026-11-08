@@ -63,6 +63,8 @@ export interface SendFields {
   thread?: string;
   text?: string;
   close?: boolean;
+  /** With `thread`: claims it for this session, as a state, without a note when there is no `text`. */
+  claim?: boolean;
 }
 
 export interface SendResult {

@@ -92,13 +92,13 @@ test("the context is worked out again for every request", async () => {
 test("thread shows every note and the delivery", async () => {
   const ext = extension();
   const opened = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Can you look at the webhook retries?" });
-  const reply = await ext.tool("relevo_send", { thread: opened.thread, text: "On it." }, work);
+  const reply = await ext.tool("relevo_send", { thread: opened.thread, text: "They back off 1, 5 and 25 minutes." }, work);
   assert.match(reply, /This session holds the thread/);
   const out = await ext.tool("relevo_thread", { id: opened.thread }, work);
   assert.match(out, /Notes \(2\):/);
   assert.match(out, /note n_\w+ by @ana via "pi test"[^\n]*\n<untrusted from="@ana">\nCan you look at the webhook retries\?\n<\/untrusted>/);
   // Your own person's note is marked and not wrapped as untrusted.
-  assert.match(out, /note n_\w+ by @oscar \(you\) via "pi laptop"[^\n]*\nOn it\.\n/);
+  assert.match(out, /note n_\w+ by @oscar \(you\) via "pi laptop"[^\n]*\nThey back off 1, 5 and 25 minutes\.\n/);
   assert.doesNotMatch(out, /<untrusted from="@oscar">/);
   assert.match(out, /Delivery:\n- @ana: [^\n]+\n- @oscar: has up to n_\w+ since [^;]+; reached "pi laptop" in pagos-api@main; seen by 1 of their sessions; held by "pi laptop" in pagos-api@main\./);
 });
@@ -116,9 +116,26 @@ test("a second session of the same person is told to step aside", async () => {
   const first = extension();
   const second = extension();
   const opened = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Who owns the ledger job?" });
-  assert.match(await first.tool("relevo_send", { thread: opened.thread, text: "On it." }, work), /This session holds/);
+  assert.match(await first.tool("relevo_send", { thread: opened.thread, claim: true }, work), /^Claimed thread r_\w+: this session has it now/);
   const out = await second.tool("relevo_send", { thread: opened.thread, text: "Me too." }, work);
   assert.match(out, /claimed: other-session\. Another of your person's sessions holds this thread: step aside/);
+  assert.match(out, /\(your note was still written\)/);
+  const claim = await second.tool("relevo_send", { thread: opened.thread, claim: true }, work);
+  assert.match(claim, /^claimed: other-session\. Another of your person's sessions already has thread r_\w+: step aside[^\n]*\(nothing was written\)\.$/);
+});
+
+test("claim marks the thread as this session's without writing a note, for the others to see", async () => {
+  const ext = extension();
+  const opened = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Can you fix the refund rounding?" });
+  const out = await ext.tool("relevo_send", { thread: opened.thread, claim: true }, work);
+  assert.equal(out, `Claimed thread ${opened.thread}: this session has it now, and the others in the thread see that. No note was written.`);
+  // Nothing written: the thread still has only ana's note, and she sees who has it, since when.
+  const seen = await api(server, ana, "GET", `/api/threads/${opened.thread}`);
+  assert.equal(seen.notes.length, 1);
+  const shown = await ext.tool("relevo_thread", { id: opened.thread }, work);
+  assert.match(shown, /Notes \(1\):/);
+  // Claiming goes with a thread only: opening one claims nothing.
+  await assert.rejects(ext.tool("relevo_send", { to: ["ana"], text: "Hi", claim: true }, work), /Relevo BAD_REQUEST/);
 });
 
 test("errors name the code, and an unknown person lists the team", async () => {
@@ -139,8 +156,12 @@ test("send tells the agent to look at its inbox before opening a thread", () => 
   assert.match(send.description, /answer a team question only from your own work or your person's files\./);
   assert.match(send.description, /ask @team only when you do not know who knows/);
   assert.match(send.promptSnippet, /look at relevo_inbox before opening a new one/);
-  assert.match(send.description, /Read what you need first; if you can answer or explain from that, just answer: no "On it\." first\./);
-  assert.match(send.description, /Send "On it\." only just before you start changing files or running something long, and never to a team question;/);
+  assert.match(send.description, /Read what you need first; if you can answer or explain from that, just answer: the answer claims it\./);
+  assert.match(send.description, /If the note needs work, claim the thread with `thread`, `claim: true` and no text just before you start changing files or running something long: a state the others see, not a note\./);
+  assert.match(send.description, /Never write a note that only says you are on it\. Do not claim team questions;/);
+  assert.match(send.parameters.properties.claim.description, /^With `thread` \(not `to`\): marks the thread as this session's, a state/);
+  assert.match(send.parameters.properties.text.description, /Required unless only closing or claiming a thread\./);
+  assert.doesNotMatch(JSON.stringify(send), /On it/);
   assert.match(send.description, /A new thread starts with a one-line subject \(its title\), no greeting\./);
 });
 

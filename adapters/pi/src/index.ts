@@ -4,7 +4,7 @@
 
 import { homedir } from "node:os";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Client, RelevoError, newSessionId, type Thread } from "./client.ts";
+import { Client, RelevoError, newSessionId, type SendResult, type Thread } from "./client.ts";
 import { loadConfig } from "./config.ts";
 import { detectContext, overrideWarning } from "./context.ts";
 import { InboxLoop } from "./loop.ts";
@@ -49,6 +49,30 @@ function describe(err: unknown): Error {
     text += `\nValid handles:\n${valid.map((p: any) => `- @${p.handle}${p.about ? `: ${p.about}` : ""}`).join("\n")}`;
   }
   return new Error(text);
+}
+
+/** What `send` did, as relevo mcp says it (src/render.rs). */
+export function sent(res: SendResult): string {
+  const id = res.thread;
+  if (!res.note && res.status === "open") {
+    // A claim without text: a state, nothing written.
+    if (res.claimed === "this-session") {
+      return `Claimed thread ${id}: this session has it now, and the others in the thread see that. No note was written.`;
+    }
+    if (res.claimed === "other-session") {
+      return `claimed: other-session. Another of your person's sessions already has thread ${id}: step aside and leave it to that session (nothing was written).`;
+    }
+    return `Nothing was written in thread ${id}, and nobody of yours has it.`;
+  }
+  // A close without text took nothing: another session holding it changes nothing here.
+  if (!res.note && res.claimed === "other-session") return `Closed thread ${id} (thread closed).`;
+  let text = res.note ? `Sent note ${res.note} in thread ${id}` : `Closed thread ${id}`;
+  text += ` (thread ${res.status}).`;
+  if (res.claimed === "this-session") text += " This session holds the thread.";
+  if (res.claimed === "other-session") {
+    text += " claimed: other-session. Another of your person's sessions holds this thread: step aside and leave it to that session (your note was still written).";
+  }
+  return text;
 }
 
 function result(text: string, details: Record<string, unknown> = {}) {
@@ -116,9 +140,10 @@ export function relevoExtension(options: Options = {}) {
         'If your person names whom to ask (a teammate, or the whole team: ["@team"]), send it there. ' +
         "Otherwise, before opening a new thread, look at relevo_inbox: an answer may already be waiting, and the team's `about` lines say whom to ask; " +
         "ask @team only when you do not know who knows. Writing in a thread takes it for this session; opening one does not. " +
-        'Read what you need first; if you can answer or explain from that, just answer: no "On it." first. ' +
-        'Send "On it." only just before you start changing files or running something long, ' +
-        "and never to a team question; answer a team question only from your own work or your person's files. " +
+        "Read what you need first; if you can answer or explain from that, just answer: the answer claims it. " +
+        "If the note needs work, claim the thread with `thread`, `claim: true` and no text just before you start changing files or running something long: " +
+        "a state the others see, not a note. Never write a note that only says you are on it. " +
+        "Do not claim team questions; answer a team question only from your own work or your person's files. " +
         "The note must be self-contained: the reader does not share your context. A new thread starts with a one-line subject (its title), no greeting. " +
         "Returns the thread id and who holds it.",
       promptSnippet: "Send a note to a teammate, to @team, or in a Relevo thread (look at relevo_inbox before opening a new one)",
@@ -127,20 +152,25 @@ export function relevoExtension(options: Options = {}) {
         properties: {
           to: { type: "array", items: { type: "string" }, description: 'Addresses for a new thread, or ["@team"].' },
           thread: { type: "string", description: "Id of the thread to write in (r_…)." },
-          text: { type: "string", description: "The note, in Markdown. Opening a thread, its first line is a one-line subject (the title), no greeting." },
+          text: {
+            type: "string",
+            description:
+              "The note, in Markdown. Opening a thread, its first line is a one-line subject (the title), no greeting. " +
+              "Required unless only closing or claiming a thread. Never a note that only says you are on it.",
+          },
           close: { type: "boolean", description: "Close the thread after writing." },
+          claim: {
+            type: "boolean",
+            description:
+              'With `thread` (not `to`): marks the thread as this session\'s, a state the others in it see ("has it since 10:47"), ' +
+              "without writing a note when there is no `text`. Use it just before you start changing files or running something long. Not for team questions.",
+          },
         },
         additionalProperties: false,
       } as any,
       async execute(_id: string, params: any, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: any) {
         const res = await call(ctx?.cwd, (c) => c.send(params, signal));
-        let text = res.note ? `Sent note ${res.note} in thread ${res.thread}` : `Closed thread ${res.thread}`;
-        text += ` (thread ${res.status}).`;
-        if (res.claimed === "this-session") text += " This session holds the thread.";
-        if (res.claimed === "other-session") {
-          text += " claimed: other-session. Another of your person's sessions holds this thread: step aside and leave it to that session.";
-        }
-        return result(text, { ...res });
+        return result(sent(res), { ...res });
       },
     } as any);
 
