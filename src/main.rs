@@ -1,8 +1,9 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use relevo::{App, Clock, api, db};
+use relevo::{App, Clock, api, backup, db};
 
 /// Relevo: notes that your agent hands to a teammate's agent.
 #[derive(Parser)]
@@ -48,6 +49,15 @@ enum Command {
     About { handle: String, about: String },
     /// Stop a person from using Relevo (every token of theirs is revoked).
     Deactivate { handle: String },
+    /// Copy the database consistently (SQLite VACUUM INTO), safe while the server runs.
+    Backup {
+        /// A new file (never overwritten), or a directory to write YYYYMMDD-HHMMSS.db (UTC) into.
+        dest: PathBuf,
+        /// Write into the directory DEST (created if missing) and keep only the newest N
+        /// backups there.
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+        keep: Option<u32>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -73,6 +83,20 @@ fn print_token(handle: &str, label: &str, token: &db::NewToken) {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    // A backup only reads the database: it must not create one, nor refuse another version's.
+    if let Command::Backup { dest, keep } = &cli.command {
+        let done = backup::backup(
+            &cli.db,
+            dest,
+            keep.map(|k| k as usize),
+            time::OffsetDateTime::now_utc(),
+        )?;
+        println!("backed up {} to {}", cli.db, done.path.display());
+        for old in done.removed {
+            println!("removed old backup {}", old.display());
+        }
+        return Ok(());
+    }
     let conn = db::open(&cli.db)?;
     let now = db::now_unix();
     match cli.command {
@@ -162,6 +186,7 @@ async fn main() -> Result<()> {
             let revoked = db::deactivate(&conn, &handle, now)?;
             println!("deactivated {handle}, revoked {revoked} token(s)");
         }
+        Command::Backup { .. } => unreachable!("handled above"),
     }
     Ok(())
 }
