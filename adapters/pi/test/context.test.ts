@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { loadConfig } from "../src/config.ts";
-import { detectContext } from "../src/context.ts";
+import { detectContext, invalidOverride } from "../src/context.ts";
 
 const root = mkdtempSync(join(tmpdir(), "relevo-pi-ctx-"));
 after(() => rmSync(root, { recursive: true, force: true }));
@@ -62,8 +62,19 @@ test("a repository name the server would refuse leaves the session general", asy
 
 test("RELEVO_CONTEXT overrides git, and empty means general", async () => {
   const dir = repo("api", "main");
-  assert.equal(await detectContext(dir, { RELEVO_CONTEXT: "Billing@Main" }), "Billing@Main");
+  assert.equal(await detectContext(dir, { RELEVO_CONTEXT: " Billing@Main " }), "billing@main");
   assert.equal(await detectContext(dir, { RELEVO_CONTEXT: "" }), null);
+  assert.equal(invalidOverride({ RELEVO_CONTEXT: "Billing@Main" }), null);
+  assert.equal(invalidOverride({ RELEVO_CONTEXT: "" }), null);
+  assert.equal(invalidOverride(noOverride), null);
+});
+
+test("a RELEVO_CONTEXT the server would refuse leaves the session general, and says so", async () => {
+  const dir = repo("api2", "main");
+  for (const bad of ["Pagos API", ".dotfiles", "api@", "api@feat refunds", "a@b@c", "x".repeat(65)]) {
+    assert.equal(await detectContext(dir, { RELEVO_CONTEXT: bad }), null, bad);
+    assert.equal(invalidOverride({ RELEVO_CONTEXT: bad }), bad.trim());
+  }
 });
 
 test("config comes from the file, and the environment overrides it", () => {

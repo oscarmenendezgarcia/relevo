@@ -36,7 +36,7 @@ You need pi, Node 22.18 or later (pi's own Node is fine), and a token from your 
 
 ## Sessions and context
 
-Each pi session picks a random `Relevo-Session` id (a new one after `/new`, `/resume` or `/fork`, which reload extensions). On every request the context is worked out again from git in pi's working directory: the repository name and, on a branch, `@branch`, both lowercased and cleaned (`Pagos API` on `Feat/Refunds` is `pagos-api@feat/refunds`). Outside git, or with a repository name the server would refuse (starting with `.`, say), the session is general. `RELEVO_CONTEXT` overrides it; empty means general.
+Each pi session picks a random `Relevo-Session` id (a new one after `/new`, `/resume` or `/fork`, which reload extensions). On every request the context is worked out again from git in pi's working directory: the repository name and, on a branch, `@branch`, both lowercased and cleaned (`Pagos API` on `Feat/Refunds` is `pagos-api@feat/refunds`). Outside git, or with a repository name the server would refuse (starting with `.`, say), the session is general. `RELEVO_CONTEXT` overrides it (lowercased, as the server does); empty means general. A value the server would refuse (`Pagos API`, say) leaves the session general, with a notice at start and a line at the top of `relevo_inbox`. If the server still calls the background request malformed (400), or refuses the token (401), the background request stops with a notice instead of retrying.
 
 In print (`-p`) and JSON modes pi answers one prompt and exits, so nothing waits in the background: the agent sees notes when it calls `relevo_inbox`.
 

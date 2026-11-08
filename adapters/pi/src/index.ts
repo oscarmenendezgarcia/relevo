@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Client, RelevoError, newSessionId, type Thread } from "./client.ts";
 import { loadConfig } from "./config.ts";
-import { detectContext } from "./context.ts";
+import { detectContext, overrideWarning } from "./context.ts";
 import { InboxLoop } from "./loop.ts";
 import { renderArrival, renderInbox, renderThread } from "./render.ts";
 
@@ -114,7 +114,9 @@ export function relevoExtension(options: Options = {}) {
       } as any,
       async execute(_id: string, params: any, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: any) {
         const inbox = await call(ctx?.cwd, (c) => c.inbox({ all: params?.all === true }, signal));
-        return result(renderInbox(inbox), { threads: inbox.threads.map((t) => t.id), more: inbox.more });
+        const warning = overrideWarning(env);
+        const text = renderInbox(inbox);
+        return result(warning ? `${warning}\n\n${text}` : text, { threads: inbox.threads.map((t) => t.id), more: inbox.more });
       },
     } as any);
 
@@ -145,6 +147,8 @@ export function relevoExtension(options: Options = {}) {
       // Print and JSON runs answer one prompt and exit: nothing to wait for.
       if (ctx.mode === "print" || ctx.mode === "json") return;
       if (loop || !loadConfig(env, home)) return;
+      const warning = overrideWarning(env);
+      if (warning && ctx.hasUI) ctx.ui.notify(`Relevo: ${warning}`, "warning");
       const cwd = sessionCwd;
       loop = new InboxLoop({
         client: client(cwd),

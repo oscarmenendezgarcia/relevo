@@ -1,6 +1,7 @@
 // The background waiting inbox request: while the pi session lives, one request
 // with `wait` stays open; each thread that comes back with new notes is handed
-// to `deliver` once. Errors back off (doubling up to a minute); a refused token stops it.
+// to `deliver` once. Errors back off (doubling up to a minute); a refused token or a
+// malformed request (400) stops it.
 
 import { RelevoError, type Client, type Thread } from "./client.ts";
 
@@ -77,7 +78,8 @@ export class InboxLoop {
         if (!handed && Date.now() - started < minBackoffMs) await sleep(minBackoffMs, signal);
       } catch (err) {
         if (signal.aborted) return;
-        if (err instanceof RelevoError && err.status === 401) {
+        // A refused token, or a request the server calls malformed: asking again cannot help.
+        if (err instanceof RelevoError && (err.status === 401 || err.status === 400)) {
           this.options.onError?.(err, true);
           return;
         }

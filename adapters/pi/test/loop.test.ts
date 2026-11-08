@@ -129,6 +129,46 @@ test("errors back off, and a refused token stops the loop with a notice", async 
   await refused.emit("session_shutdown", { reason: "quit" }, refused.ctx(home, "tui"));
 });
 
+test("an invalid RELEVO_CONTEXT falls back to general with a notice, and notes still arrive", async () => {
+  const ext = extension({ env: { RELEVO_URL: server.url, RELEVO_TOKEN: oscar, RELEVO_CONTEXT: "Pagos API" } });
+  await ext.emit("session_start", { reason: "startup" }, ext.ctx(home, "tui"));
+  try {
+    assert.equal(ext.notified.length, 1);
+    assert.match(ext.notified[0], /RELEVO_CONTEXT "Pagos API" is not a valid context[\s\S]*general/);
+    await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Context check: does this reach you?" });
+    await until(() => ext.sent.some((s) => s.message.content.includes("Context check")));
+    assert.match(await ext.tool("relevo_inbox", {}, home), /RELEVO_CONTEXT "Pagos API" is not a valid context/);
+  } finally {
+    await ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, "tui"));
+  }
+});
+
+test("a request the server calls malformed stops the loop with a notice", async () => {
+  let hits = 0;
+  const fake = createServer((_req, res) => {
+    hits++;
+    res.statusCode = 400;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: { code: "BAD_REQUEST", message: "malformed Relevo-Context" } }));
+  });
+  await new Promise<void>((r) => fake.listen(0, "127.0.0.1", r));
+  const { port } = fake.address() as any;
+  try {
+    const ext = loadExtension({ env: { RELEVO_URL: `http://127.0.0.1:${port}`, RELEVO_TOKEN: "rlv_fake" }, home, minBackoffMs: 50 });
+    await ext.emit("session_start", { reason: "startup" }, ext.ctx(home, "tui"));
+    try {
+      await until(() => ext.notified.length === 1, 2000);
+      assert.match(ext.notified[0], /Relevo stopped waiting for notes: Relevo BAD_REQUEST: malformed Relevo-Context/);
+      await sleep(300);
+      assert.equal(hits, 1);
+    } finally {
+      await ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, "tui"));
+    }
+  } finally {
+    fake.close();
+  }
+});
+
 test("the rules go into the system prompt only when configured", async () => {
   const ext = extension();
   const event = { systemPromptOptions: { sections: {} as Record<string, string> } };
