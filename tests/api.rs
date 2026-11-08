@@ -443,7 +443,7 @@ async fn writers_own_notes_are_delivered_at_once() {
     assert_eq!(delivery[0]["claimed_by"], ana);
     assert_eq!(
         delivery[1],
-        json!({ "handle": "bob", "note": null, "delivered_at": null, "by": null, "claimed_by": null })
+        json!({ "handle": "bob", "note": null, "delivered_at": null, "by": null, "claimed_by": null, "seen_by": 0 })
     );
 }
 
@@ -1946,6 +1946,60 @@ async fn delivery_names_the_session_that_picked_up_and_the_one_that_claimed() {
     t.app.clock.advance(60);
     pagos.thread(&id).await;
     assert_eq!(t.thread("ana", &id).await["delivery"][1]["by"], codex_out);
+}
+
+#[tokio::test]
+async fn seen_by_counts_the_sessions_the_latest_delivered_note_reached() {
+    let t = team(&["ana", "bob"]);
+    let pagos = t.agent("bob", "term-pagos", "pagos-api");
+    let front = t.agent("bob", "term-front", "frontend");
+    pagos.inbox().await;
+    front.inbox().await;
+    let seen_by = |v: Value| {
+        (
+            v["delivery"][1]["note"].clone(),
+            v["delivery"][1]["seen_by"].clone(),
+        )
+    };
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
+    assert_eq!(seen_by(t.thread("ana", &id).await), (Value::Null, json!(0)));
+    // Ana's own note reached the session that wrote it.
+    assert_eq!(t.thread("ana", &id).await["delivery"][0]["seen_by"], 1);
+    pagos.inbox().await;
+    let (q, n) = seen_by(t.thread("ana", &id).await);
+    assert!(q.is_string());
+    assert_eq!(n, 1);
+    front.inbox().await;
+    assert_eq!(seen_by(t.thread("ana", &id).await), (q.clone(), json!(2)));
+    // A note that reached no session of Bob's leaves the count on the latest that did.
+    t.ok("ana", json!({ "thread": id, "text": "again" })).await;
+    assert_eq!(seen_by(t.thread("ana", &id).await), (q.clone(), json!(2)));
+    pagos.inbox().await;
+    let (again, n) = seen_by(t.thread("ana", &id).await);
+    assert_ne!(again, q);
+    assert_eq!(n, 1);
+    // A session first seen now starts with what Bob has, so it counts too.
+    t.agent("bob", "term-new", "").inbox().await;
+    assert_eq!(
+        seen_by(t.thread("ana", &id).await),
+        (again.clone(), json!(2))
+    );
+    front.thread(&id).await;
+    assert_eq!(
+        seen_by(t.thread("ana", &id).await),
+        (again.clone(), json!(3))
+    );
+    // Nobody has taken it: there is no claim.
+    assert_eq!(
+        t.thread("ana", &id).await["delivery"][1]["claimed_by"],
+        Value::Null
+    );
+    // A forgotten session no longer counts.
+    let laptop = db::list_tokens(&t.app.db(), Some("bob")).unwrap()[0]
+        .id
+        .clone();
+    db::revoke_token(&t.app.db(), &laptop, T0).unwrap();
+    assert_eq!(seen_by(t.thread("ana", &id).await), (again, json!(0)));
 }
 
 #[tokio::test]

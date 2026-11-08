@@ -83,6 +83,8 @@ struct Delivery {
     by: Option<SessionOut>,
     /// The session of theirs that claimed the thread, with its context when it claimed it.
     claimed_by: Option<SessionOut>,
+    /// How many of their sessions have `note`.
+    seen_by: i64,
 }
 
 #[derive(Serialize)]
@@ -512,11 +514,16 @@ fn claim(claimed_by: Option<i64>, session: &Session) -> Option<&'static str> {
 }
 
 /// For each participant, in order: the latest note that reached one of their sessions, which
-/// session that was, and which session claimed the thread (each with its context then).
+/// session that was, which session claimed the thread (each with its context then), and how many
+/// of their sessions have that note: those without a row of their own have what their person has.
 fn delivery(conn: &Connection, thread: &str) -> Result<Vec<Delivery>, ApiError> {
     let mut stmt = conn.prepare(
         "SELECT pe.handle, n.id, p.delivered_at, p.delivered_label, p.delivered_context,
-                ct.label, p.claimed_context
+                ct.label, p.claimed_context,
+                (SELECT count(*) FROM sessions s
+                 LEFT JOIN session_threads st ON st.session_id = s.id AND st.thread_id = p.thread_id
+                 WHERE s.person_id = p.person_id
+                   AND coalesce(st.delivered_seq, p.delivered_seq) >= p.delivered_seq)
          FROM participants p JOIN people pe ON pe.id = p.person_id
          LEFT JOIN notes n ON n.seq = p.delivered_seq
          LEFT JOIN sessions cs ON cs.id = p.claimed_by
@@ -533,6 +540,7 @@ fn delivery(conn: &Connection, thread: &str) -> Result<Vec<Delivery>, ApiError> 
             delivered_at: r.get::<_, Option<i64>>(2)?.map(rfc3339),
             by: session(r.get(3)?, r.get(4)?),
             claimed_by: session(r.get(5)?, r.get(6)?),
+            seen_by: r.get(7)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
