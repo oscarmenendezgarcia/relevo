@@ -3,7 +3,7 @@
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -158,14 +158,37 @@ pub const SESSION_LIFETIME_SECS: i64 = 7 * 24 * 3600;
 /// The claims of a session not seen for this long lapse.
 pub const CLAIM_LAPSE_SECS: i64 = 3600;
 
+/// The layout of `SCHEMA`, kept in SQLite's `user_version`. v0 does not migrate: a database with
+/// another layout is refused, never half-updated (`CREATE TABLE IF NOT EXISTS` would skip the
+/// old tables and fail on their missing columns).
+const SCHEMA_VERSION: i64 = 1;
+
 /// Opens (or creates) the database and applies the schema. `":memory:"` works for tests.
 pub fn open(path: &str) -> Result<Connection> {
     create_private(path).with_context(|| format!("creating database {path}"))?;
-    let conn = Connection::open(path).with_context(|| format!("opening database {path}"))?;
+    let mut conn = Connection::open(path).with_context(|| format!("opening database {path}"))?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
-    conn.execute_batch(SCHEMA)?;
+    // One transaction, so a process opening a new file at the same time sees it either empty or
+    // with its version set.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if version != SCHEMA_VERSION {
+        let tables: i64 = tx.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))?;
+        if version > SCHEMA_VERSION {
+            bail!("database {path} was made by a newer version of relevo; use that one");
+        }
+        if tables > 0 {
+            bail!(
+                "database {path} was made by an older version of relevo, and v0 does not \
+                 migrate: delete it (with its -wal and -shm files) and invite the team again"
+            );
+        }
+    }
+    tx.execute_batch(SCHEMA)?;
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    tx.commit()?;
     Ok(conn)
 }
 

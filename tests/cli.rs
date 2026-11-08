@@ -72,3 +72,35 @@ async fn sessions_lists_label_session_context_and_last_seen() {
     drop(app);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn a_database_from_an_older_block_is_refused_with_a_clear_message() {
+    let dir = std::env::temp_dir().join(db::random_id("relevo-cli-"));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("relevo.db");
+    let path = path.to_str().unwrap();
+    // What block 1b left: a sessions table without `claims`, and no schema version.
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE sessions (id INTEGER PRIMARY KEY, token_id TEXT NOT NULL,
+                 client_id TEXT NOT NULL, person_id INTEGER NOT NULL, context TEXT,
+                 last_seen INTEGER NOT NULL, UNIQUE (token_id, client_id));",
+        )
+        .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_relevo"))
+        .args(["--db", path, "people"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("older version of relevo"), "{err}");
+    assert!(err.contains("delete it"), "{err}");
+
+    // A fresh database opens, and opens again.
+    std::fs::remove_dir_all(&dir).unwrap();
+    std::fs::create_dir(&dir).unwrap();
+    relevo(path, &["people"]);
+    relevo(path, &["people"]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

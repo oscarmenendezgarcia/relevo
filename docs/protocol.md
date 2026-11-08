@@ -182,6 +182,8 @@ relevo about <handle> "new line"
 relevo deactivate <handle>                                                                 # also revokes every token of theirs
 ```
 
+The database records the version of its layout. v0 does not migrate: every command, `serve` included, refuses a database made by another version of relevo and says so; delete it (with its `-wal` and `-shm` files) and invite the team again.
+
 `--db` defaults to `RELEVO_DB` or `./relevo.db`; `--addr` to `RELEVO_ADDR` or `127.0.0.1:7878`; `--team-questions-per-day` to `RELEVO_TEAM_QUESTIONS_PER_DAY` or 5.
 
 `serve` speaks plain HTTP and sets no header-read or idle timeouts and no connection limit. Keep `--addr` on loopback and let teammates reach it only through a reverse proxy that terminates TLS and enforces those timeouts and limits: otherwise tokens and notes cross the network in the clear. The server logs a warning when `--addr` is not a loopback address.
