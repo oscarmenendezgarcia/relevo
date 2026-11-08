@@ -9,6 +9,10 @@ use crate::auth::Caller;
 use crate::db::{SESSION_LIFETIME_SECS, forget_sessions};
 use crate::error::ApiError;
 
+/// Sessions one token keeps. A client that picks a new `Relevo-Session` for every request must
+/// not grow the team list, or the delivery rows every read writes for each session, without bound.
+pub const MAX_SESSIONS_PER_TOKEN: i64 = 20;
+
 /// The session a request counts as.
 pub struct Session {
     pub id: i64,
@@ -35,7 +39,8 @@ impl Session {
 }
 
 /// Records that the caller's session was seen now, with the context it sent (the latest one
-/// wins), and returns it. First forgets sessions not seen for 7 days.
+/// wins), and returns it. First forgets sessions not seen for 7 days, then those of the token
+/// beyond `MAX_SESSIONS_PER_TOKEN`.
 ///
 /// The token is checked again here: a waiting `inbox` request looks and answers long after it
 /// was authenticated, and must not answer for a token revoked (or a person deactivated) since.
@@ -65,6 +70,22 @@ pub fn touch(conn: &Connection, app: &App, caller: &Caller, now: i64) -> Result<
         ],
         |r| r.get(0),
     )?;
+    // Beyond the cap, the token's sessions seen least recently are forgotten. This one is now
+    // the most recent, so it stays.
+    let evicted: Vec<i64> = conn
+        .prepare_cached(
+            "SELECT id FROM sessions WHERE token_id = ?1 AND id != ?2
+             ORDER BY last_seen DESC, id DESC LIMIT -1 OFFSET ?3",
+        )?
+        .query_map(
+            params![caller.token_id, id, MAX_SESSIONS_PER_TOKEN - 1],
+            |r| r.get(0),
+        )?
+        .collect::<rusqlite::Result<_>>()?;
+    if !evicted.is_empty() {
+        app.announce([caller.person_id]);
+        forget_sessions(conn, &evicted)?;
+    }
     Ok(Session {
         id,
         person_id: caller.person_id,

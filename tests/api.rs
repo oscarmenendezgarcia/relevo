@@ -1841,6 +1841,44 @@ async fn invited_back_a_person_finds_threads_their_old_sessions_had_claimed() {
     assert_eq!(inbox_of(&t, &back.secret).await, vec![id]);
 }
 
+#[tokio::test]
+async fn a_token_keeps_at_most_20_sessions_and_forgets_the_least_recently_seen() {
+    let t = team(&["ana", "bob"]);
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
+    let first = t.agent("bob", "term-first", "first");
+    first.inbox().await;
+    first.ok(json!({ "thread": id, "text": "mine" })).await;
+    t.ok("ana", json!({ "thread": id, "text": "and?" })).await;
+    for i in 0..18 {
+        t.app.clock.advance(1);
+        t.agent("bob", &format!("term-{i:04}"), &format!("ctx-{i}"))
+            .inbox()
+            .await;
+    }
+    // Twenty sessions: the first still holds its claim.
+    t.app.clock.advance(1);
+    let general = t.agent("bob", "term-general", "");
+    assert!(thread_ids(&general.inbox().await).is_empty());
+    let sessions = || db::list_sessions(&t.app.db(), Some("bob"), T0 + 100).unwrap();
+    assert_eq!(sessions().len(), 20);
+    // A twenty-first forgets the one seen least recently, with its claim.
+    t.app.clock.advance(1);
+    t.agent("bob", "term-late", "late").inbox().await;
+    assert_eq!(sessions().len(), 20);
+    assert!(
+        sessions()
+            .iter()
+            .all(|s| s.context.as_deref() != Some("first"))
+    );
+    assert_eq!(
+        new_texts(&general.inbox().await, &id),
+        Some(vec!["and?".to_string()])
+    );
+    // So the team list holds at most 20 contexts per token.
+    let (_, v) = t.get("ana", "/api/people").await;
+    assert_eq!(v["team"][1]["contexts"].as_array().unwrap().len(), 19);
+}
+
 /// A thread as the model sees it, for the person `bob` and his three sessions.
 struct ModelThread {
     id: String,
