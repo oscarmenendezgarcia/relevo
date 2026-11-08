@@ -74,6 +74,8 @@ export RELEVO_DB=~/.local/share/relevo/relevo.db
 Environment=RELEVO_TEAM_QUESTIONS_PER_DAY=10
 ```
 
+Saving the drop-in does not restart the running server: `systemctl --user restart relevo` to use it.
+
 Keep `RELEVO_ADDR` on loopback: `relevo serve` speaks plain HTTP and has no timeouts of its own; the proxy in part 3 gives it both.
 
 **Sandbox.** `ProtectSystem=`, `ReadWritePaths=` and `PrivateTmp=` need user namespaces in a user unit. Where the system restricts them (Ubuntu 24.04 does, with `kernel.apparmor_restrict_unprivileged_userns=1`), systemd cannot set that part up; it then normally starts the service without it, and the memory limit and the other restrictions still apply. If the service fails to start instead with status `226/NAMESPACE`, turn those three off with `systemctl --user edit relevo` (and the same for `relevo-backup`):
@@ -83,6 +85,13 @@ Keep `RELEVO_ADDR` on loopback: `relevo serve` speaks plain HTTP and has no time
 ProtectSystem=no
 ReadWritePaths=
 PrivateTmp=no
+```
+
+Then start it again (after failed starts systemd may have stopped trying, so clear that first):
+
+```
+systemctl --user reset-failed relevo
+systemctl --user start relevo
 ```
 
 ## 3. Expose it with HTTPS
