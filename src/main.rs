@@ -50,7 +50,12 @@ enum Command {
     Deactivate { handle: String },
     /// Check a token against a server and save both for `relevo mcp` (in
     /// ~/.config/relevo/config.json, or the file RELEVO_CONFIG names).
-    Connect { url: String, token: String },
+    Connect {
+        url: String,
+        /// The token. Without it (or with `-`) it is read from RELEVO_TOKEN, else from one line
+        /// of stdin, so that it stays out of shell history and the process list.
+        token: Option<String>,
+    },
     /// Serve MCP on stdin and stdout, for Claude Code and any MCP client.
     Mcp {
         /// Push new notes as Claude Code channel events (keeps an inbox request waiting).
@@ -77,6 +82,27 @@ fn print_token(handle: &str, label: &str, token: &db::NewToken) {
     println!("token {} for {handle} ({label})", token.id);
     println!("{}", token.secret);
     println!("This secret is shown once; only its hash is stored.");
+}
+
+/// The token for `connect`: the argument, else `RELEVO_TOKEN`, else a line of stdin.
+fn connect_token(arg: Option<String>) -> Result<String> {
+    use std::io::IsTerminal;
+    if let Some(token) = arg.filter(|t| t != "-") {
+        return Ok(token);
+    }
+    if let Some(token) = config::env("RELEVO_TOKEN").filter(|t| !t.trim().is_empty()) {
+        return Ok(token);
+    }
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        eprint!("token: ");
+    }
+    let mut line = String::new();
+    stdin.read_line(&mut line)?;
+    if line.trim().is_empty() {
+        anyhow::bail!("no token: give it on stdin or in RELEVO_TOKEN");
+    }
+    Ok(line)
 }
 
 /// Checks the token with `GET /api/people` and saves the server and token.
@@ -110,7 +136,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     // The client commands never touch a database.
     match cli.command {
-        Command::Connect { url, token } => return connect(&url, &token).await,
+        Command::Connect { url, token } => return connect(&url, &connect_token(token)?).await,
         Command::Mcp { channel } => return mcp::run(channel).await,
         _ => {}
     }

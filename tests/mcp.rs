@@ -772,3 +772,60 @@ async fn channel_pushes_again_what_a_dropped_answer_delivered() {
     assert!(!content.contains("\nDeploy at 5?\n"), "{content}");
     assert!(!content.contains("Pushed again"), "{content}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn connect_takes_the_token_from_stdin_or_the_environment() {
+    let s = server(&["ana"]).await;
+    let token = &s.tokens["ana"];
+    for (i, args) in [vec!["connect", &s.url], vec!["connect", &s.url, "-"]]
+        .into_iter()
+        .enumerate()
+    {
+        let home = s.dir.join(format!("stdin-{i}"));
+        let mut child = relevo(&home)
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin
+            .write_all(format!("{token}\n").as_bytes())
+            .await
+            .unwrap();
+        drop(stdin);
+        let out = child.wait_with_output().await.unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let saved: Value =
+            serde_json::from_slice(&std::fs::read(home.join("config.json")).unwrap()).unwrap();
+        assert_eq!(saved["token"], token.as_str());
+    }
+
+    let home = s.dir.join("env");
+    let out = relevo(&home)
+        .args(["connect", &s.url])
+        .env("RELEVO_TOKEN", token)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .unwrap();
+    assert!(out.status.success());
+    assert!(home.join("config.json").exists());
+
+    // Nothing on stdin and no RELEVO_TOKEN: an error, nothing saved.
+    let home = s.dir.join("none");
+    let out = relevo(&home)
+        .args(["connect", &s.url])
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no token"));
+    assert!(!home.join("config.json").exists());
+}

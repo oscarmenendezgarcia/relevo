@@ -173,7 +173,7 @@ fn error(e: Error) -> String {
         }
         if code == "UNAUTHORIZED" {
             out.push_str(
-                "\nThe token was refused: ask your person to run `relevo connect <url> <token>` \
+                "\nThe token was refused: ask your person to run `relevo connect <url>` \
                  with a valid token.",
             );
         }

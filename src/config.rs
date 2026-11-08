@@ -54,7 +54,7 @@ pub fn load(env: impl Fn(&str) -> Option<String>) -> Result<Config> {
             token,
         }),
         _ => bail!(
-            "Relevo is not configured: run `relevo connect <url> <token>` \
+            "Relevo is not configured: run `relevo connect <url>` and give it the token \
              (or set RELEVO_URL and RELEVO_TOKEN)"
         ),
     }

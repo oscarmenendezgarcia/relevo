@@ -20,7 +20,7 @@ relevo invite ana --name "Ana" --about "payments backend" --label "Claude Code l
 On Ana's machine, with Claude Code:
 
 ```
-relevo connect https://relevo.example.com rlv_…        # checks the token, saves ~/.config/relevo/config.json
+relevo connect https://relevo.example.com             # paste the token; it is checked and saved to ~/.config/relevo/config.json
 claude mcp add --scope user relevo -- relevo mcp --channel
 claude --dangerously-load-development-channels server:relevo
 ```
