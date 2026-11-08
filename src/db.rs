@@ -33,6 +33,20 @@ CREATE TABLE IF NOT EXISTS threads (
     status     TEXT NOT NULL CHECK (status IN ('open', 'closed')),
     created_at INTEGER NOT NULL
 );
+-- A session is one running agent of a person, named by the `Relevo-Session` header under one
+-- token (`client_id` is '' for the token's default session). `context` is the latest
+-- `Relevo-Context` (NULL: general). Sessions not seen for 7 days are forgotten.
+CREATE TABLE IF NOT EXISTS sessions (
+    id         INTEGER PRIMARY KEY,
+    token_id   TEXT NOT NULL REFERENCES tokens(id),
+    client_id  TEXT NOT NULL,
+    person_id  INTEGER NOT NULL REFERENCES people(id),
+    context    TEXT,
+    last_seen  INTEGER NOT NULL,
+    UNIQUE (token_id, client_id)
+);
+CREATE INDEX IF NOT EXISTS sessions_by_person ON sessions(person_id, last_seen);
+CREATE INDEX IF NOT EXISTS sessions_by_last_seen ON sessions(last_seen);
 CREATE INDEX IF NOT EXISTS threads_by_opener ON threads(opener_id, kind, created_at);
 -- Rows are inserted in participant order; rowid keeps that order.
 -- `last_seq` (the thread's latest note), `has_new` (notes not yet delivered to this person),
@@ -81,6 +95,9 @@ CREATE INDEX IF NOT EXISTS send_keys_by_time ON send_keys(created_at);
 
 /// Handles that mean "the whole team" in `to`, so no person may take them.
 pub const RESERVED_HANDLES: [&str; 2] = ["team", "equipo"];
+
+/// A session not seen for this long is forgotten, and so are its claims.
+pub const SESSION_LIFETIME_SECS: i64 = 7 * 24 * 3600;
 
 /// Opens (or creates) the database and applies the schema. `":memory:"` works for tests.
 pub fn open(path: &str) -> Result<Connection> {
@@ -151,6 +168,26 @@ pub fn valid_handle(handle: &str) -> bool {
         .iter()
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_' || *c == b'-');
     first_ok && rest_ok && (2..=32).contains(&b.len())
+}
+
+/// A `Relevo-Session` id: `^[A-Za-z0-9_-]{8,64}$`.
+pub fn valid_session_id(id: &str) -> bool {
+    (8..=64).contains(&id.len())
+        && id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+}
+
+/// A context: `^[a-z0-9][a-z0-9._-]{0,63}$`.
+pub fn valid_context(context: &str) -> bool {
+    let b = context.as_bytes();
+    let first_ok = b
+        .first()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    let rest_ok = b[1.min(b.len())..]
+        .iter()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'.' | b'_' | b'-'));
+    first_ok && rest_ok && b.len() <= 64
 }
 
 fn one_line(what: &str, value: &str) -> Result<()> {
@@ -306,6 +343,42 @@ pub fn set_about(conn: &Connection, handle: &str, about: &str) -> Result<()> {
     Ok(())
 }
 
+pub struct SessionInfo {
+    pub handle: String,
+    pub label: String,
+    /// The `Relevo-Session` id, or `None` for a token's default session.
+    pub session: Option<String>,
+    pub context: Option<String>,
+    pub last_seen: i64,
+}
+
+/// Sessions seen in the last 7 days, of everyone or of one person, most recently seen first.
+pub fn list_sessions(
+    conn: &Connection,
+    handle: Option<&str>,
+    now: i64,
+) -> Result<Vec<SessionInfo>> {
+    if let Some(handle) = handle {
+        person_id(conn, handle)?;
+    }
+    let mut stmt = conn.prepare(
+        "SELECT p.handle, t.label, nullif(s.client_id, ''), s.context, s.last_seen
+         FROM sessions s JOIN tokens t ON t.id = s.token_id JOIN people p ON p.id = s.person_id
+         WHERE s.last_seen > ?2 AND (?1 IS NULL OR p.handle = ?1)
+         ORDER BY p.handle, s.last_seen DESC, s.id",
+    )?;
+    let rows = stmt.query_map(params![handle, now - SESSION_LIFETIME_SECS], |r| {
+        Ok(SessionInfo {
+            handle: r.get(0)?,
+            label: r.get(1)?,
+            session: r.get(2)?,
+            context: r.get(3)?,
+            last_seen: r.get(4)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 /// Deactivated people can no longer authenticate nor receive new threads. Every token of theirs
 /// is revoked for good: `invite` brings them back with a new one. Returns how many it revoked.
 pub fn deactivate(conn: &Connection, handle: &str, now: i64) -> Result<usize> {
@@ -333,6 +406,26 @@ mod tests {
         assert!(!valid_handle("Ana"));
         assert!(!valid_handle(&"a".repeat(33)));
         assert!(valid_handle(&"a".repeat(32)));
+    }
+
+    #[test]
+    fn session_ids_and_contexts() {
+        assert!(valid_session_id("abcd1234"));
+        assert!(valid_session_id(&"A_-z".repeat(16)));
+        assert!(!valid_session_id("short"));
+        assert!(!valid_session_id(&"a".repeat(65)));
+        assert!(!valid_session_id("abcd 1234"));
+        assert!(!valid_session_id("abcd.1234"));
+        assert!(valid_context("pagos-api"));
+        assert!(valid_context("a"));
+        assert!(valid_context("v1.2_x-y"));
+        assert!(valid_context(&"a".repeat(64)));
+        assert!(!valid_context(&"a".repeat(65)));
+        assert!(!valid_context(""));
+        assert!(!valid_context("-x"));
+        assert!(!valid_context(".x"));
+        assert!(!valid_context("Pagos"));
+        assert!(!valid_context("a/b"));
     }
 
     #[test]

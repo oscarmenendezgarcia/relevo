@@ -42,6 +42,8 @@ enum Command {
     },
     /// List everyone, active or not.
     People,
+    /// List sessions seen in the last 7 days: label, session id, context, last seen.
+    Sessions { handle: Option<String> },
     /// Set the one line on what a person (or their agent) knows or looks after.
     About { handle: String, about: String },
     /// Stop a person from using Relevo (every token of theirs is revoked).
@@ -138,6 +140,18 @@ async fn main() -> Result<()> {
             for p in db::list_people(&conn)? {
                 let state = if p.active { "active" } else { "inactive" };
                 println!("{}\t{}\t{state}\t{}", p.handle, p.name, p.about);
+            }
+        }
+        Command::Sessions { handle } => {
+            for s in db::list_sessions(&conn, handle.as_deref(), now)? {
+                println!(
+                    "{}\t{}\t{}\t{}\t{}",
+                    s.handle,
+                    s.label,
+                    s.session.as_deref().unwrap_or("default"),
+                    s.context.as_deref().unwrap_or("general"),
+                    db::rfc3339(s.last_seen)
+                );
             }
         }
         Command::About { handle, about } => {

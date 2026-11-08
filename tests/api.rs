@@ -41,19 +41,21 @@ impl Team {
         token: Option<&str>,
         body: Body,
     ) -> (StatusCode, Value) {
-        let mut req = Request::builder().method(method).uri(uri);
-        if let Some(token) = token {
-            req = req.header("authorization", format!("Bearer {token}"));
+        call(&self.app, method, uri, token, &[], body).await
+    }
+
+    /// One of `who`'s agents: the session `id` (`""`: the token's default session) in
+    /// `context` (`""`: general).
+    fn agent(&self, who: &str, id: &str, context: &str) -> Agent {
+        Agent {
+            app: self.app.clone(),
+            token: self.tokens[who].clone(),
+            headers: [("relevo-session", id), ("relevo-context", context)]
+                .into_iter()
+                .filter(|(_, v)| !v.is_empty())
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
         }
-        req = req.header("content-type", "application/json");
-        let res = api::router(self.app.clone())
-            .oneshot(req.body(body).unwrap())
-            .await
-            .unwrap();
-        let status = res.status();
-        let bytes = res.into_body().collect().await.unwrap().to_bytes();
-        let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        (status, value)
     }
 
     async fn get(&self, who: &str, uri: &str) -> (StatusCode, Value) {
@@ -86,6 +88,77 @@ impl Team {
 
     async fn thread(&self, who: &str, id: &str) -> Value {
         let (status, v) = self.get(who, &format!("/api/threads/{id}")).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        v
+    }
+}
+
+/// One request through the router.
+async fn call(
+    app: &Arc<App>,
+    method: &str,
+    uri: &str,
+    token: Option<&str>,
+    headers: &[(String, String)],
+    body: Body,
+) -> (StatusCode, Value) {
+    let mut req = Request::builder().method(method).uri(uri);
+    if let Some(token) = token {
+        req = req.header("authorization", format!("Bearer {token}"));
+    }
+    for (name, value) in headers {
+        req = req.header(name, value);
+    }
+    req = req.header("content-type", "application/json");
+    let res = api::router(app.clone())
+        .oneshot(req.body(body).unwrap())
+        .await
+        .unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, value)
+}
+
+/// Requests as one session of a person. Cheap to clone into a spawned task.
+#[derive(Clone)]
+struct Agent {
+    app: Arc<App>,
+    token: String,
+    headers: Vec<(String, String)>,
+}
+
+impl Agent {
+    async fn get(&self, uri: &str) -> (StatusCode, Value) {
+        call(
+            &self.app,
+            "GET",
+            uri,
+            Some(&self.token),
+            &self.headers,
+            Body::empty(),
+        )
+        .await
+    }
+
+    async fn send(&self, body: Value) -> (StatusCode, Value) {
+        call(
+            &self.app,
+            "POST",
+            "/api/send",
+            Some(&self.token),
+            &self.headers,
+            Body::from(body.to_string()),
+        )
+        .await
+    }
+
+    async fn inbox(&self) -> Value {
+        self.inbox_at("/api/inbox").await
+    }
+
+    async fn inbox_at(&self, uri: &str) -> Value {
+        let (status, v) = self.get(uri).await;
         assert_eq!(status, StatusCode::OK, "{v}");
         v
     }
@@ -284,8 +357,8 @@ async fn people_lists_every_active_person_with_about() {
     assert_eq!(
         v,
         json!({ "team": [
-            { "handle": "ana", "name": "ANA", "about": "ana things" },
-            { "handle": "bob", "name": "BOB", "about": "bob things" },
+            { "handle": "ana", "name": "ANA", "about": "ana things", "contexts": [] },
+            { "handle": "bob", "name": "BOB", "about": "bob things", "contexts": [] },
         ]})
     );
 }
@@ -695,8 +768,8 @@ async fn unknown_person_lists_valid_handles() {
     assert_eq!(
         v["error"]["valid"],
         json!([
-            { "handle": "ana", "name": "ANA", "about": "ana things" },
-            { "handle": "bob", "name": "BOB", "about": "bob things" },
+            { "handle": "ana", "name": "ANA", "about": "ana things", "contexts": [] },
+            { "handle": "bob", "name": "BOB", "about": "bob things", "contexts": [] },
         ])
     );
     // Nothing was opened.
@@ -1150,4 +1223,178 @@ async fn inbox_order_and_more_hold_over_hundreds_of_threads() {
     }
     assert!(model.iter().all(|e| !e.new));
     assert_eq!(t.inbox("bob").await["more"], 296 - 20);
+}
+
+// ---------- sessions ----------
+
+#[tokio::test]
+async fn malformed_session_headers_are_bad_requests() {
+    let t = team(&["ana", "bob"]);
+    for (session, context) in [
+        ("short", ""),
+        ("has space in it", ""),
+        ("dots.are.not.ok", ""),
+        (&*"a".repeat(65), ""),
+        ("abcd1234", "-pagos"),
+        ("abcd1234", "pagos/api"),
+        ("abcd1234", &*"a".repeat(65)),
+        ("", "pagos api"),
+    ] {
+        for uri in ["/api/inbox", "/api/people", "/api/threads/r_aaaaaaaaaaaa"] {
+            let (status, v) = t.agent("ana", session, context).get(uri).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{session} {context} {uri}");
+            assert_eq!(code(&v), "BAD_REQUEST", "{v}");
+        }
+        let (status, v) = t
+            .agent("ana", session, context)
+            .send(json!({ "to": ["bob"], "text": "hi" }))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{session} {context}");
+        assert_eq!(code(&v), "BAD_REQUEST");
+    }
+    // An empty session id is malformed too; an empty context means general.
+    let headers = [("relevo-session".to_string(), String::new())];
+    let token = t.tokens["ana"].clone();
+    let (status, _) = call(
+        &t.app,
+        "GET",
+        "/api/inbox",
+        Some(&token),
+        &headers,
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let headers = [("relevo-context".to_string(), String::new())];
+    let (status, v) = call(
+        &t.app,
+        "GET",
+        "/api/inbox",
+        Some(&token),
+        &headers,
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["session"], json!({ "label": "laptop", "context": null }));
+    // A bad token is still UNAUTHORIZED, whatever the headers say.
+    let (status, _) = call(
+        &t.app,
+        "GET",
+        "/api/inbox",
+        Some("rlv_nope"),
+        &[("relevo-session".to_string(), "x".to_string())],
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    // Nothing was sent by the rejected requests.
+    assert!(thread_ids(&t.inbox("bob").await).is_empty());
+}
+
+#[tokio::test]
+async fn inbox_names_its_session_and_the_latest_context_wins() {
+    let t = team(&["ana"]);
+    let v = t.inbox("ana").await;
+    assert_eq!(v["session"], json!({ "label": "laptop", "context": null }));
+    let v = t.agent("ana", "term-0001", "pagos-api").inbox().await;
+    assert_eq!(
+        v["session"],
+        json!({ "label": "laptop", "context": "pagos-api" })
+    );
+    // Contexts are lowercased and trimmed.
+    let v = t.agent("ana", "term-0001", " Front.End ").inbox().await;
+    assert_eq!(
+        v["session"],
+        json!({ "label": "laptop", "context": "front.end" })
+    );
+    let v = t.agent("ana", "term-0001", "").inbox().await;
+    assert_eq!(v["session"]["context"], Value::Null);
+    let sessions = db::list_sessions(&t.app.db(), Some("ana"), T0).unwrap();
+    assert_eq!(sessions.len(), 2);
+}
+
+#[tokio::test]
+async fn team_lists_contexts_seen_in_the_last_15_minutes() {
+    let t = team(&["ana", "bob"]);
+    t.agent("ana", "term-0001", "pagos-api").inbox().await;
+    t.agent("ana", "term-0002", "frontend").inbox().await;
+    t.agent("ana", "term-0003", "pagos-api").inbox().await;
+    t.agent("ana", "term-0004", "").inbox().await;
+    let (_, v) = t.get("bob", "/api/people").await;
+    assert_eq!(v["team"][0]["contexts"], json!(["frontend", "pagos-api"]));
+    assert_eq!(v["team"][1]["contexts"], json!([]));
+    t.app.clock.advance(10 * 60);
+    t.agent("ana", "term-0002", "frontend").inbox().await;
+    t.app.clock.advance(5 * 60 - 1);
+    assert_eq!(
+        t.inbox("bob").await["team"][0]["contexts"],
+        json!(["frontend", "pagos-api"])
+    );
+    t.app.clock.advance(1);
+    assert_eq!(
+        t.inbox("bob").await["team"][0]["contexts"],
+        json!(["frontend"])
+    );
+    // The session moved to another context: only the new one shows.
+    t.agent("ana", "term-0002", "billing").inbox().await;
+    assert_eq!(
+        t.inbox("bob").await["team"][0]["contexts"],
+        json!(["billing"])
+    );
+}
+
+#[tokio::test]
+async fn the_same_session_id_under_two_tokens_is_two_sessions() {
+    let t = team(&["ana"]);
+    let second = db::add_token(&t.app.db(), "ana", "Codex desktop", T0).unwrap();
+    t.agent("ana", "same-id-1", "pagos-api").inbox().await;
+    let other = Agent {
+        app: t.app.clone(),
+        token: second.secret,
+        headers: vec![
+            ("relevo-session".into(), "same-id-1".into()),
+            ("relevo-context".into(), "frontend".into()),
+        ],
+    };
+    let v = other.inbox().await;
+    assert_eq!(
+        v["session"],
+        json!({ "label": "Codex desktop", "context": "frontend" })
+    );
+    let sessions = db::list_sessions(&t.app.db(), Some("ana"), T0).unwrap();
+    let mut seen: Vec<(String, Option<String>)> = sessions
+        .iter()
+        .map(|s| (s.label.clone(), s.context.clone()))
+        .collect();
+    seen.sort();
+    assert_eq!(
+        seen,
+        vec![
+            ("Codex desktop".to_string(), Some("frontend".to_string())),
+            ("laptop".to_string(), Some("pagos-api".to_string())),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn sessions_not_seen_for_7_days_are_forgotten() {
+    let t = team(&["ana", "bob"]);
+    t.agent("ana", "term-0001", "pagos-api").inbox().await;
+    t.app.clock.advance(7 * 24 * 3600 - 1);
+    t.inbox("bob").await;
+    assert_eq!(
+        db::list_sessions(&t.app.db(), Some("ana"), T0 + 7 * 24 * 3600 - 1)
+            .unwrap()
+            .len(),
+        1
+    );
+    t.app.clock.advance(1);
+    t.inbox("bob").await;
+    let left: i64 = t
+        .app
+        .db()
+        .query_row("SELECT count(*) FROM sessions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(left, 1, "only bob's default session is left");
 }

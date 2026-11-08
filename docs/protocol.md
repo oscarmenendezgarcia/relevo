@@ -23,7 +23,7 @@ A person may run several agents at once, each with its own context: a terminal i
 **Sessions.** Every request names its session with two optional headers:
 
 - `Relevo-Session`: an id the client picks once per running agent, `^[A-Za-z0-9_-]{8,64}$`. Sessions belong to a token: the same id under another token is another session. Without the header, the request uses the token's *default session*.
-- `Relevo-Context`: the session's context. Sent with each request; the latest value wins. Without it (or empty), the session is general. A default session is always general unless the header says otherwise.
+- `Relevo-Context`: the session's context. Sent with each request; the latest value wins. Without it (or empty), the session is general. A default session is always general unless the header says otherwise. Like addresses, it may be written in any case: `Pagos-API` is `pagos-api`.
 
 The server keeps each session with its token's label, its context and when it was last seen. A session not seen for 7 days is forgotten, and so are its claims.
 

@@ -1,6 +1,6 @@
 //! The HTTP API: `send`, `inbox`, `thread`, `people` and `health`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use axum::body::Bytes;
@@ -17,6 +17,7 @@ use crate::App;
 use crate::auth::Caller;
 use crate::db::{RESERVED_HANDLES, random_id, rfc3339};
 use crate::error::ApiError;
+use crate::session::touch;
 
 const MAX_TEXT: usize = 64 * 1024;
 /// Room for 64 KiB of text even when every byte is JSON-escaped as `\u00XX` (6 bytes), plus the
@@ -30,6 +31,8 @@ const INBOX_TEXT_CHARS: usize = 4000;
 const THREAD_NOTES_PER_HOUR: i64 = 20;
 const PERSON_NOTES_PER_MINUTE: i64 = 60;
 const KEY_LIFETIME_SECS: i64 = 24 * 3600;
+/// A person's `contexts` in the team list are those of their sessions seen this recently.
+const CONTEXT_WINDOW_SECS: i64 = 15 * 60;
 
 pub fn router(app: Arc<App>) -> Router {
     Router::new()
@@ -53,6 +56,7 @@ struct Member {
     handle: String,
     name: String,
     about: String,
+    contexts: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -192,14 +196,26 @@ fn find_thread(conn: &Connection, me: i64, id: &str) -> Result<ThreadRow, ApiErr
         .ok_or_else(|| ApiError::not_found("no such thread"))
 }
 
-fn team(conn: &Connection) -> Result<Vec<Member>, ApiError> {
-    let mut stmt =
-        conn.prepare("SELECT handle, name, about FROM people WHERE active = 1 ORDER BY handle")?;
+/// Every active person, with the contexts of their sessions seen in the last 15 minutes.
+fn team(conn: &Connection, now: i64) -> Result<Vec<Member>, ApiError> {
+    let mut contexts: HashMap<i64, Vec<String>> = HashMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT person_id, context FROM sessions
+         WHERE context IS NOT NULL AND last_seen > ?1 ORDER BY context",
+    )?;
+    let rows = stmt.query_map([now - CONTEXT_WINDOW_SECS], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    for row in rows {
+        let (person, context) = row?;
+        contexts.entry(person).or_default().push(context);
+    }
+    let mut stmt = conn
+        .prepare("SELECT id, handle, name, about FROM people WHERE active = 1 ORDER BY handle")?;
     let rows = stmt.query_map([], |r| {
         Ok(Member {
-            handle: r.get(0)?,
-            name: r.get(1)?,
-            about: r.get(2)?,
+            contexts: contexts.remove(&r.get(0)?).unwrap_or_default(),
+            handle: r.get(1)?,
+            name: r.get(2)?,
+            about: r.get(3)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -277,8 +293,13 @@ fn thread_out(conn: &Connection, row: &ThreadRow) -> Result<ThreadOut, ApiError>
 
 // ---------- handlers ----------
 
-async fn people(State(app): State<Arc<App>>, _caller: Caller) -> Result<Json<Value>, ApiError> {
-    let team = team(&app.db())?;
+async fn people(State(app): State<Arc<App>>, caller: Caller) -> Result<Json<Value>, ApiError> {
+    let mut conn = app.db();
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let now = app.clock.now();
+    touch(&tx, &caller, now)?;
+    let team = team(&tx, now)?;
+    tx.commit()?;
     Ok(Json(json!({ "team": team })))
 }
 
@@ -287,6 +308,7 @@ async fn inbox(State(app): State<Arc<App>>, caller: Caller) -> Result<Json<Value
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     // Read under the lock, so that times follow the order of `seq`.
     let now = app.clock.now();
+    let session = touch(&tx, &caller, now)?;
     let rows: Vec<ThreadRow> = tx
         .prepare(&inbox_sql())?
         .query_map(params![caller.person_id, INBOX_THREADS], thread_row)?
@@ -309,12 +331,15 @@ async fn inbox(State(app): State<Arc<App>>, caller: Caller) -> Result<Json<Value
         deliver(&tx, &row.id, caller.person_id, row.last_seq, now)?;
         threads.push(out);
     }
-    let team = team(&tx)?;
+    let team = team(&tx, now)?;
     tx.commit()?;
-    tracing::info!(person = %caller.handle, threads = threads.len(), more, "inbox");
-    Ok(Json(
-        json!({ "team": team, "threads": threads, "more": more }),
-    ))
+    tracing::info!(person = %caller.handle, session = session.id, threads = threads.len(), more, "inbox");
+    Ok(Json(json!({
+        "team": team,
+        "session": session.out(),
+        "threads": threads,
+        "more": more,
+    })))
 }
 
 async fn thread(
@@ -327,6 +352,7 @@ async fn thread(
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     // Read under the lock, so that times follow the order of `seq`.
     let now = app.clock.now();
+    touch(&tx, &caller, now)?;
     let row = find_thread(&tx, caller.person_id, &id)?;
     deliver(&tx, &row.id, caller.person_id, row.last_seq, now)?;
     let mut out = thread_out(&tx, &row)?;
@@ -415,6 +441,7 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<SendResult, Api
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     // Read under the lock, so that times follow the order of `seq`.
     let now = app.clock.now();
+    touch(&tx, caller, now)?;
 
     // Keys expire 24 hours after the send that used them. Forgetting them here keeps the table
     // small, and lets an expired key be used again as a fresh send.
@@ -606,7 +633,7 @@ fn open_thread(
             match id {
                 Some(id) => others.push(id),
                 None => {
-                    let valid = serde_json::to_value(team(conn)?).unwrap_or_default();
+                    let valid = serde_json::to_value(team(conn, now)?).unwrap_or_default();
                     return Err(ApiError::unknown_person(handle, valid));
                 }
             }
