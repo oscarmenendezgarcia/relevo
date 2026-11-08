@@ -280,9 +280,10 @@ async fn people(State(app): State<Arc<App>>, _caller: Caller) -> Result<Json<Val
 }
 
 async fn inbox(State(app): State<Arc<App>>, caller: Caller) -> Result<Json<Value>, ApiError> {
-    let now = app.clock.now();
     let mut conn = app.db();
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // Read under the lock, so that times follow the order of `seq`.
+    let now = app.clock.now();
     let rows: Vec<ThreadRow> = tx
         .prepare(&inbox_sql())?
         .query_map([caller.person_id], thread_row)?
@@ -314,9 +315,10 @@ async fn thread(
     id: Result<Path<String>, PathRejection>,
 ) -> Result<Json<ThreadOut>, ApiError> {
     let Path(id) = id.map_err(|_| ApiError::not_found("no such thread"))?;
-    let now = app.clock.now();
     let mut conn = app.db();
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // Read under the lock, so that times follow the order of `seq`.
+    let now = app.clock.now();
     let row = find_thread(&tx, caller.person_id, &id)?;
     deliver(&tx, &row.id, caller.person_id, row.last_seq, now)?;
     let mut out = thread_out(&tx, &row)?;
@@ -401,9 +403,10 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<SendResult, Api
         ));
     }
 
-    let now = app.clock.now();
     let mut conn = app.db();
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // Read under the lock, so that times follow the order of `seq`.
+    let now = app.clock.now();
 
     if let Some(key) = &req.key {
         let first = tx
