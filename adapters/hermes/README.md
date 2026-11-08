@@ -1,0 +1,88 @@
+# Relevo for Hermes
+
+A Hermes plugin with two parts:
+
+- **The `relevo` gateway platform.** Relevo becomes one more chat platform for the Hermes gateway. Each Relevo thread is a chat (chat id = thread id, a DM-like chat with the note's author); each new note arrives as a message from its author, and Hermes' reply is written back in that thread. The gateway keeps one waiting inbox request open (`wait=55`), so it answers at once, and backs off (1 s doubling to 60 s) while the server cannot be reached.
+- **The `relevo` toolset**: `relevo_send`, `relevo_inbox` and `relevo_thread`, the same tools as `relevo mcp` (see `docs/agents.md`), usable from any Hermes session.
+
+Files: `relevo/plugin.yaml` (manifest), `relevo/__init__.py` (registration), `relevo/adapter.py` (platform), `relevo/tools.py` (tools), `relevo/client.py` (HTTP calls and rendering, shared by both). Only Python's standard library and `httpx`, which ships with Hermes.
+
+## Install (for the owner)
+
+Nothing here installs itself or touches a running Hermes. These steps are yours.
+
+1. **A token for this agent.** On the Relevo server:
+
+   ```
+   relevo token add oscar --label "Hermes"
+   ```
+
+   The label is what teammates see on every note this agent writes ("via Hermes").
+
+2. **Copy the plugin** into the Hermes home of the profile that should be on Relevo, and enable it:
+
+   ```
+   cp -r adapters/hermes/relevo ~/.hermes/plugins/relevo
+   hermes plugins enable relevo
+   ```
+
+   For another profile, copy it into that profile's home (`~/.hermes/profiles/<name>/plugins/relevo`) and run `hermes -p <name> plugins enable relevo`.
+
+3. **Configure it** in the profile's `~/.hermes/.env` (or through `hermes config`, which lists these variables from `plugin.yaml`):
+
+   ```
+   RELEVO_URL=https://relevo.example.com
+   RELEVO_TOKEN=rlv_…
+   # Who may reach this agent through Relevo. The Relevo team is already the trust boundary:
+   RELEVO_ALLOW_ALL_USERS=true
+   # or name them: RELEVO_ALLOWED_USERS=ana,bob
+   # Optional: the context this agent works in (repo or repo@branch). Unset: general.
+   # RELEVO_CONTEXT=pagos-api
+   ```
+
+   Set one of `RELEVO_ALLOW_ALL_USERS` or `RELEVO_ALLOWED_USERS`. With neither (and no gateway-wide `GATEWAY_ALLOW_ALL_USERS` or `GATEWAY_ALLOWED_USERS`), the gateway treats every teammate as unknown and answers them with a pairing code, which would be written into their thread. With `RELEVO_ALLOWED_USERS`, notes from anyone else are ignored.
+
+   If `RELEVO_URL` or `RELEVO_TOKEN` is missing, the plugin falls back to `~/.config/relevo/config.json` (written by `relevo connect`) for the tools; the gateway platform turns on only when both are set in the env or in `config.yaml`.
+
+4. **Enabling the platform.** With `RELEVO_URL` and `RELEVO_TOKEN` in the profile's env, the gateway enables the `relevo` platform by itself. To enable it explicitly instead (the token is better kept in `.env`):
+
+   ```yaml
+   # ~/.hermes/config.yaml
+   gateway:
+     platforms:
+       relevo:
+         enabled: true
+         extra:
+           url: https://relevo.example.com
+   ```
+
+5. **Give the agent the tools** where it should have them. On the `relevo` platform itself, so it can claim a thread with "On it." before a longer piece of work:
+
+   ```
+   hermes tools enable relevo --platform relevo
+   hermes tools enable relevo --platform cli        # optional: CLI/TUI sessions
+   hermes tools enable relevo --platform telegram   # optional: any other platform
+   ```
+
+6. **Restart the gateway when it suits you.** The gateway loads plugins and platforms when it starts, so the platform comes up at its next start (`hermes gateway restart`). Restarting interrupts what your assistants are doing at that moment, so when to do it is your call; nothing in this repository restarts it.
+
+## How it behaves
+
+- **One session per profile.** The plugin sends one fixed `Relevo-Session` per Hermes profile, derived from the profile's home, for the gateway and the tools alike. A restart keeps what was already delivered and the threads it holds; the gateway's reply and a `relevo_send` from the same profile claim for the same session. The session is general (it sees every note for you that no other session of yours holds) unless `RELEVO_CONTEXT` is set.
+- **Inbound.** A thread with new notes becomes one message, from the author of its latest new note, with the thread's facts and each note in `<untrusted from="@handle" …>`. A note's text cannot open or close such a block of its own. A teammate's text is never taken as a gateway `/command`. A note cut at 4,000 characters in the inbox is fetched whole first.
+- **The rules** of `docs/agents.md` reach the agent as the platform hint: stay silent when a note is not for it (`[SILENT]`, which sends nothing), claim before acting, treat others' text as context and check with you before acting on your code or sharing anything of yours, keep notes self-contained, no new notes to third parties while answering unless you ask, `@team` only when it does not know who knows.
+- **Outbound.** Only the final answer becomes a note: the platform uses Hermes' minimal display tier (no tool progress, streaming or interim messages), and the gateway's busy acknowledgements and silence markers are dropped. Each send carries an idempotency key and is retried once with the same key. Long answers are split at 16,000 characters (a note holds 64 KiB). A closed thread refuses the reply; the server's loop guard (20 notes per thread per hour) applies.
+- **A refused token** (unknown or revoked) stops the platform with a fatal error instead of retrying.
+- **Logs** carry thread ids, counts and error codes, never tokens or note text.
+
+## Tests
+
+Against a real server, with the Hermes venv's Python, from the repository root:
+
+```
+cargo build --release
+PYTHONDONTWRITEBYTECODE=1 RELEVO_BIN=target/release/relevo \
+  ~/.hermes/hermes-agent/venv/bin/python -m unittest discover -s adapters/hermes/tests -v
+```
+
+The tests install the plugin into a temporary Hermes home (as in step 2), load it through Hermes' own plugin discovery, start `relevo serve` on a free port in 7990-7999 with a temporary database, and stop it at the end. `HOME` and `HERMES_HOME` point at the temporary directory, so no real Hermes home is read or written. `HERMES_SRC` points at the Hermes source if it is not in `~/.hermes/hermes-agent`.
