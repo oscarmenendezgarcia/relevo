@@ -15,6 +15,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 const WAIT: Duration = Duration::from_secs(15);
 
 struct Server {
+    app: std::sync::Arc<App>,
     url: String,
     tokens: HashMap<String, String>,
     dir: PathBuf,
@@ -42,10 +43,16 @@ async fn server(handles: &[&str]) -> Server {
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(async move { axum::serve(listener, api::router(app)).await });
+    let router = api::router(app.clone());
+    tokio::spawn(async move { axum::serve(listener, router).await });
     let dir = std::env::temp_dir().join(db::random_id("relevo-mcp-"));
     std::fs::create_dir(&dir).unwrap();
-    Server { url, tokens, dir }
+    Server {
+        app,
+        url,
+        tokens,
+        dir,
+    }
 }
 
 /// A command for the binary that never sees the real `~/.config/relevo`.
@@ -499,6 +506,88 @@ async fn channel_pushes_notes_from_others() {
 
     // Gone with its client, even with an inbox request waiting.
     assert!(ana.close().await.success());
+}
+
+/// The sessions of `who` the server keeps.
+fn sessions(s: &Server, who: &str) -> usize {
+    db::list_sessions(&s.app.db(), Some(who), db::now_unix())
+        .unwrap()
+        .len()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_that_exits_hands_its_threads_to_the_next_at_once() {
+    let s = server(&["ana", "bob"]).await;
+    let mut ana = Mcp::start(&s, "ana", &s.dir, Some(""), &[]).await;
+    let mut short = Mcp::start(&s, "bob", &s.dir, Some(""), &["--channel"]).await;
+    let mut next = Mcp::start(&s, "bob", &s.dir, Some(""), &[]).await;
+    let id = thread_id(&ana.ok("send", json!({ "to": ["bob"], "text": "Q?" })).await);
+    short.notification("notifications/claude/channel").await;
+    let sent = short
+        .ok("send", json!({ "thread": id, "text": "Answer." }))
+        .await;
+    assert!(sent.contains("This session holds the thread."), "{sent}");
+    ana.ok("send", json!({ "thread": id, "text": "And?" }))
+        .await;
+    // The short session holds it, so the next does not see it...
+    next.ok("inbox", json!({})).await;
+    assert_eq!(sessions(&s, "bob"), 2);
+    let inbox = next.ok("inbox", json!({})).await;
+    assert!(!inbox.contains(&id), "{inbox}");
+    // ...until it exits, waiting inbox request and all: it ends its session on the way out.
+    assert!(short.close().await.success());
+    assert_eq!(sessions(&s, "bob"), 1);
+    let inbox = next.ok("inbox", json!({})).await;
+    assert!(inbox.contains(&id) && inbox.contains("And?"), "{inbox}");
+    let sent = next
+        .ok("send", json!({ "thread": id, "text": "On it." }))
+        .await;
+    assert!(sent.contains("This session holds the thread."), "{sent}");
+    // The ended session's waiting request did not bring it back.
+    assert_eq!(sessions(&s, "bob"), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_that_does_not_answer_holds_up_the_exit_only_briefly() {
+    // Takes connections and never answers.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let (seen_tx, mut seen) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let mut held = vec![];
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let seen_tx = seen_tx.clone();
+            held.push(tokio::spawn(async move {
+                if let Some(head) = read_message(&mut sock).await {
+                    let _ = seen_tx.send(String::from_utf8_lossy(&head).to_string());
+                }
+                std::future::pending::<()>().await;
+                drop(sock);
+            }));
+        }
+    });
+    let dir = std::env::temp_dir().join(db::random_id("relevo-mcp-"));
+    std::fs::create_dir(&dir).unwrap();
+    let mut cmd = relevo(&dir);
+    cmd.arg("mcp")
+        .env("RELEVO_URL", &url)
+        .env("RELEVO_TOKEN", "rlv_x")
+        .env("RELEVO_CONTEXT", "");
+    let mcp = Mcp::spawn(cmd).await;
+    let started = std::time::Instant::now();
+    assert!(mcp.close().await.success());
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    let head = seen.recv().await.unwrap();
+    assert!(head.starts_with("DELETE /api/session "), "{head}");
+    assert!(
+        head.to_lowercase().contains("relevo-session: mcp_"),
+        "{head}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test(flavor = "multi_thread")]

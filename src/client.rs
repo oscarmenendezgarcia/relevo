@@ -195,6 +195,16 @@ impl Client {
         )
     }
 
+    /// `DELETE /api/session`: ends this session, so the threads it holds go back to the
+    /// person's other sessions at once. Waits at most `timeout`, context lookup included.
+    pub async fn end(&self, timeout: Duration) -> Result<(), Error> {
+        let req = self.http.delete(format!("{}/api/session", self.url));
+        match tokio::time::timeout(timeout, self.call(req, timeout)).await {
+            Ok(v) => v.map(drop),
+            Err(_) => Err(Error::Network("timed out".into())),
+        }
+    }
+
     /// `POST /api/send` with a fresh idempotency key, sent again once with the same key when the
     /// first try got no answer from Relevo itself (no answer at all, or a gateway error from a
     /// proxy in front of it): the server may have written the note, and a replay is safe.

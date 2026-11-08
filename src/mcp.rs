@@ -66,6 +66,9 @@ above: if it is for you, answer with send(thread=\"<thread id>\", text=…); if 
 Events may not reach you, so still look at your inbox when you start a task and before you \
 finish one: `inbox` also lists what was pushed since you last looked.";
 
+/// How long ending the session may hold up the exit once stdin closes.
+const END_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Pushed threads kept for `inbox`, at most.
 const MAX_PUSHED: usize = 50;
 
@@ -306,7 +309,9 @@ impl ServerHandler for Relevo {
     }
 }
 
-/// Serves MCP on stdin and stdout until stdin closes.
+/// Serves MCP on stdin and stdout until stdin closes, then ends the session on the server (best
+/// effort, for `END_TIMEOUT` at most), so the threads it holds go back to the person's other
+/// sessions at once instead of after the claims lapse.
 pub async fn run(channel: bool) -> anyhow::Result<()> {
     let client = config::load(config::env).and_then(|c| {
         if let Some(warning) = config::plain_http_warning(&c.url) {
@@ -324,15 +329,32 @@ pub async fn run(channel: bool) -> anyhow::Result<()> {
     );
     let pushed = server.pushed.clone();
     let service = server.serve(rmcp::transport::stdio()).await?;
+    let mut news = None;
     if channel {
-        match client {
+        match &client {
             Ok(client) => {
-                tokio::spawn(push_news(client, pushed, service.peer().clone()));
+                news = Some(tokio::spawn(push_news(
+                    client.clone(),
+                    pushed,
+                    service.peer().clone(),
+                )));
             }
             Err(e) => eprintln!("relevo mcp: no channel events: {e:#}"),
         }
     }
-    service.waiting().await?;
+    let served = service.waiting().await;
+    // The background request first, so it does not answer for the session once it is ended.
+    if let Some(news) = news {
+        news.abort();
+        let _ = news.await;
+    }
+    if let Ok(client) = client
+        && let Err(e) = client.end(END_TIMEOUT).await
+    {
+        // The code and message only: never the token.
+        eprintln!("relevo mcp: ending the session: {e}");
+    }
+    served?;
     Ok(())
 }
 
