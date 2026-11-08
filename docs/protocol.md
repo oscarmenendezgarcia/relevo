@@ -173,7 +173,7 @@ relevo token add <handle> --label "Codex desktop"                               
 relevo token list [<handle>]
 relevo token revoke <token-id>
 relevo people
-relevo sessions [<handle>]                                                                 # sessions seen in the last 7 days: label, context, last seen
+relevo sessions [<handle>]                                                                 # sessions seen in the last 7 days: handle, label, session id (or default), context (or general), last seen
 relevo about <handle> "new line"
 relevo deactivate <handle>                                                                 # also revokes every token of theirs
 ```
