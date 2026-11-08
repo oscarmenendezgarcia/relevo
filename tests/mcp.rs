@@ -671,3 +671,104 @@ async fn channel_backs_off_when_inbox_does_not_wait() {
     drop(mcp);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Reads one HTTP message (head and a `content-length` body) from `sock`, or `None` when it
+/// closes first.
+async fn read_message(sock: &mut tokio::net::TcpStream) -> Option<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&buf[..end]).to_string();
+            let len: usize = head
+                .lines()
+                .find_map(|l| {
+                    let (k, v) = l.split_once(':')?;
+                    k.eq_ignore_ascii_case("content-length")
+                        .then(|| v.trim().parse().unwrap())
+                })
+                .unwrap_or(0);
+            if buf.len() >= end + 4 + len {
+                return Some(buf);
+            }
+        }
+        let n = sock.read(&mut chunk).await.ok()?;
+        if n == 0 {
+            return None;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+}
+
+/// A proxy to `upstream` that cuts the connection instead of passing on the first answer to a
+/// waiting inbox request that carries new notes: the server has delivered them, the client
+/// never sees them.
+async fn dropping_proxy(upstream: &str) -> String {
+    let upstream = upstream.trim_start_matches("http://").to_string();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    tokio::spawn(async move {
+        while let Ok((mut client, _)) = listener.accept().await {
+            let (upstream, dropped) = (upstream.clone(), dropped.clone());
+            tokio::spawn(async move {
+                while let Some(req) = read_message(&mut client).await {
+                    let mut up = tokio::net::TcpStream::connect(&upstream).await.unwrap();
+                    up.write_all(&req).await.unwrap();
+                    let Some(res) = read_message(&mut up).await else {
+                        return;
+                    };
+                    let waiting = String::from_utf8_lossy(&req).contains("wait=");
+                    let news = String::from_utf8_lossy(&res).contains("\"new_notes\":[{");
+                    if waiting && news && !dropped.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        return;
+                    }
+                    if client.write_all(&res).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    url
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channel_pushes_again_what_a_dropped_answer_delivered() {
+    let s = server(&["ana", "bob"]).await;
+    let proxy = dropping_proxy(&s.url).await;
+    let home = s.dir.join("home-ana");
+    std::fs::create_dir(&home).unwrap();
+    let mut cmd = relevo(&home);
+    cmd.args(["mcp", "--channel"])
+        .env("RELEVO_URL", &proxy)
+        .env("RELEVO_TOKEN", &s.tokens["ana"])
+        .env("RELEVO_CONTEXT", "");
+    let mut ana = Mcp::spawn(cmd).await;
+    let mut bob = Mcp::start(&s, "bob", &s.dir, Some(""), &[]).await;
+    // Let ana's first waiting request reach the server.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let sent = bob
+        .ok("send", json!({ "to": ["ana"], "text": "Deploy at 5?" }))
+        .await;
+    let id = thread_id(&sent);
+    // The answer that delivered it was cut: the note comes again, after the retry.
+    let event = ana.notification("notifications/claude/channel").await;
+    assert_eq!(event["params"]["meta"]["thread"], id.as_str());
+    let content = event["params"]["content"].as_str().unwrap();
+    assert!(content.contains("Pushed again"), "{content}");
+    assert!(
+        content.contains("<untrusted from=\"@bob\">\nDeploy at 5?\n</untrusted>"),
+        "{content}"
+    );
+    // Once: a later note comes as usual, and the recovered one is not pushed again.
+    bob.ok("send", json!({ "thread": id, "text": "Or at 6?" }))
+        .await;
+    let event = ana.notification("notifications/claude/channel").await;
+    let content = event["params"]["content"].as_str().unwrap();
+    assert!(content.contains("Or at 6?"), "{content}");
+    assert!(!content.contains("\nDeploy at 5?\n"), "{content}");
+    assert!(!content.contains("Pushed again"), "{content}");
+}

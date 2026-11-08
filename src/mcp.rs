@@ -1,6 +1,7 @@
 //! `relevo mcp`: a stdio MCP server with the tools `send`, `inbox` and `thread`, and with
 //! `--channel`, Claude Code channel events for new notes.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -311,6 +312,12 @@ pub fn channel_event(thread: &Value, me: Option<&str>) -> Option<Value> {
 
 /// Keeps a waiting inbox request open and pushes each thread with new notes as a
 /// `notifications/claude/channel` event. Ends when the client is gone.
+///
+/// The server delivers the notes in an answer when it sends it, so an answer lost on the way
+/// (the laptop slept, the network changed, a proxy cut the request) takes its notes with it.
+/// After a failure the next request does not wait, and each direct thread that it shows only as
+/// waiting is fetched with `thread`: if its latest note is recent and was not pushed, it is
+/// pushed again. A team thread whose notes were lost leaves the inbox and cannot be found again.
 async fn push_news(
     client: Arc<Client>,
     me: Arc<Mutex<Option<String>>>,
@@ -318,13 +325,33 @@ async fn push_news(
     peer: Peer<RoleServer>,
 ) {
     let mut backoff = Duration::from_secs(1);
+    // The latest note by someone else pushed for each thread.
+    let mut known: HashMap<String, String> = HashMap::new();
+    // When the first request since the last answer that failed was sent (unix seconds).
+    let mut failed_since: Option<i64> = None;
+    let push = |event: Value| {
+        let peer = peer.clone();
+        async move {
+            let note = CustomNotification::new("notifications/claude/channel", Some(event));
+            peer.send_notification(ServerNotification::CustomNotification(note))
+                .await
+                .is_ok()
+        }
+    };
     loop {
         let started = tokio::time::Instant::now();
-        let v = match client.inbox(false, CHANNEL_WAIT).await {
+        let sent_at = crate::db::now_unix();
+        let wait = if failed_since.is_some() {
+            0
+        } else {
+            CHANNEL_WAIT
+        };
+        let v = match client.inbox(false, wait).await {
             Ok(v) => v,
             Err(e) => {
                 // The code and message only: never note text or the token.
                 eprintln!("relevo mcp: inbox: {e}; again in {}s", backoff.as_secs());
+                failed_since.get_or_insert(sent_at);
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(MAX_BACKOFF);
                 continue;
@@ -333,25 +360,37 @@ async fn push_news(
         let threads: Vec<&Value> = v["threads"].as_array().into_iter().flatten().collect();
         let me = learn(&me, &threads);
         let mut events = 0;
-        for t in threads {
-            let Some(event) = channel_event(t, me.as_deref()) else {
-                continue;
+        for t in &threads {
+            let (thread, event) = match channel_event(t, me.as_deref()) {
+                Some(event) => (Value::clone(t), event),
+                None => match failed_since {
+                    Some(since) if waits_quietly(t) => {
+                        let known = known.get(s(&t["id"]));
+                        match recover(&client, t, known, since, me.as_deref()).await {
+                            Some(recovered) => recovered,
+                            None => continue,
+                        }
+                    }
+                    _ => continue,
+                },
             };
-            events += 1;
             // Kept before sending: nothing tells whether the client shows the event.
-            remember(&pushed, t);
-            let note = CustomNotification::new("notifications/claude/channel", Some(event));
-            if peer
-                .send_notification(ServerNotification::CustomNotification(note))
-                .await
-                .is_err()
-            {
+            remember(&pushed, &thread);
+            if let Some(n) = latest_other(&thread, me.as_deref()) {
+                known.insert(s(&thread["id"]).to_string(), n);
+            }
+            events += 1;
+            if !push(event).await {
                 return;
             }
         }
+        failed_since = None;
         // A server that answers a waiting request at once with nothing (one that ignores `wait`,
         // or a proxy in the way) must not make this loop spin: back off as after a failure.
-        if events == 0 && v["more"].as_i64().unwrap_or(0) == 0 && started.elapsed() < MIN_EMPTY_WAIT
+        if wait > 0
+            && events == 0
+            && v["more"].as_i64().unwrap_or(0) == 0
+            && started.elapsed() < MIN_EMPTY_WAIT
         {
             eprintln!(
                 "relevo mcp: inbox answered at once with nothing; again in {}s",
@@ -363,6 +402,75 @@ async fn push_news(
             backoff = Duration::from_secs(1);
         }
     }
+}
+
+fn s(v: &Value) -> &str {
+    v.as_str().unwrap_or("")
+}
+
+/// An open direct thread that waits for a reply with nothing new: what a thread whose new notes
+/// were in a lost answer looks like.
+fn waits_quietly(t: &Value) -> bool {
+    s(&t["kind"]) == "direct"
+        && s(&t["status"]) == "open"
+        && t["waiting_for_you"] == true
+        && t["new_notes"].as_array().is_none_or(Vec::is_empty)
+}
+
+/// The id of the latest note in `thread` (`notes` or `new_notes`) not written by `me`.
+fn latest_other(thread: &Value, me: Option<&str>) -> Option<String> {
+    let notes = thread.get("notes").or_else(|| thread.get("new_notes"))?;
+    notes
+        .as_array()?
+        .iter()
+        .rev()
+        .find(|n| Some(s(&n["author"])) != me)
+        .map(|n| s(&n["id"]).to_string())
+}
+
+/// How far back a recovered note may be, before the failed request, to allow for the server's
+/// clock being off from ours.
+const RECOVER_SLACK: i64 = 600;
+
+/// After a failure: the quiet thread `t` again, as pushed (its notes after `known`, the latest
+/// note by someone else already pushed), and its event, when its latest note is recent and was
+/// not pushed.
+async fn recover(
+    client: &Client,
+    t: &Value,
+    known: Option<&String>,
+    since: i64,
+    me: Option<&str>,
+) -> Option<(Value, Value)> {
+    let full = client.thread(s(&t["id"])).await.ok()?;
+    let notes = full["notes"].as_array()?;
+    let latest = notes.last()?;
+    if Some(s(&latest["id"])) == known.map(String::as_str)
+        || s(&latest["created_at"]) < crate::db::rfc3339(since - RECOVER_SLACK).as_str()
+    {
+        return None;
+    }
+    // The notes after the one pushed; without one, those after our own latest note, or the
+    // latest alone.
+    let start = notes
+        .iter()
+        .rposition(|n| Some(s(&n["id"])) == known.map(String::as_str))
+        .or_else(|| notes.iter().rposition(|n| Some(s(&n["author"])) == me))
+        .map_or(notes.len() - 1, |i| i + 1);
+    let mut thread = full.clone();
+    let object = thread.as_object_mut()?;
+    object.remove("notes");
+    object.remove("delivery");
+    object.insert("new_notes".into(), Value::Array(notes[start..].to_vec()));
+    let mut event = channel_event(&thread, me)?;
+    if let Some(content) = event["content"].as_str() {
+        event["content"] = format!(
+            "(Pushed again: the connection dropped while it was being delivered, so you may have \
+             seen it already.)\n{content}"
+        )
+        .into();
+    }
+    Some((thread, event))
 }
 
 #[cfg(test)]
