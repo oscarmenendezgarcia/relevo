@@ -25,7 +25,7 @@ const MAX_BODY: usize = 400 * 1024;
 const MAX_RECIPIENTS: usize = 20;
 const MAX_KEY_CHARS: usize = 100;
 const TITLE_CHARS: usize = 80;
-const INBOX_THREADS: usize = 20;
+const INBOX_THREADS: i64 = 20;
 const INBOX_TEXT_CHARS: usize = 4000;
 const THREAD_NOTES_PER_HOUR: i64 = 20;
 const PERSON_NOTES_PER_MINUTE: i64 = 60;
@@ -123,48 +123,50 @@ struct ThreadRow {
 // ---------- queries shared by the handlers ----------
 
 /// Threads of person `?1` that match `filter` (on `p`, their participant row, and `t`, the
-/// thread), with what `inbox` and `thread` need to know about each.
+/// thread), with what `inbox` and `thread` need to know about each. Reads only the thread and
+/// participant rows: the latest note and whether it waits are kept on `p` by `refresh`.
 fn threads_of(filter: &str) -> String {
     format!(
         "
-SELECT id, kind, title, opener, opener_id, status, delivered_seq, last_seq,
-       (kind = 'direct' AND status = 'open' AND last_author != ?1) AS waiting
-FROM (
-    SELECT t.id, t.kind, t.title, o.handle AS opener, t.opener_id, t.status,
-           coalesce(p.delivered_seq, 0) AS delivered_seq,
-           (SELECT max(seq) FROM notes WHERE thread_id = t.id) AS last_seq,
-           (SELECT author_id FROM notes WHERE thread_id = t.id ORDER BY seq DESC LIMIT 1)
-               AS last_author
-    FROM participants p
-    JOIN threads t ON t.id = p.thread_id
-    JOIN people o ON o.id = t.opener_id
-    WHERE p.person_id = ?1 AND ({filter})
-)"
+SELECT t.id, t.kind, t.title, o.handle, t.opener_id, t.status,
+       coalesce(p.delivered_seq, 0), p.last_seq, p.waiting
+FROM participants p
+JOIN threads t ON t.id = p.thread_id
+JOIN people o ON o.id = t.opener_id
+WHERE p.person_id = ?1 AND ({filter})"
     )
 }
 
-/// The threads `inbox` shows, in its order.
+/// The threads `inbox` shows, in its order: new ones first (waiting ones first among them),
+/// then waiting ones with nothing new; newest first within each. `participants_inbox` holds
+/// exactly these rows in this order, so the query stops after `?2` rows instead of sorting them
+/// all.
 fn inbox_sql() -> String {
     format!(
-        "{} WHERE waiting OR last_seq > delivered_seq
-         ORDER BY last_seq > delivered_seq DESC, waiting DESC, last_seq DESC",
+        "{} ORDER BY p.has_new DESC, p.waiting DESC, p.last_seq DESC LIMIT ?2",
         threads_of("p.inbox = 1")
     )
 }
 
-/// Recomputes the `inbox` flag of every participant of a thread: set while the thread holds
-/// notes not delivered to them, or is waiting for them. Runs after every change to the thread.
+/// Recomputes what every participant's row knows about a thread (latest note, new, waiting,
+/// inbox). Runs after every change to the thread: a note, a close, a delivery.
 fn refresh(conn: &Connection, thread: &str) -> Result<(), ApiError> {
-    conn.execute(
-        "UPDATE participants SET inbox = (
-             coalesce(delivered_seq, 0) < (SELECT coalesce(max(seq), 0) FROM notes
-                                           WHERE thread_id = ?1)
-             OR EXISTS (SELECT 1 FROM threads
-                        WHERE id = ?1 AND kind = 'direct' AND status = 'open'
-                          AND (SELECT author_id FROM notes WHERE thread_id = ?1
-                               ORDER BY seq DESC LIMIT 1) != participants.person_id))
-         WHERE thread_id = ?1",
+    // A thread is opened by its first note, so it always has a latest one.
+    let (last_seq, last_author, open_direct): (i64, i64, bool) = conn.query_row(
+        "SELECT n.seq, n.author_id, t.kind = 'direct' AND t.status = 'open'
+         FROM threads t JOIN notes n ON n.thread_id = t.id
+         WHERE t.id = ?1 ORDER BY n.seq DESC LIMIT 1",
         [thread],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    conn.execute(
+        "UPDATE participants SET
+             last_seq = ?2,
+             has_new = coalesce(delivered_seq, 0) < ?2,
+             waiting = ?3 AND person_id != ?4,
+             inbox = coalesce(delivered_seq, 0) < ?2 OR (?3 AND person_id != ?4)
+         WHERE thread_id = ?1",
+        params![thread, last_seq, open_direct, last_author],
     )?;
     Ok(())
 }
@@ -286,11 +288,16 @@ async fn inbox(State(app): State<Arc<App>>, caller: Caller) -> Result<Json<Value
     let now = app.clock.now();
     let rows: Vec<ThreadRow> = tx
         .prepare(&inbox_sql())?
-        .query_map([caller.person_id], thread_row)?
+        .query_map(params![caller.person_id, INBOX_THREADS], thread_row)?
         .collect::<rusqlite::Result<_>>()?;
-    let more = rows.len().saturating_sub(INBOX_THREADS);
+    let flagged: i64 = tx.query_row(
+        "SELECT count(*) FROM participants WHERE person_id = ?1 AND inbox = 1",
+        [caller.person_id],
+        |r| r.get(0),
+    )?;
+    let more = flagged - rows.len() as i64;
     let mut threads = Vec::new();
-    for row in rows.iter().take(INBOX_THREADS) {
+    for row in &rows {
         let mut out = thread_out(&tx, row)?;
         out.new_notes = Some(notes_after(
             &tx,
@@ -629,22 +636,30 @@ fn title_of(text: &str) -> String {
 mod tests {
     use super::{inbox_sql, title_of};
 
-    /// The inbox must not visit every thread a person ever took part in: agents poll it, and
-    /// it runs under the lock every request needs.
+    /// The inbox must cost the same for 20 flagged threads as for 100,000: agents poll it, a
+    /// runaway agent can open thousands of threads a day for one person, and it runs under the
+    /// lock every request needs. So it reads only flagged rows, already in inbox order from the
+    /// index, and stops after 20: no sort over all of them, and no work per row it skips.
     #[test]
-    fn inbox_reads_only_the_rows_flagged_for_the_inbox() {
+    fn inbox_reads_its_20_threads_in_index_order_without_sorting() {
         let conn = crate::db::open(":memory:").unwrap();
         let mut stmt = conn
             .prepare(&format!("EXPLAIN QUERY PLAN {}", inbox_sql()))
             .unwrap();
         let plan: Vec<String> = stmt
-            .query_map([1], |r| r.get(3))
+            .query_map(rusqlite::params![1, 20], |r| r.get(3))
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         assert!(
-            plan.iter()
-                .any(|step| step.contains("p USING INDEX participants_inbox")),
+            plan[0].contains("p USING INDEX participants_inbox"),
+            "{plan:#?}"
+        );
+        assert!(
+            !plan.iter().any(|step| step.contains("TEMP B-TREE")
+                || step.contains("SUBQUERY")
+                || step.contains("SCAN t")
+                || step.contains("SCAN o")),
             "{plan:#?}"
         );
     }

@@ -956,3 +956,101 @@ async fn waiting_threads_with_nothing_new_never_hide_new_notes() {
     assert_eq!(inbox["threads"][2]["waiting_for_you"], true);
     assert_eq!(inbox["threads"][2]["new_notes"], json!([]));
 }
+
+/// What the inbox should show, worked out on the side: a thread is new while it holds notes not
+/// yet delivered, waiting while it is direct, open and its latest note is not yours.
+struct Expected {
+    id: String,
+    last: usize,
+    new: bool,
+    waiting: bool,
+}
+
+/// Checks one inbox call against `model` (order, flags, `more`), then applies its deliveries.
+async fn inbox_matches(t: &Team, who: &str, model: &mut [Expected]) {
+    let mut expected: Vec<&Expected> = model.iter().filter(|e| e.new || e.waiting).collect();
+    expected.sort_by_key(|e| std::cmp::Reverse((e.new, e.waiting, e.last)));
+    let inbox = t.inbox(who).await;
+    let shown = thread_ids(&inbox);
+    let want: Vec<String> = expected.iter().take(20).map(|e| e.id.clone()).collect();
+    assert_eq!(shown, want);
+    assert_eq!(inbox["more"], expected.len().saturating_sub(20));
+    for (th, e) in inbox["threads"].as_array().unwrap().iter().zip(&expected) {
+        assert_eq!(th["waiting_for_you"], e.waiting, "{}", e.id);
+        assert_eq!(th["new_notes"].as_array().unwrap().is_empty(), !e.new);
+    }
+    for e in model.iter_mut().filter(|e| shown.contains(&e.id)) {
+        e.new = false;
+    }
+}
+
+#[tokio::test]
+async fn inbox_order_and_more_hold_over_hundreds_of_threads() {
+    let t = team(&["ana", "bob", "carl"]);
+    let mut model = Vec::new();
+    let mut last = 0;
+    // 300 direct threads to bob from two people; the clock moves so no rate limit is hit.
+    for i in 0..300 {
+        let from = if i % 2 == 0 { "ana" } else { "carl" };
+        t.app.clock.advance(1);
+        let id = t
+            .ok(from, json!({ "to": ["bob"], "text": format!("t{i}") }))
+            .await;
+        last += 1;
+        model.push(Expected {
+            id,
+            last,
+            new: true,
+            waiting: true,
+        });
+    }
+    // Bob's agent reads a few pages: the newest 60 are delivered but still wait.
+    for _ in 0..3 {
+        inbox_matches(&t, "bob", &mut model).await;
+    }
+    // Then: bob replies to some (they leave his inbox), ana writes again in some read and some
+    // unread ones, carl closes one with a last note and asks the team.
+    for i in [299, 250, 10] {
+        t.app.clock.advance(1);
+        t.ok("bob", json!({ "thread": model[i].id, "text": "done" }))
+            .await;
+        last += 1;
+        model[i].last = last;
+        model[i].waiting = false;
+    }
+    for i in [298, 280, 4, 0] {
+        t.app.clock.advance(1);
+        t.ok("ana", json!({ "thread": model[i].id, "text": "and?" }))
+            .await;
+        last += 1;
+        model[i].last = last;
+        model[i].new = true;
+    }
+    t.app.clock.advance(1);
+    t.ok(
+        "carl",
+        json!({ "thread": model[297].id, "text": "never mind", "close": true }),
+    )
+    .await;
+    last += 1;
+    model[297].last = last;
+    model[297].new = true;
+    model[297].waiting = false;
+    t.app.clock.advance(1);
+    let id = t
+        .ok("carl", json!({ "to": ["@team"], "text": "who knows?" }))
+        .await;
+    last += 1;
+    model.push(Expected {
+        id,
+        last,
+        new: true,
+        waiting: false,
+    });
+    // Every page until nothing is new, and a few after, match the model.
+    for _ in 0..20 {
+        inbox_matches(&t, "bob", &mut model).await;
+    }
+    assert!(model.iter().all(|e| !e.new));
+    assert_eq!(t.inbox("bob").await["more"], 296 - 20);
+}

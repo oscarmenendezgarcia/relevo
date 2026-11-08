@@ -35,18 +35,24 @@ CREATE TABLE IF NOT EXISTS threads (
 );
 CREATE INDEX IF NOT EXISTS threads_by_opener ON threads(opener_id, kind, created_at);
 -- Rows are inserted in participant order; rowid keeps that order.
--- `inbox` is 1 while the thread is new or waiting for this person (kept by `api::refresh`), so
--- the inbox reads only those rows and not the whole history.
+-- `last_seq` (the thread's latest note), `has_new` (notes not yet delivered to this person),
+-- `waiting` (open, direct, latest note not theirs) and `inbox` (`has_new` or `waiting`) are kept
+-- by `api::refresh` after every change to the thread. The partial index holds only inbox rows,
+-- in inbox order, so the inbox reads its 20 threads and stops, however many are flagged.
 CREATE TABLE IF NOT EXISTS participants (
     thread_id     TEXT NOT NULL REFERENCES threads(id),
     person_id     INTEGER NOT NULL REFERENCES people(id),
     delivered_seq INTEGER,
     delivered_at  INTEGER,
+    last_seq      INTEGER NOT NULL DEFAULT 0,
+    has_new       INTEGER NOT NULL DEFAULT 0,
+    waiting       INTEGER NOT NULL DEFAULT 0,
     inbox         INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (thread_id, person_id)
 );
 CREATE INDEX IF NOT EXISTS participants_by_person ON participants(person_id);
-CREATE INDEX IF NOT EXISTS participants_inbox ON participants(person_id) WHERE inbox = 1;
+CREATE INDEX IF NOT EXISTS participants_inbox
+    ON participants(person_id, has_new, waiting, last_seq) WHERE inbox = 1;
 CREATE TABLE IF NOT EXISTS notes (
     seq        INTEGER PRIMARY KEY AUTOINCREMENT,
     id         TEXT NOT NULL UNIQUE,
