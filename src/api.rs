@@ -1234,7 +1234,12 @@ mod tests {
                         "{plan:#?}"
                     );
                     if !all {
-                        assert!(step.contains("_id=? AND claimed_by"), "{plan:#?}");
+                        let bounded = if step.contains("session_count") {
+                            step.contains("session_id=? AND resolved=? AND claimed_by")
+                        } else {
+                            step.contains("person_id=? AND claimed_by")
+                        };
+                        assert!(bounded, "{plan:#?}");
                     }
                 }
                 assert!(!plan.iter().any(|s| s.contains("TEMP B-TREE")), "{plan:#?}");

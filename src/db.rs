@@ -128,7 +128,7 @@ CREATE INDEX IF NOT EXISTS session_new_context
     WHERE has_new = 1 AND resolved = 0;
 -- For `more`: the threads new only for the session, by route (see `api::count_sql`).
 CREATE INDEX IF NOT EXISTS session_count
-    ON session_threads(session_id, claimed_by, context, resolved)
+    ON session_threads(session_id, resolved, claimed_by, context)
     WHERE has_new = 1 AND person_inbox = 0;
 CREATE TABLE IF NOT EXISTS notes (
     seq        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -171,7 +171,7 @@ pub const CLAIM_LAPSE_SECS: i64 = 3600;
 /// The layout of `SCHEMA`, kept in SQLite's `user_version`. v0 does not migrate: a database with
 /// another layout is refused, never half-updated (`CREATE TABLE IF NOT EXISTS` would skip the
 /// old tables and fail on their missing columns).
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// Opens (or creates) the database and applies the schema. `":memory:"` works for tests.
 pub fn open(path: &str) -> Result<Connection> {
