@@ -286,6 +286,8 @@ pub fn sent(v: &Value) -> String {
             "Written: note {note} in thread {id}, which is {}.",
             s(&v["status"])
         ),
+        // A close without text took nothing: another session holding it changes nothing here.
+        None if v["claimed"] == "other-session" => return format!("Closed thread {id}."),
         None => format!("Closed thread {id}."),
     };
     out.push(' ');
@@ -512,5 +514,8 @@ mod tests {
             sent(&closed),
             "Closed thread r_1. Nobody of yours holds the thread."
         );
+        // Closed while another session holds it: nothing to step aside from, no note written.
+        let held = json!({ "thread": "r_1", "note": null, "status": "closed", "claimed": "other-session" });
+        assert_eq!(sent(&held), "Closed thread r_1.");
     }
 }
