@@ -27,8 +27,10 @@ impl FromRequestParts<Arc<App>> for Caller {
             .headers
             .get(AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .map(str::trim)
+            .and_then(|v| v.trim().split_once(' '))
+            // Auth schemes are case-insensitive (RFC 9110 section 11.1).
+            .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+            .map(|(_, secret)| secret.trim())
             .ok_or_else(ApiError::unauthorized)?;
         app.db()
             .query_row(

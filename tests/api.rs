@@ -129,6 +129,27 @@ async fn missing_or_unknown_token_is_unauthorized() {
 }
 
 #[tokio::test]
+async fn bearer_scheme_is_case_insensitive() {
+    let t = team(&["ana"]);
+    for scheme in ["bearer", "BEARER", "Bearer"] {
+        let req = Request::builder()
+            .uri("/api/inbox")
+            .header("authorization", format!("{scheme} {}", t.tokens["ana"]))
+            .body(Body::empty())
+            .unwrap();
+        let res = api::router(t.app.clone()).oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{scheme}");
+    }
+    let req = Request::builder()
+        .uri("/api/inbox")
+        .header("authorization", format!("Basic {}", t.tokens["ana"]))
+        .body(Body::empty())
+        .unwrap();
+    let res = api::router(t.app.clone()).oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn revoked_token_is_unauthorized() {
     let t = team(&["ana", "bob"]);
     let id = db::list_tokens(&t.app.db(), Some("ana")).unwrap()[0]
