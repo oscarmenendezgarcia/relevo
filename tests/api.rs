@@ -184,6 +184,17 @@ async fn deactivated_person_is_unauthorized_and_unreachable() {
 }
 
 #[tokio::test]
+async fn invited_back_the_old_token_works_again() {
+    let t = team(&["ana", "bob"]);
+    db::deactivate(&t.app.db(), "bob").unwrap();
+    assert_eq!(t.get("bob", "/api/inbox").await.0, StatusCode::UNAUTHORIZED);
+    db::invite(&t.app.db(), "bob", "Bob", None, "desktop", T0).unwrap();
+    assert_eq!(t.get("bob", "/api/inbox").await.0, StatusCode::OK);
+    t.ok("ana", json!({ "to": ["bob"], "text": "welcome back" }))
+        .await;
+}
+
+#[tokio::test]
 async fn a_second_token_acts_as_the_same_person_and_records_its_label() {
     let t = team(&["ana", "bob"]);
     let second = db::add_token(&t.app.db(), "ana", "Codex desktop", T0).unwrap();
@@ -389,6 +400,36 @@ async fn non_participant_gets_not_found() {
     let (status, _) = t.get("carl", "/api/threads/r_aaaaaaaaaaaa").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(thread_ids(&t.inbox("carl").await).is_empty());
+
+    // A closed thread is not revealed either (THREAD_CLOSED would tell that it exists).
+    t.ok("ana", json!({ "thread": id, "close": true })).await;
+    for body in [
+        json!({ "thread": id, "text": "me too" }),
+        json!({ "thread": id, "close": true }),
+    ] {
+        let (status, v) = t.send("carl", body).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{v}");
+        assert_eq!(code(&v), "NOT_FOUND");
+    }
+
+    // Nor a team thread asked before Dan joined (FORBIDDEN would tell that it exists).
+    let team_q = t.ok("ana", json!({ "to": ["@team"], "text": "q" })).await;
+    let dan = db::invite(&t.app.db(), "dan", "Dan", None, "laptop", T0).unwrap();
+    for body in [
+        json!({ "thread": team_q, "text": "me too" }),
+        json!({ "thread": team_q, "close": true }),
+    ] {
+        let (status, v) = t
+            .raw(
+                "POST",
+                "/api/send",
+                Some(&dan.secret),
+                Body::from(body.to_string()),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{v}");
+        assert_eq!(code(&v), "NOT_FOUND");
+    }
 }
 
 #[tokio::test]
@@ -773,8 +814,9 @@ async fn twenty_first_note_in_an_hour_is_thread_busy() {
 #[tokio::test]
 async fn sixty_first_note_in_a_minute_is_rate_limited() {
     let t = team(&["ana", "bob"]);
+    let mut id = String::new();
     for _ in 0..3 {
-        let id = t.ok("ana", json!({ "to": ["bob"], "text": "start" })).await;
+        id = t.ok("ana", json!({ "to": ["bob"], "text": "start" })).await;
         for i in 1..20 {
             t.ok("ana", json!({ "thread": id, "text": i.to_string() }))
                 .await;
@@ -792,6 +834,9 @@ async fn sixty_first_note_in_a_minute_is_rate_limited() {
         json!({ "to": ["ana"], "text": "bob is not limited" }),
     )
     .await;
+    // A close without text is never limited.
+    let (status, v) = t.send("ana", json!({ "thread": id, "close": true })).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
     t.app.clock.advance(60);
     t.ok("ana", json!({ "to": ["bob"], "text": "61st" })).await;
 }

@@ -144,3 +144,52 @@ async fn main() -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn serve_args(cli: &Cli) -> (SocketAddr, u32) {
+        match cli.command {
+            Command::Serve {
+                addr,
+                team_questions_per_day,
+            } => (addr, team_questions_per_day),
+            _ => panic!("not serve"),
+        }
+    }
+
+    /// One test, because it changes the process environment.
+    #[test]
+    fn defaults_and_environment() {
+        const VARS: [&str; 3] = ["RELEVO_DB", "RELEVO_ADDR", "RELEVO_TEAM_QUESTIONS_PER_DAY"];
+        // SAFETY: no other test in this binary reads or writes the environment.
+        unsafe { VARS.iter().for_each(|v| std::env::remove_var(v)) };
+
+        let cli = Cli::try_parse_from(["relevo", "serve"]).unwrap();
+        assert_eq!(cli.db, "./relevo.db");
+        assert_eq!(serve_args(&cli), ("127.0.0.1:7878".parse().unwrap(), 5));
+
+        let cli = Cli::try_parse_from(["relevo", "invite", "ana", "--name", "Ana"]).unwrap();
+        let Command::Invite { label, about, .. } = cli.command else {
+            panic!("not invite")
+        };
+        assert_eq!(label, "agent");
+        assert_eq!(about, None);
+
+        unsafe {
+            std::env::set_var("RELEVO_DB", "/srv/team.db");
+            std::env::set_var("RELEVO_ADDR", "0.0.0.0:9000");
+            std::env::set_var("RELEVO_TEAM_QUESTIONS_PER_DAY", "2");
+        }
+        let cli = Cli::try_parse_from(["relevo", "serve"]).unwrap();
+        assert_eq!(cli.db, "/srv/team.db");
+        assert_eq!(serve_args(&cli), ("0.0.0.0:9000".parse().unwrap(), 2));
+        // Flags win over the environment, and --db works after the subcommand too.
+        let cli =
+            Cli::try_parse_from(["relevo", "serve", "--db", "x.db", "--addr", "[::1]:1"]).unwrap();
+        assert_eq!(cli.db, "x.db");
+        assert_eq!(serve_args(&cli).0, "[::1]:1".parse().unwrap());
+        unsafe { VARS.iter().for_each(|v| std::env::remove_var(v)) };
+    }
+}
