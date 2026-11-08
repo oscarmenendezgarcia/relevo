@@ -104,6 +104,13 @@ class RelevoAdapter(BasePlatformAdapter):
             self._set_fatal_error("relevo_not_configured",
                                   "Relevo needs RELEVO_URL and RELEVO_TOKEN", retryable=False)
             return False
+        problem = client.context_problem(self.settings.context)
+        if problem:
+            # Every inbox would be refused with BAD_REQUEST: fail now instead of retrying forever.
+            logger.error("[relevo] RELEVO_CONTEXT is not a valid context: %s", problem)
+            self._set_fatal_error("relevo_bad_context", f"RELEVO_CONTEXT is not a valid context: {problem}",
+                                  retryable=False)
+            return False
         if self._poll_task and not self._poll_task.done():
             return True
         self._ensure_http()
@@ -152,12 +159,16 @@ class RelevoAdapter(BasePlatformAdapter):
             except asyncio.CancelledError:
                 raise
             except client.RelevoError as exc:
-                if exc.status == 401:
-                    logger.error("[relevo] the server refused the token (%s); stopping",
-                                 client.describe_error(exc))
-                    self._set_fatal_error("relevo_unauthorized",
-                                          "Relevo refused the token: it is unknown or revoked",
-                                          retryable=False)
+                if exc.status in (400, 401):
+                    # A refused token, or headers the server calls malformed: asking again cannot help.
+                    unauthorized = exc.status == 401
+                    logger.error("[relevo] the server refused %s (%s); stopping",
+                                 "the token" if unauthorized else "the request", client.describe_error(exc))
+                    self._set_fatal_error(
+                        "relevo_unauthorized" if unauthorized else "relevo_bad_request",
+                        "Relevo refused the token: it is unknown or revoked" if unauthorized
+                        else f"Relevo refused the inbox request: {exc.code}: {exc.message}",
+                        retryable=False)
                     await self._notify_fatal_error()
                     return
                 logger.warning("[relevo] inbox failed: %s; retrying in %.1fs", client.describe_error(exc), delay)

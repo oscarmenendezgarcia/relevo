@@ -138,6 +138,23 @@ def resolve_settings(extra: Optional[dict] = None, *, session: Optional[str] = N
     return Settings(url=url.rstrip("/"), token=token, context=context, session=session or session_id())
 
 
+_REPO = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+_BRANCH = re.compile(r"^[a-z0-9._/-]{1,100}$")
+
+
+def context_problem(context: str) -> Optional[str]:
+    """Why a configured RELEVO_CONTEXT is not a context of docs/protocol.md, or None when it is
+    (or is empty: general). The server lowercases it, so case is not a problem."""
+    if not context:
+        return None
+    repo, at, branch = context.lower().partition("@")
+    if not _REPO.match(repo):
+        return "the repository part must match ^[a-z0-9][a-z0-9._-]{0,63}$"
+    if at and not _BRANCH.match(branch):
+        return "the branch part must match ^[a-z0-9._/-]{1,100}$"
+    return None
+
+
 def configured() -> bool:
     """check_fn of the client tools: they show only once a server and token are set."""
     try:

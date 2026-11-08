@@ -679,6 +679,35 @@ class Loop(Base):
         self.assertTrue(a.has_fatal_error)
         self.assertFalse(a.is_connected)
 
+    async def test_a_malformed_context_is_fatal(self):
+        os.environ["RELEVO_CONTEXT"] = "Pagos API"
+        try:
+            a = self.make_adapter()
+            self.assertFalse(await a.connect())
+            self.assertTrue(a.has_fatal_error)
+            self.assertFalse(a.fatal_error_retryable)
+            self.assertFalse(a.is_connected)
+            os.environ["RELEVO_CONTEXT"] = "Pagos-API@feat/Refunds"  # the server lowercases it
+            b = self.make_adapter()
+            self.assertTrue(await b.connect())
+            await asyncio.sleep(0.5)
+            self.assertFalse(b.has_fatal_error)
+        finally:
+            os.environ.pop("RELEVO_CONTEXT", None)
+
+    async def test_a_request_the_server_calls_malformed_stops_the_loop(self):
+        a = self.make_adapter()
+
+        async def refused(http, *, wait=0):
+            raise client.RelevoError(400, "BAD_REQUEST", "malformed Relevo-Context")
+
+        a.api.ainbox = refused
+        self.assertTrue(await a.connect())
+        await self.until(lambda: a._poll_task.done())
+        self.assertTrue(a.has_fatal_error)
+        self.assertFalse(a.fatal_error_retryable)
+        self.assertFalse(a.is_connected)
+
     async def test_connect_needs_a_server_and_a_token(self):
         os.environ.pop("RELEVO_TOKEN")
         a = self.make_adapter()
