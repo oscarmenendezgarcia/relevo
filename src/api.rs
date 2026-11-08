@@ -463,9 +463,19 @@ fn deliver(
              SELECT id, ?2, ?3, ?4 FROM sessions WHERE person_id = ?3 AND id != ?1",
             params![session.id, thread, session.person_id, person_has],
         )?;
+        // When and where a note reached the person is told for notes by others only: their own
+        // say nothing about whether they read the others'.
+        let by_others: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM notes
+                            WHERE thread_id = ?1 AND seq > ?2 AND seq <= ?3 AND author_id != ?4)",
+            params![thread, person_has, seq, session.person_id],
+            |r| r.get(0),
+        )?;
         conn.execute(
-            "UPDATE participants SET delivered_seq = ?3, delivered_at = ?4,
-                 delivered_label = ?5, delivered_context = ?6
+            "UPDATE participants SET delivered_seq = ?3,
+                 delivered_at = CASE WHEN ?7 THEN ?4 ELSE delivered_at END,
+                 delivered_label = CASE WHEN ?7 THEN ?5 ELSE delivered_label END,
+                 delivered_context = CASE WHEN ?7 THEN ?6 ELSE delivered_context END
              WHERE thread_id = ?1 AND person_id = ?2",
             params![
                 thread,
@@ -473,7 +483,8 @@ fn deliver(
                 seq,
                 now,
                 session.label,
-                session.context
+                session.context,
+                by_others
             ],
         )?;
     }
@@ -518,9 +529,10 @@ fn claim(claimed_by: Option<i64>, session: &Session) -> Option<&'static str> {
     })
 }
 
-/// For each participant, in order: the latest note that reached one of their sessions, which
-/// session that was, which session claimed the thread (each with its context then), and how many
-/// of their sessions have that note: those without a row of their own have what their person has.
+/// For each participant, in order: the latest note by someone else that reached one of their
+/// sessions, which session it reached first, which session claimed the thread (each with its
+/// context then), and how many of their sessions have that note: those without a row of their own
+/// have what their person has.
 fn delivery(conn: &Connection, thread: &str) -> Result<Vec<Delivery>, ApiError> {
     let mut stmt = conn.prepare(
         "SELECT pe.handle, n.id, p.delivered_at, p.delivered_label, p.delivered_context,
@@ -528,9 +540,12 @@ fn delivery(conn: &Connection, thread: &str) -> Result<Vec<Delivery>, ApiError> 
                 (SELECT count(*) FROM sessions s
                  LEFT JOIN session_threads st ON st.session_id = s.id AND st.thread_id = p.thread_id
                  WHERE s.person_id = p.person_id
-                   AND coalesce(st.delivered_seq, p.delivered_seq) >= p.delivered_seq)
+                   AND coalesce(st.delivered_seq, p.delivered_seq) >= n.seq)
          FROM participants p JOIN people pe ON pe.id = p.person_id
-         LEFT JOIN notes n ON n.seq = p.delivered_seq
+         LEFT JOIN notes n ON n.seq = (
+             SELECT max(o.seq) FROM notes o
+             WHERE o.thread_id = p.thread_id AND o.author_id != p.person_id
+               AND o.seq <= p.delivered_seq)
          LEFT JOIN sessions cs ON cs.id = p.claimed_by
          LEFT JOIN tokens ct ON ct.id = cs.token_id
          WHERE p.thread_id = ?1 ORDER BY p.rowid",

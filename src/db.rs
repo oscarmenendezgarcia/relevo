@@ -55,8 +55,9 @@ CREATE INDEX IF NOT EXISTS threads_by_opener ON threads(opener_id, kind, created
 -- One row per participant of a thread; rows are inserted in participant order, which rowid keeps.
 -- `context` is the context the thread was addressed to for this person; `claimed_by` the session
 -- of theirs that claimed it (the first to write while nobody held it), and `claimed_context` its
--- context then. `delivered_*` is the latest note that reached any of their sessions, and which
--- one (its label and context then). `last_seq` is the thread's latest note, `last_other_seq` the
+-- context then. `delivered_seq` is the latest note that reached any of their sessions;
+-- `delivered_at`, `_label` and `_context` say when the latest one by someone else first did, and
+-- which session (its label and context then). `last_seq` is the thread's latest note, `last_other_seq` the
 -- latest one not theirs; `has_new` (no session of theirs has that one),
 -- `waiting` (open, direct, latest note not theirs), `inbox` (`has_new` or `waiting`) and
 -- `resolved` (a closed `team` thread: it shows only with `all`) are kept by `api::refresh` after

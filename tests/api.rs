@@ -434,13 +434,13 @@ async fn writers_own_notes_are_delivered_at_once() {
     assert!(thread_ids(&t.inbox("ana").await).is_empty());
     let th = t.thread("ana", &id).await;
     assert_eq!(th["waiting_for_you"], false);
+    // Delivery tells others only about notes by someone else: Ana has none yet.
     let delivery = th["delivery"].as_array().unwrap();
-    assert_eq!(delivery[0]["handle"], "ana");
-    assert_eq!(delivery[0]["note"], th["notes"][0]["id"]);
-    assert_eq!(delivery[0]["delivered_at"], "2026-11-08T10:41:00Z");
-    let ana = json!({ "label": "laptop", "context": null });
-    assert_eq!(delivery[0]["by"], ana);
-    assert_eq!(delivery[0]["claimed_by"], ana);
+    assert_eq!(
+        delivery[0],
+        json!({ "handle": "ana", "note": null, "delivered_at": null, "by": null,
+                "claimed_by": { "label": "laptop", "context": null }, "seen_by": 0 })
+    );
     assert_eq!(
         delivery[1],
         json!({ "handle": "bob", "note": null, "delivered_at": null, "by": null, "claimed_by": null, "seen_by": 0 })
@@ -2078,22 +2078,32 @@ async fn delivery_names_the_session_that_picked_up_and_the_one_that_claimed() {
         json!({ "label": "laptop", "context": "pagos-api" })
     );
     assert_eq!(d["claimed_by"], Value::Null);
-    // Another session writing claims it, and its note is now the latest that reached Bob.
+    let q = d["note"].clone();
+    // Another session writing claims it; its own note does not move the delivery.
     t.app.clock.advance(60);
-    let note = {
-        let (_, v) = codex.send(json!({ "thread": id, "text": "mine" })).await;
-        v["note"].clone()
-    };
+    codex.ok(json!({ "thread": id, "text": "mine" })).await;
     let d = &t.thread("ana", &id).await["delivery"][1];
+    let pagos_out = json!({ "label": "laptop", "context": "pagos-api" });
     let codex_out = json!({ "label": "Codex desktop", "context": "frontend" });
-    assert_eq!(d["note"], note);
-    assert_eq!(d["delivered_at"], "2026-11-08T10:47:00Z");
-    assert_eq!(d["by"], codex_out);
+    assert_eq!(d["note"], q);
+    assert_eq!(d["delivered_at"], "2026-11-08T10:46:00Z");
+    assert_eq!(d["by"], pagos_out);
     assert_eq!(d["claimed_by"], codex_out);
-    // A session reading what it already had moves nothing.
+    // A session reading what it already had, or only Bob's own notes, moves nothing.
     t.app.clock.advance(60);
     pagos.thread(&id).await;
-    assert_eq!(t.thread("ana", &id).await["delivery"][1]["by"], codex_out);
+    assert_eq!(t.thread("ana", &id).await["delivery"][1]["by"], pagos_out);
+    // A note of Ana's reaching a session of Bob's does.
+    let again = {
+        let (_, v) = t.send("ana", json!({ "thread": id, "text": "and?" })).await;
+        v["note"].clone()
+    };
+    t.app.clock.advance(60);
+    codex.inbox().await;
+    let d = &t.thread("ana", &id).await["delivery"][1];
+    assert_eq!(d["note"], again);
+    assert_eq!(d["delivered_at"], "2026-11-08T10:49:00Z");
+    assert_eq!(d["by"], codex_out);
 }
 
 #[tokio::test]
@@ -2111,8 +2121,8 @@ async fn seen_by_counts_the_sessions_the_latest_delivered_note_reached() {
     };
     let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
     assert_eq!(seen_by(t.thread("ana", &id).await), (Value::Null, json!(0)));
-    // Ana's own note reached the session that wrote it.
-    assert_eq!(t.thread("ana", &id).await["delivery"][0]["seen_by"], 1);
+    // Ana's own note reached the session that wrote it, but says nothing to others.
+    assert_eq!(t.thread("ana", &id).await["delivery"][0]["seen_by"], 0);
     pagos.inbox().await;
     let (q, n) = seen_by(t.thread("ana", &id).await);
     assert!(q.is_string());
@@ -2148,6 +2158,49 @@ async fn seen_by_counts_the_sessions_the_latest_delivered_note_reached() {
         .clone();
     db::revoke_token(&t.app.db(), &laptop, T0).unwrap();
     assert_eq!(seen_by(t.thread("ana", &id).await), (again, json!(0)));
+}
+
+#[tokio::test]
+async fn delivery_is_about_the_latest_note_by_someone_else() {
+    let t = team(&["ana", "oscar"]);
+    let a1 = t.agent("ana", "term-ana1", "pagos-api");
+    let a2 = t.agent("ana", "term-ana2", "frontend");
+    a1.inbox().await;
+    a2.inbox().await;
+    let id = t.ok("oscar", json!({ "to": ["ana"], "text": "q" })).await;
+    // Oscar's own note says nothing about whether he read anyone's.
+    let d = &t.thread("oscar", &id).await["delivery"][0];
+    assert_eq!(
+        (&d["note"], &d["delivered_at"], &d["by"], &d["seen_by"]),
+        (&Value::Null, &Value::Null, &Value::Null, &json!(0))
+    );
+    let q = t.thread("oscar", &id).await["notes"][0]["id"].clone();
+    t.app.clock.advance(60);
+    a1.inbox().await;
+    t.app.clock.advance(60);
+    a2.inbox().await;
+    t.app.clock.advance(60);
+    a2.ok(json!({ "thread": id, "text": "on it" })).await;
+    // Ana's own note, from a session that had Oscar's, does not move her delivery.
+    let d = &t.thread("oscar", &id).await["delivery"][1];
+    assert_eq!(d["note"], q);
+    assert_eq!(d["delivered_at"], "2026-11-08T10:42:00Z");
+    assert_eq!(
+        d["by"],
+        json!({ "label": "laptop", "context": "pagos-api" })
+    );
+    assert_eq!(
+        d["claimed_by"],
+        json!({ "label": "laptop", "context": "frontend" })
+    );
+    assert_eq!(d["seen_by"], 2);
+    // Nor does one from a session that writes again, or fetches her own notes.
+    a1.ok(json!({ "thread": id, "text": "me too" })).await;
+    t.agent("ana", "term-ana3", "").thread(&id).await;
+    let d = &t.thread("oscar", &id).await["delivery"][1];
+    assert_eq!(d["note"], q);
+    assert_eq!(d["delivered_at"], "2026-11-08T10:42:00Z");
+    assert_eq!(d["seen_by"], 3);
 }
 
 #[tokio::test]
