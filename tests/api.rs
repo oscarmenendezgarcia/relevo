@@ -1793,6 +1793,22 @@ async fn delivery_names_the_session_that_picked_up_and_the_one_that_claimed() {
 }
 
 #[tokio::test]
+async fn claimed_by_shows_the_context_the_session_claimed_in() {
+    let t = team(&["ana", "bob"]);
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
+    let pagos = t.agent("bob", "term-0001", "pagos-api");
+    pagos.inbox().await;
+    pagos.ok(json!({ "thread": id, "text": "mine" })).await;
+    // Days later the same session works elsewhere: the thread does not follow it there.
+    t.app.clock.advance(3 * 24 * 3600);
+    t.agent("bob", "term-0001", "acquisition").inbox().await;
+    let d = &t.thread("ana", &id).await["delivery"][1];
+    let pagos = json!({ "label": "laptop", "context": "pagos-api" });
+    assert_eq!(d["by"], pagos);
+    assert_eq!(d["claimed_by"], pagos);
+}
+
+#[tokio::test]
 async fn forgotten_sessions_release_their_claims() {
     let t = team(&["ana", "bob"]);
     let pagos = t.agent("bob", "term-pagos", "pagos-api");

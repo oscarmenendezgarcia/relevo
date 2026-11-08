@@ -50,7 +50,7 @@ CREATE INDEX IF NOT EXISTS sessions_by_last_seen ON sessions(last_seen);
 CREATE INDEX IF NOT EXISTS threads_by_opener ON threads(opener_id, kind, created_at);
 -- One row per participant of a thread; rows are inserted in participant order, which rowid keeps.
 -- `context` is the context the thread was addressed to for this person; `claimed_by` the session
--- of theirs that last wrote in it. `delivered_*` is the latest note that reached any of their
+-- of theirs that last wrote in it, and `claimed_context` its context then. `delivered_*` is the latest note that reached any of their
 -- sessions, and which one (its label and context then). `last_seq` is the thread's latest note,
 -- `last_other_seq` the latest one not theirs; `has_new` (no session of theirs has that one),
 -- `waiting` (open, direct, latest note not theirs) and `inbox` (`has_new` or `waiting`) are kept
@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS participants (
     person_id         INTEGER NOT NULL REFERENCES people(id),
     context           TEXT,
     claimed_by        INTEGER REFERENCES sessions(id),
+    claimed_context   TEXT,
     delivered_seq     INTEGER,
     delivered_at      INTEGER,
     delivered_label   TEXT,
@@ -375,7 +376,8 @@ fn select_ids(conn: &Connection, sql: &str, param: impl rusqlite::ToSql) -> Resu
 pub fn forget_sessions(conn: &Connection, ids: &[i64]) -> rusqlite::Result<()> {
     for id in ids {
         conn.execute(
-            "UPDATE participants SET claimed_by = NULL WHERE claimed_by = ?1",
+            "UPDATE participants SET claimed_by = NULL, claimed_context = NULL
+             WHERE claimed_by = ?1",
             [id],
         )?;
         conn.execute(

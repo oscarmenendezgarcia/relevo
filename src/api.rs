@@ -79,7 +79,7 @@ struct Delivery {
     delivered_at: Option<String>,
     /// The session the note reached.
     by: Option<SessionOut>,
-    /// The session of theirs that claimed the thread.
+    /// The session of theirs that claimed the thread, with its context when it claimed it.
     claimed_by: Option<SessionOut>,
 }
 
@@ -489,11 +489,11 @@ fn thread_out(
 }
 
 /// For each participant, in order: the latest note that reached one of their sessions, which
-/// session that was, and which session claimed the thread.
+/// session that was, and which session claimed the thread (each with its context then).
 fn delivery(conn: &Connection, thread: &str) -> Result<Vec<Delivery>, ApiError> {
     let mut stmt = conn.prepare(
         "SELECT pe.handle, n.id, p.delivered_at, p.delivered_label, p.delivered_context,
-                ct.label, cs.context
+                ct.label, p.claimed_context
          FROM participants p JOIN people pe ON pe.id = p.person_id
          LEFT JOIN notes n ON n.seq = p.delivered_seq
          LEFT JOIN sessions cs ON cs.id = p.claimed_by
@@ -859,8 +859,9 @@ fn write_as(
             }
             // Writing claims the thread for the person, for this session.
             tx.execute(
-                "UPDATE participants SET claimed_by = ?3 WHERE thread_id = ?1 AND person_id = ?2",
-                params![thread_id, caller.person_id, session.id],
+                "UPDATE participants SET claimed_by = ?3, claimed_context = ?4
+                 WHERE thread_id = ?1 AND person_id = ?2",
+                params![thread_id, caller.person_id, session.id, session.context],
             )?;
             Some(id)
         }

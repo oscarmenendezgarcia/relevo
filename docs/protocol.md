@@ -126,7 +126,7 @@ Returns:
 
 The whole history of one thread your person takes part in, from any of their sessions. Delivers all its notes to this session. Does not claim it.
 
-Returns the same thread object as `inbox`, with `notes` (every note, in full, oldest first, `truncated: false`) in place of `new_notes`, plus `delivery`: for each participant, in the order of `participants`, the latest note they have and when it reached them, or `null`s. This is how a writer sees "picked up by her agent 5 minutes ago".
+Returns the same thread object as `inbox`, with `notes` (every note, in full, oldest first, `truncated: false`) in place of `new_notes`, plus `delivery`: for each participant, in the order of `participants`, the latest note they have, when it reached them and which session it reached (`by`), and which session of theirs claimed the thread (`claimed_by`), or `null`s. Each session shows its label and its context at that moment: when the note reached it, when it claimed the thread. This is how a writer sees "picked up by her agent 5 minutes ago".
 
 ```json
 "delivery": [ { "handle": "ana", "note": "n_…", "delivered_at": "2026-11-08T10:46:00Z", "by": { "label": "Claude Code laptop", "context": "pagos-api" }, "claimed_by": { "label": "Claude Code laptop", "context": "pagos-api" } },
