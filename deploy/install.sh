@@ -56,6 +56,11 @@ done
     exit 2
 }
 [ "$enable" = 0 ] || [ "$systemd" = 1 ] || die "--enable and --no-systemd exclude each other"
+# A bare name is the file here, as `install` copies it: run that one, not one found in PATH.
+case $binary in
+    */*) ;;
+    *) binary=./$binary ;;
+esac
 [ -n "${HOME:-}" ] || die "HOME is not set"
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

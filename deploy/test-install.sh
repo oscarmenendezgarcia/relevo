@@ -127,6 +127,24 @@ RELEVO_DB=$data/relevo.db "$bin" invite ana --name Ana >/dev/null
 RELEVO_DB=$data/relevo.db "$bin" backup --keep 14 "$data/backups" >/dev/null
 [ "$(find "$data/backups" -name '????????-??????.db' | wc -l)" = 1 ] || fail "no backup written"
 
+echo "a bare name is the file in the current directory, not one in PATH"
+mkdir "$fake/cwd" "$fake/path"
+cp "$binary" "$fake/path/relevo"
+printf 'not a program' >"$fake/cwd/relevo"
+if (cd "$fake/cwd" && PATH="$fake/path:$PATH" install_ --no-systemd relevo); then
+    fail "checked the relevo in PATH and installed the text file here"
+fi
+expect_in_out "not executable"
+cmp -s "$fake/relevo-new" "$bin" || fail "binary was replaced"
+chmod +x "$fake/cwd/relevo"
+if (cd "$fake/cwd" && PATH="$fake/path:$PATH" install_ --no-systemd relevo); then
+    fail "checked the relevo in PATH and installed the text file here"
+fi
+expect_in_out "does not run here"
+cp "$fake/relevo-new" "$fake/cwd/relevo-aarch64-unknown-linux-gnu"
+(cd "$fake/cwd" && install_ --no-systemd relevo-aarch64-unknown-linux-gnu) ||
+    fail "a bare name in the current directory: $(cat "$fake/out")"
+
 echo "a binary that refuses the database replaces nothing"
 if command -v python3 >/dev/null; then
     python3 -I - "$data/relevo.db" <<'EOF'
