@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use relevo::{App, Clock, api, client, config, db};
+use relevo::{App, Clock, api, client, config, db, mcp};
 
 /// Relevo: notes that your agent hands to a teammate's agent.
 #[derive(Parser)]
@@ -51,6 +51,12 @@ enum Command {
     /// Check a token against a server and save both for `relevo mcp` (in
     /// ~/.config/relevo/config.json, or the file RELEVO_CONFIG names).
     Connect { url: String, token: String },
+    /// Serve MCP on stdin and stdout, for Claude Code and any MCP client.
+    Mcp {
+        /// Push new notes as Claude Code channel events (keeps an inbox request waiting).
+        #[arg(long)]
+        channel: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -103,8 +109,10 @@ async fn connect(url: &str, token: &str) -> Result<()> {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     // The client commands never touch a database.
-    if let Command::Connect { url, token } = &cli.command {
-        return connect(url, token).await;
+    match cli.command {
+        Command::Connect { url, token } => return connect(&url, &token).await,
+        Command::Mcp { channel } => return mcp::run(channel).await,
+        _ => {}
     }
     let conn = db::open(&cli.db)?;
     let now = db::now_unix();
@@ -195,7 +203,7 @@ async fn main() -> Result<()> {
             let revoked = db::deactivate(&conn, &handle, now)?;
             println!("deactivated {handle}, revoked {revoked} token(s)");
         }
-        Command::Connect { .. } => unreachable!("handled above"),
+        Command::Connect { .. } | Command::Mcp { .. } => unreachable!("handled above"),
     }
     Ok(())
 }
