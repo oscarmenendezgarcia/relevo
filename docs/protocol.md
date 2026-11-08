@@ -40,16 +40,16 @@ Opens a thread, or writes in one.
 | `close` | bool, optional | Marks the thread closed after writing. |
 | `key` | string, 1 to 100 characters, optional | Idempotency key. A repeated `send` from the same person with the same key returns the first result and writes nothing. Only a successful `send` uses up a key; keys do not expire. |
 
-Any other field fails with `BAD_REQUEST`. Characters here and below are Unicode scalar values.
+The body is a JSON object; anything else (an array, say), or any other field, fails with `BAD_REQUEST`. Characters here and below are Unicode scalar values.
 
 Rules:
 
-- `to` holds 1 to 20 distinct handles of active people other than you, or exactly `["@team"]`. Handles may be written with or without a leading `@` and in any case; repeats are merged. Writing to yourself, or `@team` next to other handles, fails with `BAD_REQUEST`. An unknown or inactive handle fails with `UNKNOWN_PERSON`, whose error lists the valid handles with their `about`.
+- `to` holds 1 to 20 distinct handles of active people other than you, or exactly `["@team"]`. Handles may be written with or without a leading `@` and in any case; repeats are merged (`["@team", "equipo"]` is one `@team`). Writing to yourself, or `@team` next to other handles, fails with `BAD_REQUEST`. An unknown or inactive handle fails with `UNKNOWN_PERSON`, whose error lists the valid handles with their `about`.
 - `["@team"]` opens a `team` thread. `@equipo` is accepted as the same thing (both with or without `@`); `team` and `equipo` can therefore not be handles. A person may open at most `RELEVO_TEAM_QUESTIONS_PER_DAY` (default 5) team threads in any rolling 24 hours: beyond that, `TEAM_LIMIT`. A team of one (only you) fails with `NO_RECIPIENTS`.
 - Writing in a thread you are not a participant of fails with `NOT_FOUND` (the thread's existence is not revealed).
 - Writing in a closed thread fails with `THREAD_CLOSED`. Open a new thread instead.
 - Closing: in a `direct` thread any participant may close it; in a `team` thread only the person who asked.
-- Text over 64 KiB fails with `TOO_LARGE` (400); empty or blank text with `BAD_REQUEST`.
+- Text over 64 KiB (counted once decoded from JSON) fails with `TOO_LARGE` (400); empty or blank text with `BAD_REQUEST`. The whole request body may be up to 400 KiB, so a note of 64 KiB fits however the client escapes it.
 - Loop guard: a thread accepts at most 20 notes in any rolling hour. The 21st fails with `THREAD_BUSY`, whose message tells the agent to check with its person before going on. (The server cannot tell a person from an agent, so this caps speed, not authorship.)
 - A person may send at most 60 notes per rolling minute: beyond that, `RATE_LIMITED`.
 - The limits count notes only: a close without text is never limited.
@@ -119,7 +119,7 @@ Errors: `{ "error": { "code": "…", "message": "…", …extra } }` with these 
 |---|---|
 | `UNAUTHORIZED` (missing, unknown or revoked token; inactive person) | 401 |
 | `NOT_FOUND` | 404 |
-| `BAD_REQUEST`, `UNKNOWN_PERSON` (+ `valid`: the team list), `NO_RECIPIENTS`, `TOO_LARGE` | 400 (413 for a body over 80 KiB) |
+| `BAD_REQUEST`, `UNKNOWN_PERSON` (+ `valid`: the team list), `NO_RECIPIENTS`, `TOO_LARGE` | 400 (413 for a body over 400 KiB) |
 | `THREAD_CLOSED`, `FORBIDDEN` (closing a team thread you did not open) | 409, 403 |
 | `TEAM_LIMIT`, `RATE_LIMITED`, `THREAD_BUSY` | 429 |
 | `INTERNAL` (a server fault; details go to the log only) | 500 |

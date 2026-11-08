@@ -18,8 +18,10 @@ use crate::auth::Caller;
 use crate::db::{RESERVED_HANDLES, random_id, rfc3339};
 use crate::error::ApiError;
 
-const MAX_BODY: usize = 80 * 1024;
 const MAX_TEXT: usize = 64 * 1024;
+/// Room for 64 KiB of text even when every byte is JSON-escaped as `\u00XX` (6 bytes), plus the
+/// other fields. The text limit is checked on the decoded text.
+const MAX_BODY: usize = 400 * 1024;
 const MAX_RECIPIENTS: usize = 20;
 const MAX_KEY_CHARS: usize = 100;
 const TITLE_CHARS: usize = 80;
@@ -322,13 +324,17 @@ async fn send(
 ) -> Result<Json<SendResult>, ApiError> {
     let body = body.map_err(|e| {
         if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
-            ApiError::too_large(StatusCode::PAYLOAD_TOO_LARGE, "request body over 80 KiB")
+            ApiError::too_large(StatusCode::PAYLOAD_TOO_LARGE, "request body over 400 KiB")
         } else {
             ApiError::bad_request(e.body_text())
         }
     })?;
-    let req: SendRequest = serde_json::from_slice(&body)
-        .map_err(|e| ApiError::bad_request(format!("invalid send body: {e}")))?;
+    let invalid = |e: serde_json::Error| ApiError::bad_request(format!("invalid send body: {e}"));
+    // Serde would also read the struct from a JSON array, by position; only an object is a send.
+    let req: SendRequest = match serde_json::from_slice(&body).map_err(invalid)? {
+        Value::Object(fields) => serde_json::from_value(Value::Object(fields)).map_err(invalid)?,
+        _ => return Err(ApiError::bad_request("the send body must be a JSON object")),
+    };
     let result = write(&app, &caller, req)?;
     tracing::info!(
         person = %caller.handle,
@@ -495,13 +501,21 @@ fn open_thread(
     text: &str,
     now: i64,
 ) -> Result<String, ApiError> {
+    // Normalised, with `equipo` read as `team`, and repeats merged (first one kept).
+    let mut seen = HashSet::new();
     let handles: Vec<String> = to
         .iter()
         .map(|h| h.trim().trim_start_matches('@').to_lowercase())
+        .map(|h| {
+            if RESERVED_HANDLES.contains(&h.as_str()) {
+                "team".to_string()
+            } else {
+                h
+            }
+        })
+        .filter(|h| seen.insert(h.clone()))
         .collect();
-    let is_team = handles
-        .iter()
-        .any(|h| RESERVED_HANDLES.contains(&h.as_str()));
+    let is_team = handles.iter().any(|h| h == "team");
 
     let (kind, others): (&str, Vec<i64>) = if is_team {
         if handles.len() != 1 {
@@ -527,15 +541,13 @@ fn open_thread(
         }
         ("team", others)
     } else {
-        let mut seen = HashSet::new();
-        let handles: Vec<&String> = handles.iter().filter(|h| seen.insert(*h)).collect();
         if handles.is_empty() || handles.len() > MAX_RECIPIENTS {
             return Err(ApiError::bad_request(
                 "'to' needs 1 to 20 handles, or [\"@team\"]",
             ));
         }
         let mut others = Vec::new();
-        for handle in handles {
+        for handle in &handles {
             if *handle == caller.handle {
                 return Err(ApiError::bad_request("you cannot send a note to yourself"));
             }

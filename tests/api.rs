@@ -450,6 +450,24 @@ async fn equipo_is_team() {
 }
 
 #[tokio::test]
+async fn team_and_equipo_without_at_and_repeated_are_one_team_thread() {
+    let t = team(&["ana", "bob"]);
+    for to in [
+        json!(["team"]),
+        json!(["equipo"]),
+        json!(["@team", "@team"]),
+        json!(["@Team", "equipo"]),
+    ] {
+        let (status, v) = t
+            .send("ana", json!({ "to": to, "text": "who knows?" }))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{to}: {v}");
+        let id = v["thread"].as_str().unwrap();
+        assert_eq!(t.thread("bob", id).await["kind"], "team", "{to}");
+    }
+}
+
+#[tokio::test]
 async fn team_must_be_alone_in_to() {
     let t = team(&["ana", "bob"]);
     let (status, v) = t
@@ -581,6 +599,7 @@ async fn bad_requests() {
         json!({ "to": ["bob"], "text": "x", "key": "k".repeat(101) }),
         json!({ "to": ["bob"], "body": "typo" }),
         json!({ "to": "bob", "text": "not a list" }),
+        json!([["bob"], null, "positional", false, null]),
     ] {
         let (status, v) = t.send("ana", body.clone()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
@@ -654,9 +673,32 @@ async fn failed_send_does_not_use_up_the_key() {
 }
 
 #[tokio::test]
-async fn body_over_80_kib_is_413() {
+async fn escaped_text_up_to_64_kib_fits_in_the_body_limit() {
     let t = team(&["ana", "bob"]);
-    let body = json!({ "to": ["bob"], "text": "a".repeat(81 * 1024) });
+    // Python's json.dumps writes "ñ" as "\u00f1": 6 bytes for 2 of text.
+    let body = format!(r#"{{"to":["bob"],"text":"{}"}}"#, r"\u00f1".repeat(20_000));
+    let (status, v) = t
+        .raw(
+            "POST",
+            "/api/send",
+            Some(&t.tokens["ana"]),
+            Body::from(body),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    // The worst case: control characters, 6 bytes each, for the whole 64 KiB.
+    let text = "\u{1}".repeat(64 * 1024);
+    t.ok(
+        "ana",
+        json!({ "to": ["bob"], "text": text, "key": "k".repeat(100) }),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn body_over_400_kib_is_413() {
+    let t = team(&["ana", "bob"]);
+    let body = json!({ "to": ["bob"], "text": "a".repeat(401 * 1024) });
     let (status, v) = t.send("ana", body).await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(code(&v), "TOO_LARGE");
