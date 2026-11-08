@@ -829,3 +829,32 @@ async fn connect_takes_the_token_from_stdin_or_the_environment() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("no token"));
     assert!(!home.join("config.json").exists());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plain_http_to_another_host_warns_before_the_token_goes_out() {
+    let dir = std::env::temp_dir().join(db::random_id("relevo-mcp-"));
+    std::fs::create_dir(&dir).unwrap();
+    // Not loopback, though it starts like it; it does not resolve, so the check fails, but the
+    // warning came first.
+    let url = "http://localhost.invalid:1";
+    let out = relevo(&dir)
+        .args(["connect", url, "rlv_x"])
+        .output()
+        .await
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.starts_with("warning: plain http"), "{err}");
+
+    let out = relevo(&dir)
+        .arg("mcp")
+        .env("RELEVO_URL", url)
+        .env("RELEVO_TOKEN", "rlv_x")
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("relevo mcp: warning: plain http"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

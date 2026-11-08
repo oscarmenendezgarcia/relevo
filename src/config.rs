@@ -71,6 +71,23 @@ pub fn normalize_url(url: &str) -> Result<String> {
     Ok(url.to_string())
 }
 
+/// The warning for a server reached over plain `http://` on anything but loopback (127.0.0.0/8,
+/// `::1` or `localhost`), where the token and notes cross the network in the clear.
+pub fn plain_http_warning(url: &str) -> Option<&'static str> {
+    let rest = url.strip_prefix("http://")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => host.split(':').next().unwrap_or(""),
+    };
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    (!loopback).then_some("warning: plain http sends the token and notes in the clear; use https")
+}
+
 /// Writes `config` to `file`, readable by its user only (directory 0700, file 0600).
 pub fn save(file: &Path, config: &Config) -> Result<()> {
     if let Some(dir) = file.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -101,6 +118,30 @@ pub fn save(file: &Path, config: &Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_http_is_fine_on_loopback_only() {
+        for url in [
+            "http://127.0.0.1:7878",
+            "http://127.1.2.3",
+            "http://localhost:7878/x",
+            "http://LOCALHOST",
+            "http://[::1]:7878",
+            "https://relevo.example.com",
+        ] {
+            assert_eq!(plain_http_warning(url), None, "{url}");
+        }
+        for url in [
+            "http://localhost.corp.example",
+            "http://127.internal.example:80",
+            "http://[::2]",
+            "http://10.0.0.5:7878",
+            "http://user@relevo.example.com",
+            "http://localhost@evil.example",
+        ] {
+            assert!(plain_http_warning(url).is_some(), "{url}");
+        }
+    }
     use std::collections::HashMap;
 
     fn env_of(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + use<> {

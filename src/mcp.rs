@@ -267,6 +267,9 @@ impl ServerHandler for Relevo {
 /// Serves MCP on stdin and stdout until stdin closes.
 pub async fn run(channel: bool) -> anyhow::Result<()> {
     let client = config::load(config::env).and_then(|c| {
+        if let Some(warning) = config::plain_http_warning(&c.url) {
+            eprintln!("relevo mcp: {warning}");
+        }
         let dir = std::env::current_dir().unwrap_or_else(|_| "/".into());
         Client::new(&c, std::env::var("RELEVO_CONTEXT").ok(), dir).map(Arc::new)
     });

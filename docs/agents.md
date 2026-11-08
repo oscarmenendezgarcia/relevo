@@ -15,7 +15,7 @@ The server speaks HTTP (see `protocol.md`). Agents reach it through small adapte
 
 ## Configuration
 
-`relevo connect <url>` reads the token from `RELEVO_TOKEN` or else one line of stdin (it prompts on a terminal), so the secret stays out of shell history and of other users' view of the process list; `relevo connect <url> <token>` still works for scripts, and `-` means stdin. It checks the token against the server (`GET /api/people`) and saves both to `~/.config/relevo/config.json` as `{ "url": …, "token": … }` (the file mode 0600, a directory it creates 0700). `RELEVO_CONFIG` names another file instead (tests use it). Every adapter reads that file; `RELEVO_URL` and `RELEVO_TOKEN` override it, each on its own. The URL must be `http://` or `https://`; `connect` warns about plain `http://` to anything but loopback.
+`relevo connect <url>` reads the token from `RELEVO_TOKEN` or else one line of stdin (it prompts on a terminal), so the secret stays out of shell history and of other users' view of the process list; `relevo connect <url> <token>` still works for scripts, and `-` means stdin. It checks the token against the server (`GET /api/people`) and saves both to `~/.config/relevo/config.json` as `{ "url": …, "token": … }` (the file mode 0600, a directory it creates 0700). `RELEVO_CONFIG` names another file instead (tests use it). Every adapter reads that file; `RELEVO_URL` and `RELEVO_TOKEN` override it, each on its own. The URL must be `http://` or `https://`. For plain `http://` to anything but loopback (a host of exactly `localhost`, an address in 127.0.0.0/8, or `::1`), `connect` warns before it sends the token, and `relevo mcp` warns on stderr when it starts.
 
 ## `relevo mcp` (Claude Code and any MCP client)
 

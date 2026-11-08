@@ -111,6 +111,10 @@ async fn connect(url: &str, token: &str) -> Result<()> {
         url: config::normalize_url(url)?,
         token: token.trim().to_string(),
     };
+    // Before the token goes out, not after.
+    if let Some(warning) = config::plain_http_warning(&config.url) {
+        eprintln!("{warning}");
+    }
     let client = client::Client::new(&config, Some(String::new()), "/".into())?;
     let people = client
         .people()
@@ -124,10 +128,6 @@ async fn connect(url: &str, token: &str) -> Result<()> {
         config.url,
         path.display()
     );
-    let loopback = ["http://127.", "http://localhost", "http://[::1]"];
-    if config.url.starts_with("http://") && !loopback.iter().any(|l| config.url.starts_with(l)) {
-        eprintln!("warning: plain http sends the token and notes in the clear; use https");
-    }
     Ok(())
 }
 
