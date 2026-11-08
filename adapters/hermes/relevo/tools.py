@@ -99,7 +99,11 @@ _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
         relevo_send,
         "Open a Relevo thread or write in one. Use `to` (handles such as \"ana\", \"ana/pagos-api\", "
         "\"ana/pagos-api@feat/refunds\", or [\"@team\"] for a question to everyone) to open a new thread, "
-        "or `thread` to write in an existing one. Says who holds the thread.\n\n" + client.TOOL_RULES,
+        "or `thread` to write in an existing one. Before opening one, look at your inbox (relevo_inbox: "
+        "an answer may already be waiting) and at the team's `about` lines to choose whom to ask; "
+        "`@team` only when you do not know who knows. If you can answer at once, just answer: no "
+        "\"On it.\" first. Send \"On it.\" only when the note needs work before you can answer, and "
+        "never to a team question. Says who holds the thread.\n\n" + client.TOOL_RULES,
         {
             "to": {"type": "array", "items": {"type": "string"},
                    "description": "Addresses for a new thread, or [\"@team\"]. Not with `thread`."},
@@ -112,7 +116,8 @@ _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
     "relevo_inbox": (
         relevo_inbox,
         "What is new in Relevo for this session and what waits for your person's reply, with who you "
-        "speak for and the team list (handle, what they look after, live contexts).\n\n" + client.TOOL_RULES,
+        "speak for (`you`) and the team list (handle, what they look after, live contexts). Look here "
+        "before opening a thread: an answer may already be waiting.\n\n" + client.TOOL_RULES,
         {"all": {"type": "boolean",
                  "description": "Every thread of your person, whichever session it is for."}},
         [],
