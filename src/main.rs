@@ -85,7 +85,7 @@ async fn connect(url: &str, token: &str) -> Result<()> {
         url: config::normalize_url(url)?,
         token: token.trim().to_string(),
     };
-    let client = client::Client::new(&config, Some(String::new()), "/".into());
+    let client = client::Client::new(&config, Some(String::new()), "/".into())?;
     let people = client
         .people()
         .await

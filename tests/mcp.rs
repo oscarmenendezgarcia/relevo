@@ -460,3 +460,60 @@ async fn without_a_config_tools_say_how_to_connect() {
     assert!(failed);
     assert!(err.contains("relevo connect"), "{err}");
 }
+
+/// Points `cmd` at no CA certificates at all, as a slim container without ca-certificates.
+fn without_ca_roots(cmd: &mut Command, dir: &Path) {
+    let empty = dir.join("no-ca");
+    std::fs::create_dir_all(empty.join("dir")).unwrap();
+    std::fs::write(empty.join("file"), "").unwrap();
+    cmd.env("SSL_CERT_FILE", empty.join("file"))
+        .env("SSL_CERT_DIR", empty.join("dir"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn without_ca_roots_http_works_and_https_says_why() {
+    let s = server(&["ana", "bob"]).await;
+    let home = s.dir.join("home");
+
+    // Plain http needs no TLS: connect and mcp work.
+    let mut cmd = relevo(&home);
+    without_ca_roots(&mut cmd, &s.dir);
+    let out = cmd
+        .args(["connect", &s.url, &s.tokens["ana"]])
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut cmd = relevo(&home);
+    without_ca_roots(&mut cmd, &s.dir);
+    cmd.arg("mcp").env("RELEVO_CONTEXT", "");
+    let mut mcp = Mcp::spawn(cmd).await;
+    let inbox = mcp.ok("inbox", json!({})).await;
+    assert!(inbox.contains("- @bob (Bob)"), "{inbox}");
+
+    // https: the server still starts, answers initialize, and each tool says why it cannot work.
+    let mut cmd = relevo(&home);
+    without_ca_roots(&mut cmd, &s.dir);
+    cmd.args(["mcp", "--channel"])
+        .env("RELEVO_URL", "https://127.0.0.1:1")
+        .env("RELEVO_CONTEXT", "");
+    let mut mcp = Mcp::spawn(cmd).await;
+    assert_eq!(mcp.init["serverInfo"]["name"], "relevo");
+    let (failed, err) = mcp.call("inbox", json!({})).await;
+    assert!(failed);
+    assert!(err.contains("TLS roots could not be loaded"), "{err}");
+    let mut cmd = relevo(&home);
+    without_ca_roots(&mut cmd, &s.dir);
+    let out = cmd
+        .args(["connect", "https://127.0.0.1:1", "rlv_x"])
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("TLS roots could not be loaded"), "{err}");
+}

@@ -48,21 +48,35 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 impl Client {
-    pub fn new(config: &Config, fixed_context: Option<String>, dir: PathBuf) -> Self {
+    /// Fails only when TLS cannot be set up (no CA certificates on the system) for an `https://`
+    /// server; a plain `http://` one needs none.
+    pub fn new(
+        config: &Config,
+        fixed_context: Option<String>,
+        dir: PathBuf,
+    ) -> anyhow::Result<Self> {
         // reqwest is built without a default TLS provider; ring is the one this binary carries.
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let http = reqwest::Client::builder()
-            .user_agent(concat!("relevo/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .expect("an HTTP client with default settings");
-        Client {
+        let builder =
+            || reqwest::Client::builder().user_agent(concat!("relevo/", env!("CARGO_PKG_VERSION")));
+        let http = match builder().build() {
+            Ok(http) => http,
+            // The system's roots are loaded up front even for plain http; without any, an empty
+            // root store still serves http (and refuses every https certificate).
+            Err(_) if config.url.starts_with("http://") => builder()
+                .tls_certs_only([])
+                .build()
+                .map_err(|e| anyhow::anyhow!("setting up HTTP: {}", causes(&e)))?,
+            Err(e) => anyhow::bail!("TLS roots could not be loaded: {}", causes(&e)),
+        };
+        Ok(Client {
             http,
             url: config.url.clone(),
             token: config.token.clone(),
             session: crate::db::random_id("mcp_"),
             fixed_context,
             dir,
-        }
+        })
     }
 
     pub fn url(&self) -> &str {
@@ -147,15 +161,19 @@ impl Client {
 
 fn network(e: reqwest::Error) -> Error {
     // Without the URL (it is known), with the causes ("connection refused").
-    let e = e.without_url();
+    Error::Network(causes(&e.without_url()))
+}
+
+/// `e` and its causes, one after the other.
+fn causes(e: &dyn std::error::Error) -> String {
     let mut msg = e.to_string();
-    let mut source = std::error::Error::source(&e);
+    let mut source = e.source();
     while let Some(cause) = source {
         msg.push_str(": ");
         msg.push_str(&cause.to_string());
         source = cause.source();
     }
-    Error::Network(msg)
+    msg
 }
 
 /// `s` as one path segment.
@@ -222,7 +240,7 @@ mod tests {
             url: format!("http://{addr}"),
             token: "rlv_test".into(),
         };
-        let client = Client::new(&config, Some(String::new()), std::env::temp_dir());
+        let client = Client::new(&config, Some(String::new()), std::env::temp_dir()).unwrap();
         let mut body = serde_json::Map::new();
         body.insert("thread".into(), "r_x".into());
         body.insert("text".into(), "hi".into());
