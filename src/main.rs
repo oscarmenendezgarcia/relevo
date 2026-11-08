@@ -87,6 +87,13 @@ async fn main() -> Result<()> {
             let app = App::new(conn, Clock::system(), team_questions_per_day);
             let listener = tokio::net::TcpListener::bind(addr).await?;
             tracing::info!(%addr, db = %cli.db, "relevo listening");
+            if !addr.ip().is_loopback() {
+                tracing::warn!(
+                    %addr,
+                    "plain HTTP without timeouts on a non-loopback address; \
+                     put a TLS-terminating reverse proxy in front (see docs/protocol.md)"
+                );
+            }
             axum::serve(listener, api::router(app))
                 .with_graceful_shutdown(async {
                     let _ = tokio::signal::ctrl_c().await;

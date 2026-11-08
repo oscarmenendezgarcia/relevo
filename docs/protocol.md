@@ -145,6 +145,8 @@ relevo deactivate <handle>
 
 `--db` defaults to `RELEVO_DB` or `./relevo.db`; `--addr` to `RELEVO_ADDR` or `127.0.0.1:7878`; `--team-questions-per-day` to `RELEVO_TEAM_QUESTIONS_PER_DAY` or 5.
 
+`serve` speaks plain HTTP and sets no header-read or idle timeouts and no connection limit. Keep `--addr` on loopback and let teammates reach it only through a reverse proxy that terminates TLS and enforces those timeouts and limits: otherwise tokens and notes cross the network in the clear. The server logs a warning when `--addr` is not a loopback address.
+
 `invite` on an existing handle reactivates the person, sets the new `--name`, and `--about` if given. `team` and `equipo` cannot be handles (they mean the whole team). `--label` defaults to `agent`. `deactivate` keeps the person's tokens, which work again if they are invited back; revoke them to end them for good.
 
 ## Privacy and logs
