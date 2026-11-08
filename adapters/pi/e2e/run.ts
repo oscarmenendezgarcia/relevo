@@ -42,6 +42,7 @@ try {
   console.log(`print run: exit ${run.status} in ${((Date.now() - t1) / 1000).toFixed(1)}s`);
   console.log(`pi said: ${run.stdout.trim().slice(0, 400)}`);
   assert.equal(run.status, 0, run.stderr.slice(-1000));
+  assert.doesNotMatch(run.stderr, /extension error|Failed to load extension/i, run.stderr.slice(-1000));
   const seen = await api(server, ana, "GET", `/api/threads/${first.thread}`);
   const oscarDelivery = seen.delivery.find((d: any) => d.handle === "oscar");
   assert.equal(oscarDelivery.by?.label, "pi e2e", "relevo_inbox delivered ana's note to the pi session");
@@ -91,6 +92,7 @@ try {
   await until(() => events.some((e) => e.type === "agent_settled"), 180_000, "pi to settle");
   const relevoMessages = events.filter((e) => e.type === "message_start" && e.message?.role === "custom" && e.message?.customType === "relevo");
   assert.equal(relevoMessages.length, 1, "delivered once");
+  assert.deepEqual(events.filter((e) => e.type === "extension_error"), [], "no extension errors");
   const toolCalls = events.filter((e) => e.type === "tool_execution_start").map((e) => `${e.toolName}${e.args?.thread ? `(${e.args.thread})` : ""}`);
   console.log(`rpc: relevo messages ${relevoMessages.length}; tools called: ${toolCalls.join(", ") || "none"}`);
   const thread = await api(server, ana, "GET", `/api/threads/${wake.thread}`);
