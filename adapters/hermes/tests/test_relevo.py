@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 from pathlib import Path
 
@@ -45,6 +46,9 @@ for _key in ("RELEVO_URL", "RELEVO_TOKEN", "RELEVO_CONTEXT", "RELEVO_ALLOWED_USE
 shutil.copytree(_PLUGIN, _TMP / ".hermes" / "plugins" / "relevo", ignore=shutil.ignore_patterns("__pycache__"))
 (_TMP / ".hermes" / "config.yaml").write_text("plugins:\n  enabled:\n    - relevo\n")
 sys.path.insert(0, str(_HERMES_SRC))
+# gateway.run imports hermes_bootstrap first, and its launch preparation may sync dependencies through
+# the real install and re-exec the process. Nothing here may do that: an empty module stands in.
+sys.modules.setdefault("hermes_bootstrap", types.ModuleType("hermes_bootstrap"))
 
 import httpx  # noqa: E402
 
@@ -427,29 +431,100 @@ class Outbound(Base):
         self.assertIsNone(oscar["claimed_by"])
 
     async def test_gateway_error_replies_are_not_notes(self):
-        """When the model fails, the gateway's final reply is its own error copy, marked final."""
-        from agent.i18n import t
+        """When the model fails, the gateway's final reply is its own copy, marked final like an
+        answer. These are composed the way the real GatewayRunner composes them."""
+        from types import SimpleNamespace
 
+        from agent import turn_failure_copy as copy
+        from agent.i18n import t
+        from gateway.run_turn_persistence import GatewayTurnPersistenceMixin
+        from gateway.runtime_footer import format_runtime_footer
+
+        def with_notice(response, notice):  # run_turn.py and run_turn_persistence.py
+            return GatewayTurnPersistenceMixin._hmwa_add_failed_turn_notice(None, response, notice)
+
+        footer = format_runtime_footer(model="anthropic/claude-sonnet-4", context_tokens=42_000,
+                                       context_length=200_000, cwd=str(Path.home() / "secret-project"))
+        launch = copy.launch_credentials_copy(SimpleNamespace(field="provider", detail="openrouter", data=None))
+        self.assertIn("\n\nDetails: launch_credentials_unavailable", launch)
+        replies = [
+            # Bare catalog copy.
+            t("gateway.errors.unreachable"),
+            t("gateway.errors.stopped_before_finishing", reason=": output length limit"),
+            t("gateway.errors.generic_failed"),
+            # Error copy plus the failed-turn notice (run_turn.py).
+            with_notice(t("gateway.errors.bad_request"), copy.FAILED_TURN_NOTICE),
+            with_notice(t("gateway.errors.unreachable"), copy.PARTIAL_FAILED_TURN_NOTICE),
+            with_notice(t("gateway.errors.provider_kept_failing"), copy.FAILED_TURN_NOTICE),
+            # An exception in the turn (run_turn_persistence.py).
+            with_notice(t("gateway.errors.generic_failed_with_hint", hint=t("gateway.errors.hint_rejected")),
+                        copy.PARTIAL_FAILED_TURN_NOTICE),
+            # The launch-credentials refusal, with its Details line, alone and with a footer.
+            launch,
+            f"{launch}\n\n{footer}",
+            # The runtime footer before the notice.
+            with_notice(f"{t('gateway.errors.provider_kept_failing')}\n\n{footer}", copy.FAILED_TURN_NOTICE),
+            # The agent's own failure copy, not in the catalog.
+            with_notice(copy.exhausted_copy("rate_limit", label="OpenRouter", attempts=3,
+                                            summary="429 Too Many Requests"), copy.FAILED_TURN_NOTICE),
+            copy.site_copy("context_overflow", model="claude-sonnet-4"),
+            # A half-done answer the gateway says did not complete.
+            with_notice("I started on the refunds bug and", copy.PARTIAL_FAILED_TURN_NOTICE),
+        ]
         a = new_adapter()
         self.adapters.append(a)
-        replies = iter([t("gateway.errors.unreachable"),
-                        t("gateway.errors.stopped_before_finishing", reason=": output length limit"),
-                        t("gateway.errors.generic_failed")])
         calls: list = []
 
         async def agent(event):
             calls.append(event)
-            return next(replies)
+            return replies[int(event.text.split("Question ")[1].split()[0])]
 
         a.set_message_handler(agent)
-        await a.connect()
-        threads = [self.ana.send(to=["oscar"], text=f"Question {i}")["thread"] for i in range(3)]
-        await self.until(lambda: len(calls) == 3)
-        await asyncio.sleep(1.0)
-        for thread_id in threads:
+        footer_on = self.runtime_footer_on()
+        try:
+            await a.connect()
+            threads = [self.ana.send(to=["oscar"], text=f"Question {i} for you")["thread"]
+                       for i in range(len(replies))]
+            await self.until(lambda: len(calls) == len(replies))
+            await asyncio.sleep(1.0)
+        finally:
+            footer_on()
+        for i, thread_id in enumerate(threads):
             thread = self.ana.thread(thread_id)
-            self.assertEqual(len(thread["notes"]), 1)
+            self.assertEqual(len(thread["notes"]), 1, replies[i])
             self.assertIsNone(next(d for d in thread["delivery"] if d["handle"] == "oscar")["claimed_by"])
+
+    def runtime_footer_on(self):
+        """The owner's display.runtime_footer, on in the temporary Hermes home. Returns the undo."""
+        config = _TMP / ".hermes" / "config.yaml"
+        before = config.read_text()
+        config.write_text(before + "display:\n  runtime_footer:\n    enabled: true\n")
+        return lambda: config.write_text(before)
+
+    async def test_the_gateway_s_trailers_come_off_a_real_answer(self):
+        from agent.i18n import t
+        from gateway.runtime_footer import format_runtime_footer
+
+        a = self.make_adapter()
+        await a.connect()
+        opened = self.ana.send(to=["oscar"], text="Is the refunds cron idempotent?")
+        await self.until(lambda: len(self.events) == 1)
+        footer = format_runtime_footer(model="anthropic/claude-sonnet-4", context_tokens=42_000,
+                                       context_length=200_000, cwd=str(Path.home() / "secret-project"))
+        answer = "Yes: it takes a lock first.\n\n    lock = acquire('refunds')"
+        footer_on = self.runtime_footer_on()
+        try:
+            with_footer = await a.send(opened["thread"], f"{answer}\n\n{footer}", metadata=FINAL)
+        finally:
+            footer_on()
+        reset = await a.send(opened["thread"], "Also: it runs at 03:00 UTC."
+                             + t("gateway.session.auto_reset_context_exhausted"), metadata=FINAL)
+        # Without the footer on, a last paragraph that only looks like one is the agent's.
+        own = await a.send(opened["thread"], "Coverage:\n\nrefunds · 87% · /srv/refunds", metadata=FINAL)
+        for result in (with_footer, reset, own):
+            self.assertTrue(result.success, result.error)
+        notes = [n["text"] for n in self.ana.thread(opened["thread"])["notes"][1:]]
+        self.assertEqual(notes, [answer, "Also: it runs at 03:00 UTC.", "Coverage:\n\nrefunds · 87% · /srv/refunds"])
 
     async def test_a_genuine_reply_that_looks_like_gateway_chrome_is_written(self):
         a = self.make_adapter()

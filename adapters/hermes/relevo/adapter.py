@@ -11,7 +11,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import sys
 from collections import OrderedDict
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from gateway.config import Platform, PlatformConfig
@@ -32,28 +34,90 @@ _ERROR_KINDS = {
 }
 
 
-# The gateway's own copy for a turn that failed (gateway.errors.*, the turn-error and delivery-
-# failure notices). When the model fails, the gateway sends it as the turn's final reply.
+# -- the gateway's own copy -------------------------------------------------------------------------
+#
+# When a turn fails, the gateway's final reply is its own text, marked final like an answer. The real
+# GatewayRunner composes it: error copy (gateway.errors.* in the catalog, or the tables of
+# agent/turn_failure_copy.py), often with a "Details: …" or "Provider said: …" paragraph, then the
+# runtime footer when the owner turned it on, then the failed-turn notice (FAILED_TURN_NOTICE or
+# PARTIAL_FAILED_TURN_NOTICE), each after a blank line. Teammates must read none of it: it leaks
+# details, and a note would claim the thread for a session that could not answer.
+
 _DIAGNOSTIC_KEY_PREFIXES = ("gateway.errors.",)
 _DIAGNOSTIC_KEYS = ("gateway.notify.turn_error", "gateway.notify.turn_error_detailed",
                     "gateway.notify.delivery_failed_retry")
-# Catalog entries shorter than this are fragments of the copy above ("The model"), not replies.
+# Appended to a reply after an automatic session reset: the gateway's, not the agent's.
+_TRAILER_KEYS = ("gateway.session.auto_reset_context_exhausted",)
+# turn_failure_copy's chat copy tables (English only), read when this Hermes has them.
+_COPY_TABLES = ("_SITE_COPY", "_NONRETRYABLE_COPY", "_NONRETRYABLE_DEFAULT_COPY", "_AUTH_COPY")
+_FAILED_TURN_NOTICES = ("FAILED_TURN_NOTICE", "PARTIAL_FAILED_TURN_NOTICE", "AUTOMATION_INTERRUPTED_NOTICE")
+# The same notices, for a Hermes without agent.turn_failure_copy.
+_FALLBACK_NOTICES = (
+    "Your request was not processed. Send it again if you still want me to carry it out.",
+    "This turn did not complete. Some actions may already have run; verify their effects before resending.",
+)
+# A template needs this many characters besides its placeholders to say anything: shorter entries
+# are fragments of the copy above ("The model"), not replies.
 _DIAGNOSTIC_MIN_CHARS = 24
-_diagnostic_cache: dict[str, list[re.Pattern]] = {}
+_PARAGRAPH_BREAK = re.compile(r"\n[ \t]*\n\s*")
+_PLACEHOLDER = re.compile(r"\{[^{}]*\}")
+# The raw detail the copy carries last: "Details: launch_credentials_unavailable (provider: …)".
+_DETAIL_PARAGRAPH = re.compile(r"(?:Details|Provider said):\s")
+# The runtime footer (gateway/runtime_footer.py): model, served model, context %, latency, cwd.
+_FOOTER_SEP = " · "
+_FOOTER_MODEL = re.compile(r"[\w.:@+/-]+(?: → [\w.:@+/-]+)?")
+_FOOTER_FACT = re.compile(r"\d{1,3}%|<1s|\d+s|\d+m\d{2}s|~(?:/.*)?|/.*")
 
 
-def _diagnostic_patterns() -> list[re.Pattern]:
-    """The gateway's failure copy in the active language and English, placeholders as wildcards."""
+@dataclass(frozen=True)
+class _GatewayCopy:
+    patterns: tuple
+    notices: frozenset
+    trailers: frozenset
+
+
+_copy_cache: dict[str, _GatewayCopy] = {}
+
+
+def _squash(text: str) -> str:
+    return " ".join(str(text).split())
+
+
+def _split_last(text: str) -> tuple[str, str]:
+    """(everything before the last paragraph, the last paragraph)."""
+    breaks = list(_PARAGRAPH_BREAK.finditer(text))
+    if not breaks:
+        return "", text
+    return text[:breaks[-1].start()], text[breaks[-1].end():]
+
+
+def _without_details(text: str) -> str:
+    head, last = _split_last(text.strip())
+    while head and _DETAIL_PARAGRAPH.match(last):
+        head, last = _split_last(head.rstrip())
+    return f"{head}\n\n{last}" if head else last
+
+
+def _template_pattern(template: str) -> Optional[re.Pattern]:
+    literal = _squash(_without_details(template))
+    if len(_PLACEHOLDER.sub("", literal)) < _DIAGNOSTIC_MIN_CHARS:
+        return None
+    return re.compile(".*?".join(re.escape(part) for part in _PLACEHOLDER.split(literal)), re.S)
+
+
+def _gateway_copy() -> _GatewayCopy:
+    """The gateway's failure copy in the active language and English, and the notices it appends."""
     try:
         from agent.i18n import get_language
 
         lang = get_language()
     except Exception:
         lang = "en"
-    cached = _diagnostic_cache.get(lang)
+    cached = _copy_cache.get(lang)
     if cached is not None:
         return cached
     templates: set[str] = set()
+    trailers: set[str] = set()
     try:
         from agent.i18n import _load_catalog
 
@@ -61,22 +125,95 @@ def _diagnostic_patterns() -> list[re.Pattern]:
             for key, value in _load_catalog(code).items():
                 if key.startswith(_DIAGNOSTIC_KEY_PREFIXES) or key in _DIAGNOSTIC_KEYS:
                     templates.add(str(value))
+                elif key in _TRAILER_KEYS:
+                    trailers.add(_squash(value))
     except Exception:
         try:
             from agent.i18n import t
 
             templates.update(t(key) for key in _DIAGNOSTIC_KEYS)
+            trailers.update(_squash(t(key)) for key in _TRAILER_KEYS)
         except Exception:
             pass
-    patterns = [re.compile(".*?".join(re.escape(part) for part in re.split(r"\{[^{}]*\}", tpl.strip())), re.S)
-                for tpl in templates if len(tpl.strip()) >= _DIAGNOSTIC_MIN_CHARS]
-    _diagnostic_cache[lang] = patterns
-    return patterns
+    notices = {_squash(n) for n in _FALLBACK_NOTICES}
+    try:
+        from agent import turn_failure_copy as copy
+
+        notices.update(_squash(getattr(copy, name)) for name in _FAILED_TURN_NOTICES if hasattr(copy, name))
+        for name in _COPY_TABLES:
+            table = getattr(copy, name, None)
+            templates.update(map(str, table.values()) if isinstance(table, dict) else [str(table or "")])
+    except Exception:
+        pass
+    patterns = tuple(p for p in map(_template_pattern, templates) if p is not None)
+    found = _GatewayCopy(patterns, frozenset(notices), frozenset(t for t in trailers if t))
+    _copy_cache[lang] = found
+    return found
+
+
+def _footer_enabled() -> bool:
+    """Whether the owner turned the runtime footer on for this platform (unknown: assume so). Reads
+    the config the way the gateway does, through gateway.run when it is loaded (always, in the
+    gateway): importing it runs Hermes' launch bootstrap, so this never does."""
+    try:
+        from gateway.runtime_footer import resolve_footer_config
+
+        run = sys.modules.get("gateway.run")
+        if run is not None:
+            config = run._load_gateway_config()
+        else:
+            from hermes_cli.config_effective import load_user_config_effective
+            from hermes_constants import get_hermes_home
+
+            config = load_user_config_effective(get_hermes_home() / "config.yaml")
+        return bool(resolve_footer_config(config, PLATFORM_NAME).get("enabled"))
+    except Exception:
+        return True
+
+
+def _is_footer(paragraph: str) -> bool:
+    parts = paragraph.strip().split(_FOOTER_SEP)
+    return ("\n" not in paragraph.strip() and 2 <= len(parts) <= 5
+            and all(_FOOTER_MODEL.fullmatch(p) or _FOOTER_FACT.fullmatch(p) for p in parts)
+            and any(_FOOTER_FACT.fullmatch(p) for p in parts))
+
+
+def note_text(content: str) -> Optional[str]:
+    """The note a final reply becomes, or None when it is the gateway's copy for a failed turn.
+
+    The gateway's trailing paragraphs come off from the end: a failed-turn notice (then the whole
+    reply is the gateway's: error copy, or a half-done answer the gateway says did not complete), the
+    runtime footer (the model and the owner's working directory are not for teammates) and the
+    automatic-reset notice. What is left is the gateway's when it is its error copy, with or without
+    a "Details:" paragraph."""
+    copy = _gateway_copy()
+    body = content.rstrip()
+    footer = None
+    while body:
+        head, last = _split_last(body)
+        squashed = _squash(last)
+        if squashed in copy.notices:
+            return None
+        if squashed in copy.trailers:
+            body = head.rstrip()
+            continue
+        if head.strip() and _is_footer(last):
+            if footer is None:
+                footer = _footer_enabled()
+            if footer:
+                body = head.rstrip()
+                continue
+        break
+    if not body.strip():
+        return None if content.strip() else content
+    error = _squash(_without_details(body))
+    if any(p.fullmatch(error) for p in copy.patterns):
+        return None
+    return content if body == content.rstrip() else body
 
 
 def is_gateway_diagnostic(content: str) -> bool:
-    text = content.strip()
-    return any(p.fullmatch(text) for p in _diagnostic_patterns())
+    return note_text(content) is None
 
 
 class _Stopping(Exception):
@@ -288,14 +425,15 @@ class RelevoAdapter(BasePlatformAdapter):
             return SendResult(success=True)
         if content.strip() == _SILENCE:
             return SendResult(success=True)
-        if is_gateway_diagnostic(content):
+        text = note_text(content)
+        if text is None:
             logger.warning("[relevo] the turn for thread %s failed; the gateway's notice is kept out of the "
                            "thread (details in the gateway log)", chat_id)
             return SendResult(success=True)
-        if not content.strip():
+        if not text.strip():
             return SendResult(success=False, error="empty note", error_kind="unknown")
         try:
-            result = await self.api.asend(self._ensure_http(), {"thread": str(chat_id), "text": content})
+            result = await self.api.asend(self._ensure_http(), {"thread": str(chat_id), "text": text})
         except client.RelevoError as exc:
             logger.warning("[relevo] send to %s refused: %s", chat_id, client.describe_error(exc))
             return SendResult(success=False, error=f"{exc.code}: {exc.message}",
