@@ -103,6 +103,11 @@ if command -v systemd-analyze >/dev/null; then
     mkdir -m 0700 "$fake/run"
     HOME="$home" XDG_RUNTIME_DIR="$fake/run" systemd-analyze --user verify \
         "$units/relevo.service" "$units/relevo-backup.service" "$units/relevo-backup.timer"
+    # Not installed by install.sh; it verifies only where cloudflared is installed.
+    if command -v cloudflared >/dev/null; then
+        HOME="$home" XDG_RUNTIME_DIR="$fake/run" systemd-analyze --user verify \
+            "$here/proxy/relevo-tunnel.service"
+    fi
 fi
 
 echo "--enable reloads and enables, and restarts only when something changed"

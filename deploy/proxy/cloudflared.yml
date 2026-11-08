@@ -1,12 +1,15 @@
 # Cloudflare Tunnel in front of Relevo: HTTPS at Cloudflare's edge, no port open on this
 # machine. cloudflared connects out to Cloudflare and forwards to Relevo on loopback.
 #
-# Set up (once, as the user who runs it):
+# Set up (once, as the user who runs Relevo):
 #   cloudflared tunnel login
 #   cloudflared tunnel create relevo                    # prints the tunnel id, writes its credentials
 #   cloudflared tunnel route dns relevo relevo.example.com
-# then put the tunnel id below and run:
-#   cloudflared tunnel --config cloudflared.yml run relevo
+# then copy this file to ~/.cloudflared/relevo.yml, put the tunnel id and your home directory
+# below, and try it in the foreground (it stops when you log out):
+#   cloudflared tunnel --config ~/.cloudflared/relevo.yml run
+# To keep it running after logout and start it at boot, run it as a user service instead:
+# deploy/proxy/relevo-tunnel.service says how.
 #
 # Cloudflare's edge ends any request whose answer has not started within 100 s (error 524). A
 # waiting inbox request (`wait` up to 60 s) fits; do not raise `wait` beyond about 90 s behind a

@@ -91,7 +91,16 @@ Teammates reach Relevo only through a proxy that terminates TLS: never open port
 
 **Caddy** (`deploy/proxy/Caddyfile`). Caddy gets and renews the certificate by itself. Install Caddy from your distribution, put the example in its configuration (usually `/etc/caddy/Caddyfile`), replace `relevo.example.com` with your name, and reload Caddy. The name's DNS must point at the machine and ports 80 and 443 must reach it. The example sets the header, body, write and idle timeouts that Relevo leaves to the proxy, lets a waiting inbox request (up to 60 s) through, and refuses bodies over 400 KiB. For a name only the office network knows, the comment in the file explains `tls internal`.
 
-**Cloudflare Tunnel** (`deploy/proxy/cloudflared.yml`). `cloudflared` connects out to Cloudflare, so no port is opened and the certificate is Cloudflare's. The comments in the file list the commands that create the tunnel and its DNS name. If the machine already runs `cloudflared` for other names, add the Relevo rule to that configuration, before its final catch-all rule, rather than starting a second tunnel. Cloudflare ends a request whose answer has not started within 100 s; Relevo's waits are at most 60 s, so they fit.
+**Cloudflare Tunnel** (`deploy/proxy/cloudflared.yml`). `cloudflared` connects out to Cloudflare, so no port is opened and the certificate is Cloudflare's. The comments in the file list the commands that create the tunnel and its DNS name; the configuration goes in `~/.cloudflared/relevo.yml`. Started by hand, `cloudflared` stops when you log out, so run it as a user service, like Relevo (it needs lingering too, part 2):
+
+```
+install -m 0644 deploy/proxy/relevo-tunnel.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now relevo-tunnel
+journalctl --user -u relevo-tunnel                 # "Registered tunnel connection"
+```
+
+If the machine already runs `cloudflared` for other names, use that tunnel rather than starting a second one, and skip `relevo-tunnel.service`: add the Relevo rule to its configuration, before its final catch-all rule, give the name a DNS record pointing at that tunnel (`cloudflared tunnel route dns <that-tunnel> relevo.example.com`), and restart that `cloudflared` the way it is run there so that it reads the new rule. Cloudflare ends a request whose answer has not started within 100 s; Relevo's waits are at most 60 s, so they fit.
 
 *Cloudflare Access* (optional) can put a login in front of the name, but agents cannot log in through a browser, and the adapters do not send Access service-token headers. A policy that asks for a login blocks every agent. Use it only with rules an agent passes without a browser (the office's IP ranges, devices enrolled in Cloudflare WARP), or let Relevo's own tokens be the gate.
 
