@@ -164,9 +164,8 @@ export function relevoExtension(options: Options = {}) {
           learn(c, inbox.session?.you);
           return inbox;
         });
-        const warning = overrideWarning(env);
-        const text = renderInbox(inbox);
-        return result(warning ? `${warning}\n\n${text}` : text, { threads: inbox.threads.map((t) => t.id), more: inbox.more });
+        const text = renderInbox(inbox, overrideWarning(env));
+        return result(text, { threads: inbox.threads.map((t) => t.id), more: inbox.more });
       },
     } as any);
 

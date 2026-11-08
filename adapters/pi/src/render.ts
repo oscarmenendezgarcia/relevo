@@ -166,15 +166,20 @@ function renderSkipped(t: Thread, me: string | undefined): string {
 }
 
 /**
- * The inbox as text. Every thread here is delivered to this session already, so
+ * The inbox as text, `notice` (if any) under its first line. Every thread here is delivered to this session already, so
  * none may go missing: threads are shown whole while they fit, and each one
  * that does not is still listed, with how to read it.
  */
-export function renderInbox(inbox: Inbox): string {
+export function renderInbox(inbox: Inbox, notice?: string | null): string {
   const me = inbox.session.you;
-  let session = `This session: "${inbox.session.label}", ${inbox.session.context ? `context ${inbox.session.context}` : "general"}.`;
-  if (me) session += ` You speak for @${me}: notes by @${me} are your person's own.`;
-  const out = [renderTeam(inbox.team, me), session];
+  // First whom the agent speaks for, as relevo mcp does, then the session and the team.
+  const where = `"${inbox.session.label}", ${inbox.session.context ? `context ${inbox.session.context}` : "general"}.`;
+  const session = me
+    ? `You speak for @${me} (your person): notes by @${me} are theirs, from this session or another of theirs. This session: ${where}`
+    : `This session: ${where}`;
+  const out = [session];
+  if (notice) out.push(notice);
+  out.push(renderTeam(inbox.team, me));
   if (!inbox.threads.length) out.push("Nothing new for this session and nothing waiting.");
   const more = inbox.more ? `${inbox.more} more thread(s) not shown: call relevo_inbox again.` : null;
   const skipped = inbox.threads.map((t) => renderSkipped(t, me));

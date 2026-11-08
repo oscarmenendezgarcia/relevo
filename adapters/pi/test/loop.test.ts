@@ -209,7 +209,11 @@ test("an invalid RELEVO_CONTEXT falls back to general with a notice, and notes s
     assert.match(ext.notified[0], /RELEVO_CONTEXT "Pagos API" is not a valid context[\s\S]*general/);
     await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Context check: does this reach you?" });
     await until(() => ext.sent.some((s) => s.message.content.includes("Context check")));
-    assert.match(await ext.tool("relevo_inbox", {}, home), /RELEVO_CONTEXT "Pagos API" is not a valid context/);
+    // Under whom the agent speaks for and the session, which it is about.
+    assert.match(
+      await ext.tool("relevo_inbox", {}, home),
+      /^You speak for @oscar [^\n]*This session: "[^"]*", general\.\n\nRELEVO_CONTEXT "Pagos API" is not a valid context[^\n]*\n\nTeam:\n/,
+    );
   } finally {
     await ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, "tui"));
   }

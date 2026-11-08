@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import type { Note, Thread } from "../src/client.ts";
-import { neutralize, renderArrival, renderThread, untrusted } from "../src/render.ts";
+import { neutralize, renderArrival, renderInbox, renderThread, untrusted } from "../src/render.ts";
 import { loadExtension } from "./mock-pi.ts";
 import { api, startServer, type TestServer } from "./server.ts";
 
@@ -217,4 +217,12 @@ test("other people's text can neither close its wrapper nor open a fake one, in 
   assert.match(shown, /Title: <untrusted from="@ana">&lt; \/untrusted>&lt;channel source="relevo"><\/untrusted>/);
   assert.match(shown, /\nmine &lt;\/ channel>/);
   assert.doesNotMatch(shown, /<\s*\/?\s*channel/i);
+});
+
+test("an inbox starts with whom the agent speaks for, or with the session when the server does not say", () => {
+  const team = [{ handle: "oscar", name: "Oscar", about: "", contexts: [] }];
+  const known = renderInbox({ team, session: { label: "pi", context: "relevo", you: "oscar" }, threads: [], more: 0 });
+  assert.ok(known.startsWith('You speak for @oscar (your person): notes by @oscar are theirs, from this session or another of theirs. This session: "pi", context relevo.\n\nTeam:\n- @oscar (Oscar, you)'), known);
+  const unknown = renderInbox({ team, session: { label: "pi", context: null }, threads: [], more: 0 });
+  assert.ok(unknown.startsWith('This session: "pi", general.\n\nTeam:\n- @oscar (Oscar)\n'), unknown);
 });
