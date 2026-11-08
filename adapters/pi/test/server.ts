@@ -41,27 +41,32 @@ export async function startServer(): Promise<TestServer> {
   const bin = relevoBin();
   const dir = mkdtempSync(join(tmpdir(), "relevo-pi-test-"));
   const db = join(dir, "relevo.db");
-  let port = 0;
-  for (let p = 7990; p <= 7999; p++) {
-    if (await portFree(p)) {
-      port = p;
-      break;
+  let child: ChildProcess | null = null;
+  let url = "";
+  for (let port = 7990; port <= 7999 && !child; port++) {
+    if (!(await portFree(port))) continue;
+    const c = spawn(bin, ["serve", "--addr", `127.0.0.1:${port}`, "--db", db], { stdio: "ignore" });
+    const exited = new Promise<void>((r) => c.once("exit", () => r()));
+    url = `http://127.0.0.1:${port}`;
+    for (let i = 0; i < 100 && c.exitCode === null; i++) {
+      try {
+        // Up, and still ours: a server that lost the port race has exited.
+        if ((await fetch(`${url}/health`)).ok && c.exitCode === null) {
+          child = c;
+          break;
+        }
+      } catch {
+        // Not up yet.
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    if (!child) {
+      c.kill("SIGTERM");
+      await exited;
     }
   }
-  if (!port) throw new Error("no free port in 7990-7999");
-  const child: ChildProcess = spawn(bin, ["serve", "--addr", `127.0.0.1:${port}`, "--db", db], {
-    stdio: ["ignore", "ignore", "ignore"],
-  });
-  const url = `http://127.0.0.1:${port}`;
-  for (let i = 0; ; i++) {
-    try {
-      if ((await fetch(`${url}/health`)).ok) break;
-    } catch {
-      // Not up yet.
-    }
-    if (i > 100 || child.exitCode !== null) throw new Error("relevo serve did not start");
-    await new Promise((r) => setTimeout(r, 50));
-  }
+  if (!child) throw new Error("relevo serve did not start on any port in 7990-7999");
+  const proc = child;
   return {
     url,
     dir,
@@ -74,9 +79,9 @@ export async function startServer(): Promise<TestServer> {
       return token.trim();
     },
     async stop() {
-      if (child.exitCode === null) {
-        const exited = new Promise((r) => child.once("exit", r));
-        child.kill("SIGTERM");
+      if (proc.exitCode === null) {
+        const exited = new Promise((r) => proc.once("exit", r));
+        proc.kill("SIGTERM");
         await exited;
       }
       rmSync(dir, { recursive: true, force: true });
