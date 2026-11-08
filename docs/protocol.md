@@ -71,7 +71,7 @@ Rules:
 
 - `to` holds 1 to 20 addresses of distinct active people other than you, or exactly `["@team"]`. An address is a handle, optionally followed by `/` and a context (`ana/pagos-api`, `ana/pagos-api@feat/refunds`: everything after the first `/`); naming the same person twice with different contexts (or once with a context and once without) fails with `BAD_REQUEST`, and so does a malformed context or a context on `@team`. Addresses may be written with or without a leading `@` and in any case; repeats are merged (`["@team", "equipo"]` is one `@team`). Writing to yourself, or `@team` next to other handles, fails with `BAD_REQUEST`. An unknown or inactive handle fails with `UNKNOWN_PERSON`, whose error lists the valid handles with their `about`.
 - `["@team"]` opens a `team` thread. `@equipo` is accepted as the same thing (both with or without `@`); `team` and `equipo` can therefore not be handles. A person may open at most `RELEVO_TEAM_QUESTIONS_PER_DAY` (default 5) team threads in any rolling 24 hours: beyond that, `TEAM_LIMIT`. A team of one (only you) fails with `NO_RECIPIENTS`.
-- Writing a note claims the thread for your person, for the session that wrote it (see [Claiming](#sessions-and-routing)).
+- Writing a note claims the thread for the session that wrote it, unless another session of your person holds it (see [Claiming](#sessions-and-routing)).
 - Writing in a thread you are not a participant of fails with `NOT_FOUND` (the thread's existence is not revealed).
 - Writing in a closed thread fails with `THREAD_CLOSED`. Open a new thread instead.
 - Closing: in a `direct` thread any participant may close it; in a `team` thread only the person who asked.
@@ -80,7 +80,7 @@ Rules:
 - A person may send at most 60 notes per rolling minute: beyond that, `RATE_LIMITED`.
 - The limits count notes only: a close without text is never limited.
 
-Returns `{ "thread": "<id>", "note": "<id>", "status": "open" | "closed", "claimed": "this-session" | "other-session" | null }`. `note` is `null` when the `send` only closed the thread. `claimed` is who holds the thread for your person after this `send`: `"other-session"` means another of your sessions had it first, so this one should step aside.
+Returns `{ "thread": "<id>", "note": "<id>", "status": "open" | "closed", "claimed": "this-session" | "other-session" | null }`. `note` is `null` when the `send` only closed the thread. `claimed` is who holds the thread for your person after this `send`: `"other-session"` means another of your sessions had it first, so this one should step aside; `null` only after a close without text in a thread nobody of yours holds. A replayed `send` returns the `claimed` of its first result.
 
 ### `inbox`
 

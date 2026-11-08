@@ -476,11 +476,12 @@ async fn writing_does_not_skip_a_note_of_another_session_of_the_writer() {
     one.inbox().await;
     two.inbox().await;
     two.ok(json!({ "thread": id, "text": "from two" })).await;
-    // One answers without having fetched what two wrote: two's note must still reach it.
+    // One answers without having fetched what two wrote: two's note must still reach it. (Two
+    // holds the thread, so one finds it only with `all`.)
     one.ok(json!({ "thread": id, "text": "from one" })).await;
     t.ok("ana", json!({ "thread": id, "text": "c" })).await;
     assert_eq!(
-        new_texts(&one.inbox().await, &id),
+        new_texts(&one.inbox_at("/api/inbox?all=1").await, &id),
         Some(vec![
             "from two".to_string(),
             "from one".to_string(),
@@ -514,7 +515,10 @@ async fn direct_thread_leaves_the_inbox_when_closed() {
     t.inbox("bob").await;
     let (status, v) = t.send("ana", json!({ "thread": id, "close": true })).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(v, json!({ "thread": id, "note": null, "status": "closed" }));
+    assert_eq!(
+        v,
+        json!({ "thread": id, "note": null, "status": "closed", "claimed": "this-session" })
+    );
     assert!(thread_ids(&t.inbox("bob").await).is_empty());
     assert_eq!(t.thread("bob", &id).await["status"], "closed");
 }
@@ -1526,16 +1530,17 @@ async fn an_unaddressed_note_shows_in_every_session_until_one_answers() {
     assert_eq!(new_texts(&v, &id), Some(vec!["thanks, and?".to_string()]));
     assert_eq!(v["threads"][0]["claimed"], "this-session");
 
-    // Pagos reads it whole and takes it over by writing in it.
+    // Pagos reads it whole and writes in it too: the note is written, but frontend keeps it.
     pagos.thread(&id).await;
-    pagos
-        .ok(json!({ "thread": id, "text": "I'll take it" }))
+    let (_, v) = pagos
+        .send(json!({ "thread": id, "text": "I could take it" }))
         .await;
+    assert_eq!(v["claimed"], "other-session");
     t.ok("ana", json!({ "thread": id, "text": "ok" })).await;
-    assert_eq!(new_texts(&front.inbox().await, &id), None);
+    assert_eq!(new_texts(&pagos.inbox().await, &id), None);
     assert_eq!(
-        new_texts(&pagos.inbox().await, &id),
-        Some(vec!["ok".to_string()])
+        new_texts(&front.inbox().await, &id),
+        Some(vec!["I could take it".to_string(), "ok".to_string()])
     );
 }
 
@@ -1762,11 +1767,87 @@ async fn thread_works_from_any_session_and_does_not_claim() {
     pagos.ok(json!({ "thread": id, "text": "yes" })).await;
     assert_eq!(pagos.thread(&id).await["claimed"], "this-session");
     assert_eq!(front.thread(&id).await["claimed"], "other-session");
-    // Frontend writing takes it over.
+    // Frontend writing does not take it from pagos.
     front
         .ok(json!({ "thread": id, "text": "actually me" }))
         .await;
-    assert_eq!(pagos.thread(&id).await["claimed"], "other-session");
+    assert_eq!(pagos.thread(&id).await["claimed"], "this-session");
+    assert_eq!(front.thread(&id).await["claimed"], "other-session");
+}
+
+#[tokio::test]
+async fn a_second_session_writing_gets_other_session_and_the_claim_stays() {
+    let t = team(&["ana", "bob"]);
+    let pagos = t.agent("bob", "term-pagos", "pagos-api");
+    let front = t.agent("bob", "term-front", "frontend");
+    pagos.inbox().await;
+    front.inbox().await;
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "who?" })).await;
+    // Both see it, and both write.
+    pagos.inbox().await;
+    front.inbox().await;
+    let (_, first) = pagos.send(json!({ "thread": id, "text": "on it" })).await;
+    assert_eq!(first["claimed"], "this-session");
+    let (_, second) = front.send(json!({ "thread": id, "text": "on it" })).await;
+    assert_eq!(second["claimed"], "other-session");
+    assert!(
+        second["note"].is_string(),
+        "the note is written all the same"
+    );
+    // The first writer holds it, and writing again keeps it there.
+    let (_, again) = pagos.send(json!({ "thread": id, "text": "done" })).await;
+    assert_eq!(again["claimed"], "this-session");
+    let (_, again) = front.send(json!({ "thread": id, "text": "me too" })).await;
+    assert_eq!(again["claimed"], "other-session");
+    t.ok("ana", json!({ "thread": id, "text": "thanks" })).await;
+    assert_eq!(
+        thread_ids(&pagos.inbox().await),
+        vec![id.clone()],
+        "the claimer sees it"
+    );
+    assert!(thread_ids(&front.inbox().await).is_empty());
+    assert!(thread_ids(&t.inbox("bob").await).is_empty());
+    let d = &t.thread("ana", &id).await["delivery"][1];
+    assert_eq!(
+        d["claimed_by"],
+        json!({ "label": "laptop", "context": "pagos-api" })
+    );
+    // The other person's claim is their own: Ana's session holds hers, opened by writing.
+    let (_, v) = t.send("ana", json!({ "thread": id, "text": "x" })).await;
+    assert_eq!(v["claimed"], "this-session");
+}
+
+#[tokio::test]
+async fn send_says_who_holds_the_thread_after_a_close_without_text() {
+    let t = team(&["ana", "bob"]);
+    let pagos = t.agent("bob", "term-pagos", "pagos-api");
+    let front = t.agent("bob", "term-front", "frontend");
+    // Nobody of Bob's holds it: null, and closing does not claim.
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
+    let (status, v) = front.send(json!({ "thread": id, "close": true })).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(
+        v,
+        json!({ "thread": id, "note": null, "status": "closed", "claimed": null })
+    );
+    // Another session holds it: other-session.
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
+    pagos.ok(json!({ "thread": id, "text": "mine" })).await;
+    let (_, v) = front
+        .send(json!({ "thread": id, "close": true, "key": "c-1" }))
+        .await;
+    assert_eq!(v["note"], Value::Null);
+    assert_eq!(v["claimed"], "other-session");
+    // A replay returns the first result, claim included.
+    let (_, again) = front
+        .send(json!({ "thread": id, "close": true, "key": "c-1" }))
+        .await;
+    assert_eq!(again, v);
+    // This session holds it: this-session.
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
+    pagos.ok(json!({ "thread": id, "text": "mine" })).await;
+    let (_, v) = pagos.send(json!({ "thread": id, "close": true })).await;
+    assert_eq!(v["claimed"], "this-session");
 }
 
 #[tokio::test]
@@ -2143,7 +2224,8 @@ async fn session_inboxes_hold_order_and_more_over_hundreds_of_routed_threads() {
                 }
                 th.last = order;
                 th.last_is_bobs = true;
-                th.claimed = Some(s);
+                // A claim is never taken from another session.
+                th.claimed.get_or_insert(s);
             }
             // Someone else writes again, or closes.
             6..=8 => {

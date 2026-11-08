@@ -121,6 +121,8 @@ struct SendResult {
     /// `None` when the send only closed the thread.
     note: Option<String>,
     status: String,
+    /// Who holds the thread for the writer's person afterwards, as `claim` names it.
+    claimed: Option<String>,
 }
 
 /// A thread as seen by one session of a participant.
@@ -490,16 +492,22 @@ fn thread_out(
         status: row.status.clone(),
         waiting_for_you: row.waiting,
         context: row.context.clone(),
-        claimed: row.claimed_by.map(|by| {
-            if by == session.id {
-                "this-session"
-            } else {
-                "other-session"
-            }
-        }),
+        claimed: claim(row.claimed_by, session),
         new_notes: None,
         notes: None,
         delivery: None,
+    })
+}
+
+/// Whose a claim is, as the session that asks sees it: `None` (unclaimed), `"this-session"` or
+/// `"other-session"`.
+fn claim(claimed_by: Option<i64>, session: &Session) -> Option<&'static str> {
+    claimed_by.map(|by| {
+        if by == session.id {
+            "this-session"
+        } else {
+            "other-session"
+        }
     })
 }
 
@@ -789,13 +797,15 @@ fn write_as(
     if let Some(key) = &req.key {
         let first = tx
             .query_row(
-                "SELECT thread_id, note_id, status FROM send_keys WHERE person_id = ?1 AND key = ?2",
+                "SELECT thread_id, note_id, status, claimed FROM send_keys
+                 WHERE person_id = ?1 AND key = ?2",
                 params![caller.person_id, key],
                 |r| {
                     Ok(SendResult {
                         thread: r.get(0)?,
                         note: r.get(1)?,
                         status: r.get(2)?,
+                        claimed: r.get(3)?,
                     })
                 },
             )
@@ -872,10 +882,12 @@ fn write_as(
             if caught_up {
                 deliver(tx, session, &thread_id, seq, now)?;
             }
-            // Writing claims the thread for the person, for this session.
+            // Writing claims the thread for this session, unless another session of the person
+            // holds it: a claim is never taken from a session that still has it.
             tx.execute(
                 "UPDATE participants SET claimed_by = ?3, claimed_context = ?4
-                 WHERE thread_id = ?1 AND person_id = ?2",
+                 WHERE thread_id = ?1 AND person_id = ?2
+                   AND (claimed_by IS NULL OR claimed_by = ?3)",
                 params![thread_id, caller.person_id, session.id, session.context],
             )?;
             Some(id)
@@ -890,21 +902,28 @@ fn write_as(
         )?;
     }
     refresh(tx, &thread_id)?;
+    let claimed_by: Option<i64> = tx.query_row(
+        "SELECT claimed_by FROM participants WHERE thread_id = ?1 AND person_id = ?2",
+        params![thread_id, caller.person_id],
+        |r| r.get(0),
+    )?;
     let result = SendResult {
         thread: thread_id,
         note: note_id,
         status: if req.close { "closed" } else { "open" }.to_string(),
+        claimed: claim(claimed_by, session).map(str::to_string),
     };
     if let Some(key) = &req.key {
         tx.execute(
-            "INSERT INTO send_keys (person_id, key, thread_id, note_id, status, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO send_keys (person_id, key, thread_id, note_id, status, claimed, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 caller.person_id,
                 key,
                 result.thread,
                 result.note,
                 result.status,
+                result.claimed,
                 now
             ],
         )?;

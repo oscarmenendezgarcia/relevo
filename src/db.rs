@@ -50,9 +50,10 @@ CREATE INDEX IF NOT EXISTS sessions_by_last_seen ON sessions(last_seen);
 CREATE INDEX IF NOT EXISTS threads_by_opener ON threads(opener_id, kind, created_at);
 -- One row per participant of a thread; rows are inserted in participant order, which rowid keeps.
 -- `context` is the context the thread was addressed to for this person; `claimed_by` the session
--- of theirs that last wrote in it, and `claimed_context` its context then. `delivered_*` is the latest note that reached any of their
--- sessions, and which one (its label and context then). `last_seq` is the thread's latest note,
--- `last_other_seq` the latest one not theirs; `has_new` (no session of theirs has that one),
+-- of theirs that claimed it (the first to write while nobody held it), and `claimed_context` its
+-- context then. `delivered_*` is the latest note that reached any of their sessions, and which
+-- one (its label and context then). `last_seq` is the thread's latest note, `last_other_seq` the
+-- latest one not theirs; `has_new` (no session of theirs has that one),
 -- `waiting` (open, direct, latest note not theirs) and `inbox` (`has_new` or `waiting`) are kept
 -- by `api::refresh` after every change to the thread.
 CREATE TABLE IF NOT EXISTS participants (
@@ -135,6 +136,7 @@ CREATE TABLE IF NOT EXISTS send_keys (
     thread_id  TEXT NOT NULL,
     note_id    TEXT,
     status     TEXT NOT NULL,
+    claimed    TEXT,
     created_at INTEGER NOT NULL,
     PRIMARY KEY (person_id, key)
 );
