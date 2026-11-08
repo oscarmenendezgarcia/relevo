@@ -1,16 +1,17 @@
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
-use relevo::{App, Clock, api, client, config, db, mcp};
+use relevo::{App, Clock, api, backup, client, config, db, mcp};
 
 /// Relevo: notes that your agent hands to a teammate's agent.
 #[derive(Parser)]
 #[command(version)]
 struct Cli {
-    /// SQLite database file.
-    #[arg(long, global = true, env = "RELEVO_DB", default_value = "./relevo.db")]
-    db: String,
+    /// SQLite database file [default: ./relevo.db, which only `serve` creates].
+    #[arg(long, global = true, env = "RELEVO_DB")]
+    db: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -62,6 +63,15 @@ enum Command {
         #[arg(long)]
         channel: bool,
     },
+    /// Copy the database consistently (SQLite VACUUM INTO), safe while the server runs.
+    Backup {
+        /// A new file (never overwritten), or a directory to write YYYYMMDD-HHMMSS.db (UTC) into.
+        dest: PathBuf,
+        /// Write into the directory DEST (created if missing) and keep only the newest N
+        /// backups there.
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+        keep: Option<u32>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -76,6 +86,26 @@ enum TokenCommand {
     List { handle: Option<String> },
     /// Revoke a token by id.
     Revoke { id: String },
+}
+
+/// The database when neither `--db` nor `RELEVO_DB` names one.
+const DEFAULT_DB: &str = "./relevo.db";
+
+/// The database to open. Without `--db` or `RELEVO_DB`, only `serve` may create `./relevo.db`:
+/// an admin command run where `RELEVO_DB` is not set yet would otherwise invite people into a new
+/// database the server never reads.
+fn db_path(db: Option<String>, command: &Command) -> Result<String> {
+    match db {
+        Some(db) => Ok(db),
+        None if matches!(command, Command::Serve { .. }) || Path::new(DEFAULT_DB).exists() => {
+            Ok(DEFAULT_DB.to_string())
+        }
+        None => bail!(
+            "no database: RELEVO_DB is not set and there is no {DEFAULT_DB} here. Set RELEVO_DB \
+             to the server's database (deploy/install.sh puts it in \
+             ~/.local/share/relevo/relevo.db), or pass --db"
+        ),
+    }
 }
 
 fn print_token(handle: &str, label: &str, token: &db::NewToken) {
@@ -140,7 +170,22 @@ async fn main() -> Result<()> {
         Command::Mcp { channel } => return mcp::run(channel).await,
         _ => {}
     }
-    let conn = db::open(&cli.db)?;
+    let db_file = db_path(cli.db, &cli.command)?;
+    // A backup only reads the database: it must not create one, nor refuse another version's.
+    if let Command::Backup { dest, keep } = &cli.command {
+        let done = backup::backup(
+            &db_file,
+            dest,
+            keep.map(|k| k as usize),
+            time::OffsetDateTime::now_utc(),
+        )?;
+        println!("backed up {db_file} to {}", done.path.display());
+        for old in done.removed {
+            println!("removed old backup {}", old.display());
+        }
+        return Ok(());
+    }
+    let conn = db::open(&db_file)?;
     let now = db::now_unix();
     match cli.command {
         Command::Serve {
@@ -155,7 +200,7 @@ async fn main() -> Result<()> {
                 .init();
             let app = App::new(conn, Clock::system(), team_questions_per_day);
             let listener = tokio::net::TcpListener::bind(addr).await?;
-            tracing::info!(%addr, db = %cli.db, "relevo listening");
+            tracing::info!(%addr, db = %db_file, "relevo listening");
             if !addr.ip().is_loopback() {
                 tracing::warn!(
                     %addr,
@@ -229,7 +274,9 @@ async fn main() -> Result<()> {
             let revoked = db::deactivate(&conn, &handle, now)?;
             println!("deactivated {handle}, revoked {revoked} token(s)");
         }
-        Command::Connect { .. } | Command::Mcp { .. } => unreachable!("handled above"),
+        Command::Connect { .. } | Command::Mcp { .. } | Command::Backup { .. } => {
+            unreachable!("handled above")
+        }
     }
     Ok(())
 }
@@ -256,7 +303,7 @@ mod tests {
         unsafe { VARS.iter().for_each(|v| std::env::remove_var(v)) };
 
         let cli = Cli::try_parse_from(["relevo", "serve"]).unwrap();
-        assert_eq!(cli.db, "./relevo.db");
+        assert_eq!(cli.db, None);
         assert_eq!(serve_args(&cli), ("127.0.0.1:7878".parse().unwrap(), 5));
 
         let cli = Cli::try_parse_from(["relevo", "invite", "ana", "--name", "Ana"]).unwrap();
@@ -272,12 +319,12 @@ mod tests {
             std::env::set_var("RELEVO_TEAM_QUESTIONS_PER_DAY", "2");
         }
         let cli = Cli::try_parse_from(["relevo", "serve"]).unwrap();
-        assert_eq!(cli.db, "/srv/team.db");
+        assert_eq!(cli.db.as_deref(), Some("/srv/team.db"));
         assert_eq!(serve_args(&cli), ("0.0.0.0:9000".parse().unwrap(), 2));
         // Flags win over the environment, and --db works after the subcommand too.
         let cli =
             Cli::try_parse_from(["relevo", "serve", "--db", "x.db", "--addr", "[::1]:1"]).unwrap();
-        assert_eq!(cli.db, "x.db");
+        assert_eq!(cli.db.as_deref(), Some("x.db"));
         assert_eq!(serve_args(&cli).0, "[::1]:1".parse().unwrap());
         unsafe { VARS.iter().for_each(|v| std::env::remove_var(v)) };
     }

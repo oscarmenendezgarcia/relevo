@@ -104,3 +104,45 @@ fn a_database_from_an_older_block_is_refused_with_a_clear_message() {
     relevo(path, &["people"]);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn without_relevo_db_an_admin_command_never_creates_a_database_here() {
+    let dir = std::env::temp_dir().join(db::random_id("relevo-cli-"));
+    std::fs::create_dir(&dir).unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_relevo"))
+            .current_dir(&dir)
+            .env_remove("RELEVO_DB")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    for args in [
+        &["invite", "ana", "--name", "Ana"][..],
+        &["people"][..],
+        &["backup", "copy.db"][..],
+    ] {
+        let out = run(args);
+        assert!(!out.status.success(), "{args:?} succeeded");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("RELEVO_DB is not set"), "{err}");
+        assert!(
+            !dir.join("relevo.db").exists(),
+            "{args:?} created relevo.db"
+        );
+    }
+
+    // One that is already there is used, as before.
+    relevo(
+        dir.join("relevo.db").to_str().unwrap(),
+        &["invite", "ana", "--name", "Ana"],
+    );
+    let out = run(&["people"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("ana\tAna"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

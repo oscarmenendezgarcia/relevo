@@ -1,0 +1,45 @@
+# Relevo server, as a systemd *user* unit: it runs as the owner's user, needs no root, and
+# listens on loopback only. Teammates reach it through a reverse proxy that terminates TLS (see
+# deploy/proxy/ and docs/install.md). Installed by deploy/install.sh into
+# ~/.config/systemd/user/. Change settings with `systemctl --user edit relevo`, not here.
+[Unit]
+Description=Relevo server (notes between teammates' agents)
+# Give up after 5 failed starts within a minute (a database from an older version, say) instead
+# of restarting forever; `systemctl --user reset-failed relevo` clears it.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+ExecStart=%h/.local/bin/relevo serve
+Environment=RELEVO_DB=%h/.local/share/relevo/relevo.db
+Environment=RELEVO_ADDR=127.0.0.1:7878
+Environment=RUST_LOG=info
+# Plain log lines in the journal (stdout and stderr go there): `journalctl --user -u relevo`.
+Environment=NO_COLOR=1
+StandardOutput=journal
+StandardError=journal
+# SIGTERM (the default) ends the server at once. That is safe: SQLite commits are atomic and
+# durable, and a send cut off before its answer is retried by the adapters with its idempotency
+# key. Waiting inbox requests (up to 60 s) are not waited for.
+Restart=on-failure
+RestartSec=5
+
+# Limits and sandbox. The data directory is the only place it may write.
+MemoryMax=128M
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.local/share/relevo
+PrivateTmp=yes
+# These need no namespaces, so they hold even where the mount sandbox above cannot be set up
+# (see "Sandbox" in docs/install.md).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,35 @@
+# The Cloudflare Tunnel in front of Relevo, as a systemd *user* unit next to relevo.service: it
+# keeps running after you log out and comes back after a reboot (both need lingering, as for
+# relevo.service), and is restarted if it fails. No root, nothing in /etc/cloudflared.
+#
+# It runs the tunnel that ~/.cloudflared/relevo.yml names (deploy/proxy/cloudflared.yml, with
+# your tunnel id and credentials file). Install it once:
+#
+#   install -m 0644 deploy/proxy/relevo-tunnel.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now relevo-tunnel
+#
+# Its log: journalctl --user -u relevo-tunnel. Not for a machine whose cloudflared already runs
+# other names: add the Relevo rule to that one instead (see docs/install.md).
+[Unit]
+Description=Cloudflare Tunnel for Relevo
+After=relevo.service
+
+[Service]
+Type=simple
+# Found in /usr/local/bin or /usr/bin. Updates come with the package, not from cloudflared itself.
+ExecStart=cloudflared --no-autoupdate tunnel --config %h/.cloudflared/relevo.yml run
+StandardOutput=journal
+StandardError=journal
+Restart=on-failure
+RestartSec=5
+
+MemoryMax=256M
+NoNewPrivileges=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target
