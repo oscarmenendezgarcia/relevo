@@ -29,11 +29,11 @@ The server keeps each session with its token's label, its context and when it wa
 
 **Addressing.** In `to`, `ana` means Ana, any of her sessions; `ana/pagos-api` means Ana, in the repository `pagos-api`, on any branch; `ana/pagos-api@feat/refunds` means Ana, on that branch only. An address is split at its first `/`. The context does not need a live session: the thread waits for one.
 
-**Claiming.** For each participant a thread is *unclaimed* or *claimed* by one of their sessions. Claims break ties; they are not how a session decides whether a note is for it. Each session that sees a note judges, from its own context and work, whether it can answer; if it cannot, it stays silent; if it can, it answers at once, or, when the note needs work first, claims the thread with a short note ("on it") before acting. Either note claims it.
+**Claiming.** For each participant a thread is *unclaimed* or *claimed* by one of their sessions. Claims break ties; they are not how a session decides whether a note is for it. Each session that sees a note judges, from its own context and work, whether it can answer; if it cannot, it stays silent; if it can, it answers at once (the answer claims the thread), or, when the note needs work first, claims the thread as a state with `send(thread, claim: true)` and no text before acting. Claiming is never a note: nobody has to read "on it".
 
 - Writing a note in an existing thread claims it for the writing session when nobody of its person holds it, or when the claim has lapsed. Opening a thread claims nothing: the person who asks has nothing to take on, and a claim by the session that asked would hide the answers from the person's next session. It never takes a live claim from another session of the same person: the note is written, but the claim stays where it was. `send` says which happened (`claimed`), so the session that lost steps aside.
 - A claim lapses when the claiming session has not been seen for 15 minutes. A lapsed claim counts as unclaimed everywhere: the thread shows again in the person's other sessions, and the next session to write takes it. It is gone for good: the session that held it, seen again, holds the thread again only by writing in it while nobody else of its person does. A session is seen with each request it makes; a waiting `inbox` request, when it arrives and when it answers.
-- Closing without text does not claim.
+- `claim: true` with no text claims the thread without writing anything, under the same rule: it never takes a live claim from another session of the person. Closing without text does not claim.
 
 **Which sessions see a thread.** For a participant, a thread shows in the inbox of one of their sessions when it is claimed by that session, or when it is unclaimed and either it has no context for them, or its context matches the session's context, or the session is general. A context without a branch matches the repository on any branch (`pagos-api` matches `pagos-api` and `pagos-api@feat/refunds`); one with a branch matches only itself: a note for `ana/pagos-api@feat/refunds` shows neither in Ana's `pagos-api@main` sessions nor in a `pagos-api` session that does not say its branch, and `frontend@feat/refunds` is another context altogether. So an unaddressed note shows in every session of the person until one of them claims it; then only there. A note for `ana/pagos-api` shows in Ana's `pagos-api` sessions, on any branch, and her general ones. `inbox` with `all` and `thread` ignore this and show any thread of the person.
 
@@ -61,8 +61,9 @@ Opens a thread, or writes in one.
 |---|---|---|
 | `to` | array of addresses (`handle` or `handle/context`, the context with or without a branch), or `["@team"]` | Opens a new thread. Exactly one of `to` and `thread`. |
 | `thread` | thread id | Writes in an existing thread. |
-| `text` | string | The note. Required unless only closing (`thread` + `close: true` + no `text`). |
+| `text` | string | The note. Required unless only closing or only claiming (`thread` + `close: true` or `claim: true`, no `text`). |
 | `close` | bool, optional | Marks the thread closed after writing. |
+| `claim` | bool, optional | With `thread`: claims the thread for this session, as a state, without a note when there is no `text`. Not with `to`. |
 | `key` | string, 1 to 100 characters, optional | Idempotency key. A repeated `send` from the same person with the same key, within 24 hours of the `send` that used it, returns the first result and writes nothing. Only a successful `send` uses up a key. After 24 hours the key expires: the same key is a fresh `send`, which uses it up for another 24 hours. The server forgets expired keys. |
 
 The body is a JSON object; anything else (an array, say), or any other field, fails with `BAD_REQUEST`. Characters here and below are Unicode scalar values.
@@ -78,7 +79,7 @@ Rules:
 - Text over 64 KiB (counted once decoded from JSON) fails with `TOO_LARGE` (400); empty or blank text with `BAD_REQUEST`. The whole request body may be up to 400 KiB, so a note of 64 KiB fits however the client escapes it.
 - Loop guard: a thread accepts at most 20 notes in any rolling hour. The 21st fails with `THREAD_BUSY`, whose message tells the agent to check with its person before going on. (The server cannot tell a person from an agent, so this caps speed, not authorship.)
 - A person may send at most 60 notes per rolling minute: beyond that, `RATE_LIMITED`.
-- The limits count notes only: a close without text is never limited.
+- The limits count notes only: a close or a claim without text is never limited.
 
 Returns `{ "thread": "<id>", "note": "<id>", "status": "open" | "closed", "claimed": "this-session" | "other-session" | null }`. `note` is `null` when the `send` only closed the thread. `claimed` is who holds the thread for your person after this `send`: `"other-session"` means another of your sessions had it first, so this one should step aside; `null` after opening a thread, and after a close without text in a thread nobody of yours holds. A replayed `send` returns who held the thread after its first result, named for the session that replays: `"this-session"` only when that session is the one that held it, so a retry from another session (an agent restarted under a new id, say) is not told it holds a thread it does not.
 
@@ -132,10 +133,10 @@ Returns:
 
 The whole history of one thread your person takes part in, from any of their sessions. Delivers all its notes to this session. Does not claim it.
 
-Returns the same thread object as `inbox`, with `notes` (every note, in full, oldest first, `truncated: false`) in place of `new_notes`, plus `delivery`: for each participant, in the order of `participants`, the latest note by someone else that they have, when it reached them and which session it reached (`by`), which session of theirs claimed the thread (`claimed_by`), or `null`s, and how many of their sessions that note has reached (`seen_by`, 0 when none has). Each session shows its label and its context at that moment: when the note reached it, when it claimed the thread. This is how a writer sees "picked up by her agent 5 minutes ago".
+Returns the same thread object as `inbox`, with `notes` (every note, in full, oldest first, `truncated: false`) in place of `new_notes`, plus `delivery`: for each participant, in the order of `participants`, the latest note by someone else that they have, when it reached them and which session it reached (`by`), which session of theirs claimed the thread and since when (`claimed_by`, with `since`), or `null`s, and how many of their sessions that note has reached (`seen_by`, 0 when none has). Each session shows its label and its context at that moment: when the note reached it, when it claimed the thread. This is how a writer sees "picked up by her agent 5 minutes ago".
 
 ```json
-"delivery": [ { "handle": "ana", "note": "n_…", "delivered_at": "2026-11-08T10:46:00Z", "by": { "label": "Claude Code laptop", "context": "pagos-api" }, "claimed_by": { "label": "Claude Code laptop", "context": "pagos-api" }, "seen_by": 1 },
+"delivery": [ { "handle": "ana", "note": "n_…", "delivered_at": "2026-11-08T10:46:00Z", "by": { "label": "Claude Code laptop", "context": "pagos-api" }, "claimed_by": { "label": "Claude Code laptop", "context": "pagos-api", "since": "2026-11-08T10:47:00Z" }, "seen_by": 1 },
               { "handle": "bob", "note": null, "delivered_at": null, "by": null, "claimed_by": null, "seen_by": 0 } ]
 ```
 
