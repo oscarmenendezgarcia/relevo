@@ -150,6 +150,11 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
             out,
             "No new notes (call thread with id \"{id}\" for the history)."
         );
+    } else if partial && notes.iter().any(|n| n["pushed"] == true) {
+        out.push_str(
+            "New notes (those marked \"pushed earlier\" reached this session as channel events; \
+             shown again in case they did not reach you):\n",
+        );
     } else if partial {
         out.push_str("New notes:\n");
     }
@@ -158,11 +163,16 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
         let mine = Some(author) == me;
         let _ = writeln!(
             out,
-            "\n- note {} by @{author}{} via \"{}\", {}",
+            "\n- note {} by @{author}{} via \"{}\", {}{}",
             s(&n["id"]),
             if mine { " (you)" } else { "" },
             s(&n["via"]),
-            s(&n["created_at"])
+            s(&n["created_at"]),
+            if n["pushed"] == true {
+                " (pushed earlier)"
+            } else {
+                ""
+            }
         );
         if mine {
             out.push_str(&neutralise(s(&n["text"])));
@@ -228,9 +238,12 @@ pub fn inbox(v: &Value, me: Option<&str>) -> String {
         out.push_str(&thread(t, me));
     }
     let more = v["more"].as_i64().unwrap_or(0);
-    let had_new = threads
-        .iter()
-        .any(|t| t["new_notes"].as_array().is_some_and(|n| !n.is_empty()));
+    // Notes pushed earlier were delivered then: they do not make room for the rest.
+    let had_new = threads.iter().any(|t| {
+        t["new_notes"]
+            .as_array()
+            .is_some_and(|n| n.iter().any(|n| n["pushed"] != true))
+    });
     if more > 0 && had_new {
         // Those shown are delivered now, so the rest come up next.
         let _ = write!(
@@ -328,6 +341,23 @@ mod tests {
         // A title of our own is ours.
         let mine = thread(&t, Some("ana"));
         assert!(mine.contains("Title (yours): x\""), "{mine}");
+    }
+
+    #[test]
+    fn notes_pushed_earlier_are_marked_and_make_no_room() {
+        let mut t = sample();
+        t["new_notes"][0]["pushed"] = true.into();
+        let out = thread(&t, Some("oscar"));
+        assert!(out.contains("those marked \"pushed earlier\""), "{out}");
+        assert!(
+            out.contains("2026-11-08T10:41:00Z (pushed earlier)\n"),
+            "{out}"
+        );
+        // Delivered when pushed: another inbox call would show the same threads.
+        let v = json!({ "team": [], "session": { "label": "x", "context": null },
+                        "threads": [t], "more": 2 });
+        let out = inbox(&v, Some("oscar"));
+        assert!(out.contains("older ones, also waiting"), "{out}");
     }
 
     #[test]

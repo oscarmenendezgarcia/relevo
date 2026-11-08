@@ -147,6 +147,39 @@ fn remember(pushed: &Mutex<Vec<Value>>, thread: &Value) {
     pushed.drain(..excess);
 }
 
+/// Puts the notes of each pushed thread that the inbox answer `v` lists too into that thread's
+/// entry (marked `pushed`, in order of time with its new notes), so the thread shows once; returns
+/// the pushed threads it does not list.
+fn merge_pushed(v: &mut Value, pushed: Vec<Value>) -> Vec<Value> {
+    let Some(threads) = v.get_mut("threads").and_then(Value::as_array_mut) else {
+        return pushed;
+    };
+    let mut rest = vec![];
+    for p in pushed {
+        let Some(t) = threads.iter_mut().find(|t| t["id"] == p["id"]) else {
+            rest.push(p);
+            continue;
+        };
+        let new = t["new_notes"].as_array().cloned().unwrap_or_default();
+        let mut notes: Vec<Value> = p["new_notes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|n| !new.iter().any(|m| m["id"] == n["id"]))
+            .map(|n| {
+                let mut n = n.clone();
+                n["pushed"] = true.into();
+                n
+            })
+            .collect();
+        notes.extend(new);
+        // Stable: pushed notes first among notes of the same second.
+        notes.sort_by(|a, b| s(&a["created_at"]).cmp(s(&b["created_at"])));
+        t["new_notes"] = Value::Array(notes);
+    }
+    rest
+}
+
 /// Forgets the pushed thread `id`: a tool has shown it or written in it.
 fn forget(pushed: &Mutex<Vec<Value>>, id: &str) {
     lock(pushed).retain(|t| t["id"] != id);
@@ -214,14 +247,15 @@ impl Relevo {
     )]
     async fn inbox(&self, Parameters(p): Parameters<InboxParams>) -> Result<String, String> {
         let client = self.client()?;
-        let v = client
+        let mut v = client
             .inbox(p.all.unwrap_or(false), 0)
             .await
             .map_err(error)?;
         let me = client.you().await;
-        let mut out = render::inbox(&v, me.as_deref());
         let pushed = std::mem::take(&mut *lock(&self.pushed));
-        out.push_str(&render::pushed(&pushed, me.as_deref()));
+        let rest = merge_pushed(&mut v, pushed);
+        let mut out = render::inbox(&v, me.as_deref());
+        out.push_str(&render::pushed(&rest, me.as_deref()));
         Ok(out)
     }
 
@@ -544,6 +578,33 @@ mod tests {
             remember(&pushed, &json!({ "id": format!("r_{i}"), "new_notes": [] }));
         }
         assert_eq!(lock(&pushed).len(), MAX_PUSHED);
+    }
+
+    #[test]
+    fn pushed_notes_join_their_thread_in_the_inbox() {
+        let note = |id: &str, at: &str| json!({ "id": id, "author": "ana", "created_at": at });
+        let mut v = json!({ "threads": [
+            { "id": "r_1", "new_notes": [] },
+            { "id": "r_2", "new_notes": [note("n_3", "t3")] }
+        ] });
+        let pushed = vec![
+            json!({ "id": "r_1", "new_notes": [note("n_1", "t1")] }),
+            json!({ "id": "r_2", "new_notes": [note("n_2", "t2"), note("n_3", "t3")] }),
+            json!({ "id": "r_9", "new_notes": [note("n_9", "t9")] }),
+        ];
+        let rest = merge_pushed(&mut v, pushed);
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0]["id"], "r_9");
+        let mut n_1 = note("n_1", "t1");
+        n_1["pushed"] = true.into();
+        assert_eq!(v["threads"][0]["new_notes"], json!([n_1]));
+        // A note both pushed and new again is shown once, as new.
+        let mut n_2 = note("n_2", "t2");
+        n_2["pushed"] = true.into();
+        assert_eq!(
+            v["threads"][1]["new_notes"],
+            json!([n_2, note("n_3", "t3")])
+        );
     }
 
     #[test]

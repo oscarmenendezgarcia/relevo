@@ -422,15 +422,24 @@ async fn channel_pushes_notes_from_others() {
     );
 
     // The push delivered the note, and nothing tells whether Claude Code showed the event
-    // (started without the channels flag, it drops it): the next inbox shows it once more.
+    // (started without the channels flag, it drops it): the next inbox shows it once more, in
+    // the thread's own entry, since the thread still waits for a reply: once, not twice.
     let inbox = ana.ok("inbox", json!({})).await;
-    let at = inbox.find("Pushed to this session earlier").expect(&inbox);
+    assert_eq!(
+        inbox.matches(&format!("### Thread {id}")).count(),
+        1,
+        "{inbox}"
+    );
+    assert!(!inbox.contains("Pushed to this session"), "{inbox}");
+    assert!(inbox.contains("(pushed earlier)"), "{inbox}");
     assert!(
-        inbox[at..].contains("<untrusted from=\"@bob\">\nDeploy at 5?\n</untrusted>"),
+        inbox.contains("<untrusted from=\"@bob\">\nDeploy at 5?\n</untrusted>"),
         "{inbox}"
     );
     let inbox = ana.ok("inbox", json!({})).await;
-    assert!(!inbox.contains("Pushed to this session"), "{inbox}");
+    assert!(inbox.contains(&format!("### Thread {id}")), "{inbox}");
+    assert!(!inbox.contains("pushed earlier"), "{inbox}");
+    assert!(!inbox.contains("Deploy at 5?\n"), "{inbox}");
 
     // A reply in the same thread is pushed too, and its own notes are not.
     ana.ok("send", json!({ "thread": id, "text": "Yes." }))
@@ -447,6 +456,7 @@ async fn channel_pushes_notes_from_others() {
     ana.ok("thread", json!({ "id": id })).await;
     let inbox = ana.ok("inbox", json!({})).await;
     assert!(!inbox.contains("Pushed to this session"), "{inbox}");
+    assert!(!inbox.contains("pushed earlier"), "{inbox}");
 
     // Gone with its client, even with an inbox request waiting.
     assert!(ana.close().await.success());
@@ -799,6 +809,18 @@ async fn channel_pushes_again_what_a_dropped_answer_delivered() {
     assert!(content.contains("Or at 6?"), "{content}");
     assert!(!content.contains("\nDeploy at 5?\n"), "{content}");
     assert!(!content.contains("Pushed again"), "{content}");
+
+    // In case neither event reached the agent, the inbox shows the thread once, with both.
+    let inbox = ana.ok("inbox", json!({})).await;
+    assert_eq!(
+        inbox.matches(&format!("### Thread {id}")).count(),
+        1,
+        "{inbox}"
+    );
+    assert!(!inbox.contains("Pushed to this session"), "{inbox}");
+    for text in ["\nDeploy at 5?\n", "\nOr at 6?\n"] {
+        assert_eq!(inbox.matches(text).count(), 1, "{text}: {inbox}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
