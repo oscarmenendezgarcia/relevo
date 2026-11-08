@@ -172,7 +172,7 @@ The `-wal` and `-shm` files of the old database must not stay next to the restor
 ## 6. Upgrades
 
 ```
-relevo backup ~/.local/share/relevo/backups/before-upgrade.db   # not named by date: --keep never removes it
+relevo backup ~/.local/share/relevo/backups/before-upgrade-$(date +%Y%m%d-%H%M%S).db   # --keep never removes it
 deploy/install.sh --enable ./relevo-<new>          # from the deploy files of the new version
 ```
 
@@ -180,7 +180,7 @@ The script replaces the binary and the units, then restarts the server. Before i
 
 **The database layout.** The database records the version of its layout (`SCHEMA_VERSION` in `src/db.rs`, kept in SQLite's `user_version`). v0 does not migrate: a relevo with another layout refuses the database ("made by an older version of relevo") in every command, `serve` included, except `backup`, which copies any version's. The release notes say when a version changes the layout. Moving to such a version means starting with a new, empty database:
 
-1. Keep a backup: `relevo backup ~/relevo-old.db`. It stays readable by the old version.
+1. Keep a backup: `relevo backup ~/relevo-old-$(date +%Y%m%d).db`. It stays readable by the old version.
 2. Write down the team: `relevo people` (handles, names, abouts) and `relevo token list` (who has which agents).
 3. Move the old database aside: `systemctl --user stop relevo`, then move `relevo.db`, `relevo.db-wal` and `relevo.db-shm` out of `~/.local/share/relevo`.
 4. Install the new version: `deploy/install.sh --enable ./relevo-<new>`. The server starts with an empty database.
