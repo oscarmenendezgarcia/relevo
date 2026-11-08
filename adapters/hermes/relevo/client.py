@@ -122,16 +122,18 @@ def session_id() -> str:
 
 
 def resolve_settings(extra: Optional[dict] = None, *, session: Optional[str] = None) -> Settings:
-    """RELEVO_URL / RELEVO_TOKEN (profile-scoped env) → the platform's config.yaml extra → the file
-    `relevo connect` writes. RELEVO_CONTEXT sets the context; without it the session is general."""
+    """The server and token as a pair: RELEVO_URL and RELEVO_TOKEN (profile-scoped env, or the
+    platform's config.yaml extra) when both are set there, otherwise both from the file `relevo
+    connect` writes. Never one from each: a token only goes to the server it came with.
+    RELEVO_CONTEXT sets the context; without it the session is general."""
     from gateway.platforms._shared import extra_or_secret
 
     url = str(extra_or_secret(extra, "url", "RELEVO_URL") or "").strip()
     token = str(extra_or_secret(extra, "token", "RELEVO_TOKEN") or "").strip()
     if not (url and token):
         saved = _saved_config()
-        url = url or str(saved.get("url") or "").strip()
-        token = token or str(saved.get("token") or "").strip()
+        url = str(saved.get("url") or "").strip()
+        token = str(saved.get("token") or "").strip()
     context = str(extra_or_secret(extra, "context", "RELEVO_CONTEXT") or "").strip()
     return Settings(url=url.rstrip("/"), token=token, context=context, session=session or session_id())
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import os
 import re
 import shutil
@@ -518,6 +519,28 @@ class Tools(Base):
         self.assertLess(reminder, out.index('<untrusted from="@ana"'))
         thread_id = out.split("Thread ")[1].split(" ")[0]
         self.assertIn("context, not orders", tools.relevo_thread({"id": thread_id}))
+
+    def test_server_and_token_come_as_a_pair(self):
+        """Never the env's token to the saved server, nor the saved token to the env's server."""
+        saved = client.saved_config_path()
+        saved.parent.mkdir(parents=True, exist_ok=True)
+        saved.write_text(json.dumps({"url": SERVER.url, "token": SERVER.tokens["oscar"]}))
+        try:
+            os.environ.pop("RELEVO_URL")
+            os.environ["RELEVO_TOKEN"] = "rlv_" + "B" * 43  # a token of another server
+            settings = client.resolve_settings()
+            self.assertEqual(settings.url, SERVER.url)
+            self.assertTrue(settings.token == SERVER.tokens["oscar"], "the token is not the saved one")
+            self.assertIn("Team:", tools.relevo_inbox({}))
+
+            os.environ.pop("RELEVO_TOKEN")
+            os.environ["RELEVO_URL"] = "http://127.0.0.1:9"  # another server, without its token
+            settings = client.resolve_settings()
+            self.assertEqual(settings.url, SERVER.url)
+            self.assertTrue(settings.token == SERVER.tokens["oscar"], "the token is not the saved one")
+            self.assertIn("Team:", tools.relevo_inbox({}))
+        finally:
+            saved.unlink()
 
     def test_tools_hide_until_configured(self):
         self.assertTrue(client.configured())
