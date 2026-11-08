@@ -328,7 +328,7 @@ async fn deactivated_person_stays_a_participant_of_their_old_threads() {
         t.thread("ana", &asked).await["participants"],
         json!(["ana", "bob", "carl"])
     );
-    t.ok("carl", json!({ "thread": direct, "text": "on it" }))
+    t.ok("carl", json!({ "thread": direct, "text": "answer" }))
         .await;
     let inbox = t.inbox("ana").await;
     assert_eq!(
@@ -1013,7 +1013,7 @@ async fn a_replay_from_another_session_is_told_the_first_holder_is_another_sessi
     let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
     let pagos = t.agent("bob", "term-pagos", "pagos-api");
     let front = t.agent("bob", "term-front", "frontend");
-    let body = json!({ "thread": id, "text": "on it", "key": "k1" });
+    let body = json!({ "thread": id, "text": "answer", "key": "k1" });
     let (_, first) = pagos.send(body.clone()).await;
     assert_eq!(first["claimed"], "this-session");
     // Another session retries the same send: the first result, but as that session sees it.
@@ -1031,7 +1031,7 @@ async fn a_replay_after_its_holder_was_forgotten_names_another_session() {
     let t = team(&["ana", "bob"]);
     let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
     let codex = db::add_token(&t.app.db(), "bob", "Codex desktop", T0).unwrap();
-    let body = json!({ "thread": id, "text": "on it", "key": "k1" });
+    let body = json!({ "thread": id, "text": "answer", "key": "k1" });
     // The newest session holds the thread after the first send; then it is forgotten.
     let (status, first) = call(
         &t.app,
@@ -1925,7 +1925,7 @@ async fn all_shows_every_thread_of_the_person_and_marks_other_claims() {
         .await;
     front.inbox().await;
     front
-        .ok(json!({ "thread": claimed, "text": "on it" }))
+        .ok(json!({ "thread": claimed, "text": "answer" }))
         .await;
     t.ok("ana", json!({ "thread": claimed, "text": "thanks" }))
         .await;
@@ -2014,9 +2014,9 @@ async fn a_second_session_writing_gets_other_session_and_the_claim_stays() {
     // Both see it, and both write.
     pagos.inbox().await;
     front.inbox().await;
-    let (_, first) = pagos.send(json!({ "thread": id, "text": "on it" })).await;
+    let (_, first) = pagos.send(json!({ "thread": id, "text": "answer" })).await;
     assert_eq!(first["claimed"], "this-session");
-    let (_, second) = front.send(json!({ "thread": id, "text": "on it" })).await;
+    let (_, second) = front.send(json!({ "thread": id, "text": "answer" })).await;
     assert_eq!(second["claimed"], "other-session");
     assert!(
         second["note"].is_string(),
@@ -2633,7 +2633,7 @@ async fn delivery_is_about_the_latest_note_by_someone_else() {
     t.app.clock.advance(60);
     a2.inbox().await;
     t.app.clock.advance(60);
-    a2.ok(json!({ "thread": id, "text": "on it" })).await;
+    a2.ok(json!({ "thread": id, "text": "answer" })).await;
     // Ana's own note, from a session that had Oscar's, does not move her delivery.
     let d = &t.thread("oscar", &id).await["delivery"][1];
     assert_eq!(d["note"], q);
@@ -2888,7 +2888,7 @@ async fn a_session_that_ends_releases_its_threads_to_the_persons_other_sessions_
         t.thread("ana", &id).await["delivery"][1]["claimed_by"],
         Value::Null
     );
-    let (_, v) = next.send(json!({ "thread": id, "text": "on it" })).await;
+    let (_, v) = next.send(json!({ "thread": id, "text": "answer" })).await;
     assert_eq!(v["claimed"], "this-session");
     let sessions = db::list_sessions(&t.app.db(), Some("bob"), T0).unwrap();
     assert_eq!(sessions.len(), 1, "the ended session is forgotten");
