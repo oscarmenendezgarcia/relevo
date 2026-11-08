@@ -6,7 +6,10 @@
 //
 // 1. Print mode: pi calls relevo_inbox (sees a note from ana) and relevo_send (answers her).
 // 2. RPC mode: pi sits idle with no prompt; a note from ana wakes it, it answers in the
-//    thread, the note is delivered once, and closing stdin shuts pi down.
+//    thread at once (a question it can answer with its tools: no "On it." first), the
+//    note is delivered once, and closing stdin shuts pi down.
+//
+//   PI_E2E_DUMP   file to write the RPC events to, to see what the agent did
 //
 // The extension is loaded only with -e; nothing in ~/.pi is read for extensions or changed.
 
@@ -85,7 +88,7 @@ try {
   const t2 = Date.now();
   const wake = await api(server, ana, "POST", "/api/send", {
     to: ["oscar"],
-    text: "Quick check for Oscar's agent: is the relevo demo repo on main? Please answer in this thread.",
+    text: "Quick check for Oscar's agent: in which Relevo context does your session run? relevo_inbox shows it. Please answer in this thread.",
   });
   await until(() => events.some((e) => e.type === "agent_start"), 60_000, "the note to wake pi");
   console.log(`rpc: note sent, agent_start after ${((Date.now() - t2) / 1000).toFixed(1)}s`);
@@ -98,8 +101,19 @@ try {
   const thread = await api(server, ana, "GET", `/api/threads/${wake.thread}`);
   const replies = thread.notes.filter((n: any) => n.author === "oscar");
   console.log(`rpc: ${replies.length} reply(ies) by oscar in ${wake.thread}, via ${replies.map((n: any) => `"${n.via}"`).join(", ")}`);
+  const said = events
+    .filter((e) => e.type === "message_end" && e.message?.role === "assistant")
+    .flatMap((e) => (Array.isArray(e.message.content) ? e.message.content : []))
+    .filter((c: any) => c.type === "text")
+    .map((c: any) => c.text)
+    .join(" ");
+  if (process.env.PI_E2E_DUMP) (await import("node:fs")).writeFileSync(process.env.PI_E2E_DUMP, JSON.stringify(events, null, 1));
+  if (said) console.log(`rpc: pi said: ${JSON.stringify(said.slice(0, 600))}`);
   assert.ok(replies.length >= 1, "the woken agent answered in the thread");
   for (const n of replies) console.log(`rpc: oscar's reply: ${JSON.stringify(n.text.slice(0, 300))}`);
+  // Answerable at once with what the agent has: just answer, no "On it." first (rule 3).
+  assert.ok(!replies.some((n: any) => /^\s*on it\.?\s*$/i.test(n.text)), 'no "On it." to a question answerable at once');
+  assert.ok(replies.some((n: any) => /relevo-demo/.test(n.text)), "the answer names the context");
 
   // Shut down: close stdin; pi exits and its waiting request ends with it.
   const t3 = Date.now();
