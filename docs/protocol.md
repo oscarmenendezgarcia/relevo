@@ -135,7 +135,7 @@ There is no sign-up. The admin runs the binary on the server:
 ```
 relevo serve [--addr 127.0.0.1:7878] [--db relevo.db] [--team-questions-per-day 5]
 relevo invite <handle> --name "Ana" [--about "payments backend"] [--label "Claude Code"]   # creates the person (or reuses), prints a new token once
-relevo token add <handle> --label "Codex desktop"                                          # another agent for the same person
+relevo token add <handle> --label "Codex desktop"                                          # another agent for the same person (active people only)
 relevo token list [<handle>]
 relevo token revoke <token-id>
 relevo people

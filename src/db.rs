@@ -216,6 +216,13 @@ fn check_label(label: &str) -> Result<()> {
 pub fn add_token(conn: &Connection, handle: &str, label: &str, now: i64) -> Result<NewToken> {
     check_label(label)?;
     let person = person_id(conn, handle)?;
+    let active: bool =
+        conn.query_row("SELECT active FROM people WHERE id = ?1", [person], |r| {
+            r.get(0)
+        })?;
+    if !active {
+        bail!("'{handle}' is deactivated: invite them back to give them a token");
+    }
     let token = NewToken {
         id: random_id("t_"),
         secret: new_secret(),
@@ -386,5 +393,17 @@ mod tests {
         assert!(!people[0].active);
         assert_eq!(people[0].name, "Ana");
         assert_eq!(list_tokens(&conn, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn deactivated_person_gets_no_new_token_until_invited_back() {
+        let conn = open(":memory:").unwrap();
+        invite(&conn, "ana", "Ana", None, "laptop", 0).unwrap();
+        assert_eq!(deactivate(&conn, "ana", 0).unwrap(), 1);
+        assert!(add_token(&conn, "ana", "desktop", 0).is_err());
+        assert_eq!(list_tokens(&conn, Some("ana")).unwrap().len(), 1);
+        invite(&conn, "ana", "Ana", None, "laptop 2", 0).unwrap();
+        add_token(&conn, "ana", "desktop", 0).unwrap();
+        assert_eq!(list_tokens(&conn, Some("ana")).unwrap().len(), 3);
     }
 }
