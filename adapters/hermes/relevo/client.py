@@ -439,7 +439,17 @@ def render_inbox(data: dict, me: Optional[str]) -> str:
     for thread in threads:
         notes = thread.get("new_notes") or []
         block = [render_thread_head(thread, me)]
-        block += [render_note(n, me) for n in notes] if notes else ["(nothing new; it waits for a reply)"]
+        if notes:
+            block += [render_note(n, me) for n in notes]
+        elif thread.get("waiting_for_you"):
+            block.append("(nothing new; it waits for a reply)")
+            last = thread.get("last_note")
+            if isinstance(last, dict):
+                # What it waits on: another session of the person may have fetched it already.
+                block.append("Latest note (it may have reached another of your person's sessions already):\n"
+                             + render_note(last, me))
+        else:
+            block.append("(nothing new)")
         parts.append("\n\n".join(block))
     if data.get("more"):
         parts.append(f"{data['more']} more thread(s) not shown: ask again once these are handled.")
