@@ -98,6 +98,10 @@ struct ThreadOut {
     waiting_for_you: bool,
     context: Option<String>,
     claimed: Option<&'static str>,
+    /// In `inbox`: the thread's latest note, whoever wrote it and whether or not it reached
+    /// this session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_note: Option<NoteOut>,
     #[serde(skip_serializing_if = "Option::is_none")]
     new_notes: Option<Vec<NoteOut>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -410,6 +414,30 @@ fn participants(conn: &Connection, thread: &str) -> Result<Vec<String>, ApiError
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+const NOTE_COLUMNS: &str = "SELECT n.id, a.handle, n.via, n.created_at, n.text
+     FROM notes n JOIN people a ON a.id = n.author_id";
+
+/// The note `?1` of thread `?2`, by its primary key: one row read per thread shown.
+const NOTE_AT_SQL: &str = "WHERE n.seq = ?1 AND n.thread_id = ?2";
+
+/// A row of `NOTE_COLUMNS` as a note, its text cut to `max_chars` when given.
+fn note_out(r: &rusqlite::Row, max_chars: Option<usize>) -> rusqlite::Result<NoteOut> {
+    let mut text: String = r.get(4)?;
+    let mut truncated = false;
+    if let Some((cut, _)) = max_chars.and_then(|max| text.char_indices().nth(max)) {
+        text.truncate(cut);
+        truncated = true;
+    }
+    Ok(NoteOut {
+        id: r.get(0)?,
+        author: r.get(1)?,
+        via: r.get(2)?,
+        created_at: rfc3339(r.get(3)?),
+        text,
+        truncated,
+    })
+}
+
 /// Notes of a thread after `seq`, oldest first, cut to `max_chars` when given.
 fn notes_after(
     conn: &Connection,
@@ -417,28 +445,27 @@ fn notes_after(
     seq: i64,
     max_chars: Option<usize>,
 ) -> Result<Vec<NoteOut>, ApiError> {
-    let mut stmt = conn.prepare(
-        "SELECT n.id, a.handle, n.via, n.created_at, n.text
-         FROM notes n JOIN people a ON a.id = n.author_id
-         WHERE n.thread_id = ?1 AND n.seq > ?2 ORDER BY n.seq",
-    )?;
-    let rows = stmt.query_map(params![thread, seq], |r| {
-        let mut text: String = r.get(4)?;
-        let mut truncated = false;
-        if let Some((cut, _)) = max_chars.and_then(|max| text.char_indices().nth(max)) {
-            text.truncate(cut);
-            truncated = true;
-        }
-        Ok(NoteOut {
-            id: r.get(0)?,
-            author: r.get(1)?,
-            via: r.get(2)?,
-            created_at: rfc3339(r.get(3)?),
-            text,
-            truncated,
-        })
-    })?;
+    let mut stmt = conn.prepare(&format!(
+        "{NOTE_COLUMNS} WHERE n.thread_id = ?1 AND n.seq > ?2 ORDER BY n.seq"
+    ))?;
+    let rows = stmt.query_map(params![thread, seq], |r| note_out(r, max_chars))?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// The note `seq` of a thread, cut to `max_chars` when given; `None` if it has no such note.
+fn note_at(
+    conn: &Connection,
+    thread: &str,
+    seq: i64,
+    max_chars: Option<usize>,
+) -> Result<Option<NoteOut>, ApiError> {
+    Ok(conn
+        .query_row(
+            &format!("{NOTE_COLUMNS} {NOTE_AT_SQL}"),
+            params![seq, thread],
+            |r| note_out(r, max_chars),
+        )
+        .optional()?)
 }
 
 /// Delivers the notes of `thread` up to `seq` to `session`. When that moves what its person has,
@@ -511,6 +538,7 @@ fn thread_out(
         waiting_for_you: row.waiting,
         context: row.context.clone(),
         claimed: claim(row.claimed_by, session),
+        last_note: None,
         new_notes: None,
         notes: None,
         delivery: None,
@@ -719,6 +747,9 @@ fn answer_inbox(app: &App, caller: &Caller, all: bool, arrived: bool) -> Result<
         for candidate in &page {
             let row = find_thread(tx, session, &candidate.thread)?;
             let mut out = thread_out(tx, session, &row)?;
+            // Shown, not delivered: what a waiting thread waits on, even when another session of
+            // the person already has it.
+            out.last_note = note_at(tx, &row.id, row.last_seq, Some(INBOX_TEXT_CHARS))?;
             out.new_notes = Some(notes_after(
                 tx,
                 &row.id,
@@ -1164,7 +1195,7 @@ fn title_of(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{count_sql, page_sqls, title_of};
+    use super::{NOTE_AT_SQL, NOTE_COLUMNS, count_sql, page_sqls, title_of};
     use rusqlite::types::Value as SqlValue;
 
     fn plan(sql: &str) -> Vec<String> {
@@ -1254,6 +1285,21 @@ mod tests {
                 assert!(!plan.iter().any(|s| s.contains("TEMP B-TREE")), "{plan:#?}");
             }
         }
+    }
+
+    /// `last_note` costs one primary-key lookup (and its author's) per thread returned.
+    #[test]
+    fn last_note_is_read_by_its_key() {
+        let plan = plan(&format!("{NOTE_COLUMNS} {NOTE_AT_SQL}"));
+        assert_eq!(plan.len(), 2, "{plan:#?}");
+        assert!(
+            plan[0].starts_with("SEARCH n USING INTEGER PRIMARY KEY"),
+            "{plan:#?}"
+        );
+        assert!(
+            plan[1].starts_with("SEARCH a USING INTEGER PRIMARY KEY"),
+            "{plan:#?}"
+        );
     }
 
     #[test]

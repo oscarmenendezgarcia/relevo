@@ -2145,6 +2145,121 @@ async fn the_answer_to_a_question_reaches_the_askers_next_session() {
     }
 }
 
+/// The `last_note` of thread `id` in an inbox: (author, text, truncated).
+fn last_note(inbox: &Value, id: &str) -> (String, String, bool) {
+    let th = inbox["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == id)
+        .unwrap_or_else(|| panic!("{id} not in {inbox}"));
+    let note = &th["last_note"];
+    (
+        note["author"].as_str().unwrap().to_string(),
+        note["text"].as_str().unwrap().to_string(),
+        note["truncated"].as_bool().unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn a_new_session_sees_the_answer_another_session_fetched_as_last_note() {
+    let t = team(&["ana", "oscar"]);
+    // Oscar's session A asks Ana, Ana answers, and A fetches the answer.
+    let a = t.agent("oscar", "term-aaaa", "relevo");
+    let id = a
+        .ok(json!({ "to": ["ana"], "text": "Is refunds live?" }))
+        .await;
+    t.ok("ana", json!({ "thread": id, "text": "Yes, since Monday." }))
+        .await;
+    assert_eq!(
+        new_texts(&a.inbox().await, &id),
+        Some(vec!["Yes, since Monday.".to_string()])
+    );
+    // Oscar's new session B: nothing new, but the thread waits for him, and its last note is
+    // Ana's answer.
+    let b = t.agent("oscar", "term-bbbb", "");
+    let v = b.inbox().await;
+    assert_eq!(new_texts(&v, &id), Some(vec![]), "{v}");
+    assert_eq!(v["threads"][0]["waiting_for_you"], true, "{v}");
+    assert_eq!(
+        last_note(&v, &id),
+        ("ana".into(), "Yes, since Monday.".into(), false)
+    );
+    let note = &v["threads"][0]["last_note"];
+    for field in ["id", "via", "created_at"] {
+        assert!(note[field].is_string(), "{note}");
+    }
+    // Showing it delivered nothing: the answer reached Oscar through A, as before.
+    let th = t.thread("ana", &id).await;
+    let oscar = th["delivery"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["handle"] == "oscar")
+        .unwrap();
+    assert_eq!(oscar["by"]["context"], "relevo", "{th}");
+    // It shows each time, as long as the thread waits.
+    assert_eq!(
+        last_note(&b.inbox().await, &id).1,
+        "Yes, since Monday.".to_string()
+    );
+    // Whoever wrote it: once Oscar replies, Ana's inbox shows his reply as the last note.
+    a.ok(json!({ "thread": id, "text": "Thanks!" })).await;
+    let v = t.inbox("ana").await;
+    assert_eq!(
+        last_note(&v, &id),
+        ("oscar".into(), "Thanks!".into(), false)
+    );
+}
+
+#[tokio::test]
+async fn team_threads_carry_their_last_note() {
+    let t = team(&["ana", "bob", "carl"]);
+    let id = t
+        .ok(
+            "ana",
+            json!({ "to": ["@team"], "text": "Who owns billing?" }),
+        )
+        .await;
+    let v = t.inbox("bob").await;
+    assert_eq!(
+        last_note(&v, &id),
+        ("ana".into(), "Who owns billing?".into(), false)
+    );
+    t.ok("carl", json!({ "thread": id, "text": "I do." })).await;
+    t.ok("bob", json!({ "thread": id, "text": "Carl does, yes." }))
+        .await;
+    // Ana gets both answers as new; the last note is the latest of them, whoever wrote it.
+    let v = t.inbox("ana").await;
+    assert_eq!(
+        new_texts(&v, &id),
+        Some(vec!["I do.".to_string(), "Carl does, yes.".to_string()])
+    );
+    assert_eq!(
+        last_note(&v, &id),
+        ("bob".into(), "Carl does, yes.".into(), false)
+    );
+}
+
+#[tokio::test]
+async fn last_note_is_truncated_like_new_notes() {
+    let t = team(&["ana", "oscar"]);
+    let a = t.agent("oscar", "term-aaaa", "");
+    let id = a.ok(json!({ "to": ["ana"], "text": "Logs?" })).await;
+    let text = "ñ".repeat(5000);
+    t.ok("ana", json!({ "thread": id, "text": text })).await;
+    a.inbox().await;
+    let v = t.agent("oscar", "term-bbbb", "").inbox().await;
+    let (author, cut, truncated) = last_note(&v, &id);
+    assert_eq!(author, "ana");
+    assert!(truncated);
+    assert_eq!(cut.chars().count(), 4000);
+    assert!(text.starts_with(&cut));
+    let v = t.agent("oscar", "term-cccc", "").inbox().await;
+    assert!(last_note(&v, &id).2);
+    assert_eq!(t.thread("oscar", &id).await["notes"][1]["text"], text);
+}
+
 #[tokio::test]
 async fn reading_in_one_session_does_not_deliver_to_another() {
     let t = team(&["ana", "bob"]);
