@@ -124,7 +124,7 @@ Errors: `{ "error": { "code": "…", "message": "…", …extra } }` with these 
 | `TEAM_LIMIT`, `RATE_LIMITED`, `THREAD_BUSY` | 429 |
 | `INTERNAL` (a server fault; details go to the log only) | 500 |
 
-An unknown route is `NOT_FOUND` too.
+An unknown route, a known route with the wrong method, and a thread id that cannot be decoded are `NOT_FOUND` too, with the same JSON shape.
 
 Ids: threads `r_` + 12 base32 chars, notes `n_` + 12, tokens `t_` + 12 (random). Times: RFC 3339 UTC.
 

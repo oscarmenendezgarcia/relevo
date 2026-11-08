@@ -793,3 +793,29 @@ async fn waiting_threads_come_first() {
     let team_list = inbox["team"].as_array().unwrap();
     assert_eq!(team_list.len(), 3);
 }
+
+// ---------- routing errors ----------
+
+#[tokio::test]
+async fn unknown_route_or_wrong_method_is_json_not_found() {
+    let t = team(&["ana"]);
+    let token = Some(t.tokens["ana"].as_str());
+    for (method, uri) in [
+        ("GET", "/api/nope"),
+        ("POST", "/api/inbox"),
+        ("GET", "/api/send"),
+        ("DELETE", "/api/threads/r_aaaaaaaaaaaa"),
+    ] {
+        let (status, v) = t.raw(method, uri, token, Body::empty()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {uri}");
+        assert_eq!(code(&v), "NOT_FOUND", "{method} {uri}: {v}");
+    }
+}
+
+#[tokio::test]
+async fn undecodable_thread_id_is_json_not_found() {
+    let t = team(&["ana"]);
+    let (status, v) = t.get("ana", "/api/threads/%FF").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(code(&v), "NOT_FOUND", "{v}");
+}

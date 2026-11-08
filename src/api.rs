@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::rejection::BytesRejection;
+use axum::extract::rejection::{BytesRejection, PathRejection};
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -39,6 +39,7 @@ pub fn router(app: Arc<App>) -> Router {
         )
         .route("/api/people", get(people))
         .fallback(|| async { ApiError::not_found("no such route") })
+        .method_not_allowed_fallback(|| async { ApiError::not_found("no such route") })
         .with_state(app)
 }
 
@@ -282,8 +283,9 @@ async fn inbox(State(app): State<Arc<App>>, caller: Caller) -> Result<Json<Value
 async fn thread(
     State(app): State<Arc<App>>,
     caller: Caller,
-    Path(id): Path<String>,
+    id: Result<Path<String>, PathRejection>,
 ) -> Result<Json<ThreadOut>, ApiError> {
+    let Path(id) = id.map_err(|_| ApiError::not_found("no such thread"))?;
     let now = app.clock.now();
     let mut conn = app.db();
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
