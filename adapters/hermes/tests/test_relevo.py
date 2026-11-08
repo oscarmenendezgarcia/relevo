@@ -628,6 +628,35 @@ class Loop(Base):
         await self.until(lambda: len(self.events) == 1)
         self.assertIn("Anyone there?", self.events[0].text)
 
+    async def test_a_disconnect_mid_batch_hands_over_what_the_server_delivered(self):
+        """The inbox delivered the whole batch to the fixed session: none of it may be dropped."""
+        a = self.make_adapter()
+        await a.connect()
+        await asyncio.sleep(0.3)
+        await a.disconnect()
+        self.ana.send(to=["oscar"], text="Short one")
+        self.ana.send(to=["oscar"], text="Another short one")
+        self.ana.send(to=["oscar"], text="Long:\n" + "y" * 5000)  # newest: handed over first
+
+        b = self.make_adapter()
+        fetching = asyncio.Event()
+
+        async def slow_thread(http, thread_id):
+            fetching.set()
+            await asyncio.sleep(30)
+            raise AssertionError("not reached")
+
+        b.api.athread = slow_thread
+        await b.connect()
+        await asyncio.wait_for(fetching.wait(), 10)
+        started = time.monotonic()
+        await b.disconnect()
+        self.assertLess(time.monotonic() - started, 3)
+        texts = [e.text for e in self.events]
+        self.assertEqual(len(texts), 3, texts and [t[:80] for t in texts])
+        self.assertIn("cut at 4,000 characters", texts[0])
+        self.assertTrue(any("Another short one" in t for t in texts))
+
     async def test_errors_back_off_and_the_loop_recovers(self):
         a = self.make_adapter()
         a.backoff_initial, a.backoff_max = 0.05, 0.4

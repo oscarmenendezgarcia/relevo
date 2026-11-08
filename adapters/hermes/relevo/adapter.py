@@ -79,12 +79,18 @@ def is_gateway_diagnostic(content: str) -> bool:
     return any(p.fullmatch(text) for p in _diagnostic_patterns())
 
 
+class _Stopping(Exception):
+    """disconnect() was called while the loop waited on something it can do without."""
+
+
 class RelevoAdapter(BasePlatformAdapter):
     # No edits on Relevo: a note is final. The gateway then streams nothing.
     SUPPORTS_MESSAGE_EDITING = False
     wait_seconds = client.WAIT_SECONDS
     backoff_initial = 1.0
     backoff_max = 60.0
+    # How long disconnect() lets the loop finish handing over a batch the server already delivered.
+    stop_grace = 5.0
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform(PLATFORM_NAME))
@@ -96,6 +102,8 @@ class RelevoAdapter(BasePlatformAdapter):
         self._seen: OrderedDict[str, None] = OrderedDict()
         self._titles: dict[str, str] = {}
         self._me: Optional[str] = None
+        # True while the loop hands over threads the server has already delivered to this session.
+        self._holding_batch = False
 
     # -- lifecycle ------------------------------------------------------------------------------
 
@@ -128,6 +136,10 @@ class RelevoAdapter(BasePlatformAdapter):
             self._stop.set()
         task, self._poll_task = self._poll_task, None
         if task is not None and task is not asyncio.current_task():
+            if self._holding_batch and not task.done():
+                # Mid-batch: the server already delivered these threads to the fixed session, so
+                # they would never be new again. Let the loop hand them over, then it stops.
+                await asyncio.wait({task}, timeout=self.stop_grace)
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         http, self._http = self._http, None
@@ -177,20 +189,41 @@ class RelevoAdapter(BasePlatformAdapter):
             else:
                 delay = self.backoff_initial
                 team = {p.get("handle"): p for p in data.get("team") or []}
-                for thread in data.get("threads") or []:
-                    try:
-                        await self._dispatch(thread, team)
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as exc:
-                        logger.warning("[relevo] could not hand over thread %s: %s", thread.get("id"),
-                                       client.describe_error(exc))
+                self._holding_batch = True
+                try:
+                    for thread in data.get("threads") or []:
+                        try:
+                            await self._dispatch(thread, team)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:
+                            logger.warning("[relevo] could not hand over thread %s: %s", thread.get("id"),
+                                           client.describe_error(exc))
+                finally:
+                    self._holding_batch = False
                 continue
             if await self._pause(delay):
                 return
             delay = min(delay * 2, self.backoff_max)
 
     # -- inbound --------------------------------------------------------------------------------
+
+    async def _unless_stopping(self, coro: Any) -> Any:
+        """Await coro, giving up (_Stopping) as soon as disconnect() is called: the batch the loop
+        holds must reach handle_message before the task is cancelled."""
+        work = asyncio.ensure_future(coro)
+        if self._stop is None:
+            return await work
+        stop = asyncio.ensure_future(self._stop.wait())
+        try:
+            await asyncio.wait({work, stop}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            stop.cancel()
+        if not work.done():
+            work.cancel()
+            await asyncio.gather(work, return_exceptions=True)
+            raise _Stopping()
+        return work.result()
 
     def _remember(self, note_id: str) -> None:
         self._seen[note_id] = None
@@ -206,7 +239,9 @@ class RelevoAdapter(BasePlatformAdapter):
         self._me = client.learn_self(thread, notes) or self._me
         if any(n.get("truncated") for n in notes):
             try:
-                whole = await self.api.athread(self._ensure_http(), thread_id)
+                whole = await self._unless_stopping(self.api.athread(self._ensure_http(), thread_id))
+            except _Stopping:
+                logger.info("[relevo] stopping: thread %s is handed over with its notes cut", thread_id)
             except Exception as exc:
                 # The inbox already delivered these notes: hand them over cut rather than lose them.
                 logger.warning("[relevo] could not read thread %s whole: %s", thread_id, client.describe_error(exc))
