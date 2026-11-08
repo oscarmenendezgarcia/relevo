@@ -40,7 +40,8 @@ for _key, _value in {
     "XDG_STATE_HOME": _TMP / "state", "XDG_CONFIG_HOME": _TMP / "config", "XDG_CACHE_HOME": _TMP / "cache",
 }.items():
     os.environ[_key] = str(_value)
-for _key in ("RELEVO_URL", "RELEVO_TOKEN", "RELEVO_CONTEXT", "RELEVO_ALLOWED_USERS", "RELEVO_ALLOW_ALL_USERS"):
+for _key in ("RELEVO_URL", "RELEVO_TOKEN", "RELEVO_CONTEXT", "RELEVO_CONFIG", "RELEVO_ALLOWED_USERS",
+             "RELEVO_ALLOW_ALL_USERS"):
     os.environ.pop(_key, None)
 # Install as the README says: copy to <home>/plugins/relevo and enable it.
 shutil.copytree(_PLUGIN, _TMP / ".hermes" / "plugins" / "relevo", ignore=shutil.ignore_patterns("__pycache__"))
@@ -747,6 +748,36 @@ class Tools(Base):
             self.assertTrue(ENTRY.validate_config(PlatformConfig(enabled=True, extra={})))
         finally:
             saved.unlink()
+
+    async def test_relevo_config_names_the_saved_file(self):
+        """Like every client: RELEVO_CONFIG names the file `relevo connect` wrote."""
+        default = Path(os.environ["HOME"]) / ".config" / "relevo" / "config.json"
+        self.assertEqual(client.saved_config_path(), default)
+        named = _TMP / "elsewhere" / "relevo.json"
+        named.parent.mkdir(parents=True, exist_ok=True)
+        named.write_text(json.dumps({"url": SERVER.url, "token": SERVER.tokens["oscar"]}))
+        os.environ["RELEVO_CONFIG"] = str(named)
+        try:
+            os.environ.pop("RELEVO_URL")
+            os.environ.pop("RELEVO_TOKEN")
+            self.assertFalse(default.exists())
+            self.assertEqual(client.saved_config_path(), named)
+            settings = client.resolve_settings()
+            self.assertEqual((settings.url, settings.source, settings.unpaired), (SERVER.url, str(named), ""))
+            self.assertTrue(settings.token == SERVER.tokens["oscar"], "the token is not the named file's")
+            self.assertTrue(client.configured())
+            self.assertIn("You speak for @oscar", tools.relevo_inbox({}))
+            # The gateway, enabled explicitly with neither set here, uses the same file.
+            a = self.make_adapter()
+            self.assertEqual(a.settings.source, str(named))
+            self.assertTrue(await a.connect())
+            # Empty is unset, as for relevo mcp.
+            os.environ["RELEVO_CONFIG"] = ""
+            self.assertEqual(client.saved_config_path(), default)
+            self.assertFalse(client.configured())
+        finally:
+            os.environ.pop("RELEVO_CONFIG", None)
+            named.unlink()
 
     def test_tools_hide_until_configured(self):
         self.assertTrue(client.configured())

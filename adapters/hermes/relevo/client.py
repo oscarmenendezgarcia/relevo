@@ -78,7 +78,13 @@ class Settings:
 
 
 def saved_config_path() -> Path:
-    """Where `relevo connect` saves the server and token (docs/agents.md)."""
+    """Where `relevo connect` saves the server and token (docs/agents.md): the file RELEVO_CONFIG
+    names (the profile's env), as for every client, else ~/.config/relevo/config.json."""
+    from gateway.platforms._shared import get_scoped_secret
+
+    named = str(get_scoped_secret("RELEVO_CONFIG", "") or "")
+    if named:
+        return Path(named)
     return Path.home() / ".config" / "relevo" / "config.json"
 
 

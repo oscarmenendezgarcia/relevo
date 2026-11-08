@@ -28,6 +28,10 @@ optional_env:
     description: "Context this agent works in (repo or repo@branch). Empty: general, sees every note for your person"
     prompt: "Relevo context (or empty for general)"
     password: false
+  - name: RELEVO_CONFIG
+    description: "The file `relevo connect` saved the server and token in, if not ~/.config/relevo/config.json (used when RELEVO_URL and RELEVO_TOKEN are not both set)"
+    prompt: "Relevo config file (or empty for the default)"
+    password: false
   - name: RELEVO_ALLOWED_USERS
     description: "Comma-separated Relevo handles whose notes the gateway answers"
     prompt: "Allowed handles (comma-separated)"
