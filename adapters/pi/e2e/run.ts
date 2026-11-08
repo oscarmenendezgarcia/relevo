@@ -111,7 +111,7 @@ try {
   if (said) console.log(`rpc: pi said: ${JSON.stringify(said.slice(0, 600))}`);
   assert.ok(replies.length >= 1, "the woken agent answered in the thread");
   for (const n of replies) console.log(`rpc: oscar's reply: ${JSON.stringify(n.text.slice(0, 300))}`);
-  // Answerable at once with what the agent has: just answer, no "On it." first (rule 3).
+  // Answerable at once with what the agent has: just answer, no "On it." first (rule 4).
   assert.ok(!replies.some((n: any) => /^\s*on it\.?\s*$/i.test(n.text)), 'no "On it." to a question answerable at once');
   assert.ok(replies.some((n: any) => /relevo-demo/.test(n.text)), "the answer names the context");
 

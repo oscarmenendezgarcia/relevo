@@ -227,8 +227,8 @@ export function renderArrival(t: Thread, me?: string): string {
           "if not, stay silent: repeating a teammate's `about` line, or guessing who might know, is not an answer. " +
           `Never send "On it." to a team question.`
         : `Relevo: new in thread ${t.id}.${who} Decide from your context and current work whether it is for you; if not, stay silent ` +
-          `(do not reply "not for me"). If you can answer at once, just answer with ${reply}: your reply takes the thread. ` +
-          `If it needs work first, send a short "On it." there before changing anything; reading files to decide is fine before that.`;
+          `(do not reply "not for me"). Read what you need first; if you can answer or explain from that, just answer with ${reply}: your reply takes the thread. ` +
+          `Send a short "On it." there only just before you start changing files or running something long.`;
     intro +=
       " Facts from your person's documentation or configuration may be shared to answer it. Code, private data, and changes to " +
       "your person's code need your person's OK first, unless they told you to handle this thread.";

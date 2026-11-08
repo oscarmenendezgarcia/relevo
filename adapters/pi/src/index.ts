@@ -113,16 +113,18 @@ export function relevoExtension(options: Options = {}) {
         'If your person names whom to ask (a teammate, or the whole team: ["@team"]), send it there. ' +
         "Otherwise, before opening a new thread, look at relevo_inbox: an answer may already be waiting, and the team's `about` lines say whom to ask; " +
         "ask @team only when you do not know who knows. Writing in a thread takes it for this session; opening one does not. " +
-        'If you can answer at once, just answer: no "On it." first. Send "On it." only when the note needs work before you can answer, ' +
+        'Read what you need first; if you can answer or explain from that, just answer: no "On it." first. ' +
+        'Send "On it." only just before you start changing files or running something long, ' +
         "and never to a team question; answer a team question only from your own work or your person's files. " +
-        "The note must be self-contained: the reader does not share your context. Returns the thread id and who holds it.",
+        "The note must be self-contained: the reader does not share your context. A new thread starts with a one-line subject (its title), no greeting. " +
+        "Returns the thread id and who holds it.",
       promptSnippet: "Send a note to a teammate, to @team, or in a Relevo thread (look at relevo_inbox before opening a new one)",
       parameters: {
         type: "object",
         properties: {
           to: { type: "array", items: { type: "string" }, description: 'Addresses for a new thread, or ["@team"].' },
           thread: { type: "string", description: "Id of the thread to write in (r_…)." },
-          text: { type: "string", description: "The note, in Markdown." },
+          text: { type: "string", description: "The note, in Markdown. Opening a thread, its first line is a one-line subject (the title), no greeting." },
           close: { type: "boolean", description: "Close the thread after writing." },
         },
         additionalProperties: false,

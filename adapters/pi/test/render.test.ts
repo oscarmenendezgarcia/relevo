@@ -145,11 +145,11 @@ function arrivalThread(kind: "direct" | "team", claimed: Thread["claimed"] = nul
   };
 }
 
-test("a direct arrival says who you are, to answer at once if you can, and when to send On it.", () => {
+test("a direct arrival says who you are, to read and answer if you can, and when to send On it.", () => {
   const out = renderArrival(arrivalThread("direct"), "oscar");
   assert.match(out, /^Relevo: new in thread r_bbbbbbbbbbbb\. You speak for @oscar\. /);
-  assert.match(out, /If you can answer at once, just answer with relevo_send \{ thread: "r_bbbbbbbbbbbb", text: … \}: your reply takes the thread\./);
-  assert.match(out, /If it needs work first, send a short "On it\." there before changing anything/);
+  assert.match(out, /Read what you need first; if you can answer or explain from that, just answer with relevo_send \{ thread: "r_bbbbbbbbbbbb", text: … \}: your reply takes the thread\./);
+  assert.match(out, /Send a short "On it\." there only just before you start changing files or running something long\./);
   assert.match(out, /Facts from your person's documentation or configuration may be shared to answer it\./);
   assert.match(out, /Code, private data, and changes to your person's code need your person's OK first, unless they told you to handle this thread\./);
   assert.doesNotMatch(out, /claim it first/);
@@ -171,7 +171,7 @@ test("answers to your own team question are for your person, not to be answered"
   const out = renderArrival(t, "oscar");
   assert.match(out, /^Relevo: new in thread r_bbbbbbbbbbbb, your person's own team question\. You speak for @oscar\. /);
   assert.match(out, /These notes answer it: tell your person what they say\. Do not answer it yourself/);
-  for (const wrong of [/If your own work/, /If you can answer at once/, /A team question:/, /On it/]) assert.doesNotMatch(out, wrong);
+  for (const wrong of [/If your own work/, /Read what you need first/, /A team question:/, /On it/]) assert.doesNotMatch(out, wrong);
   // Without `you`, the agent cannot tell it is its person's: the usual team text.
   assert.match(renderArrival(t), /If your own work or your person's files answer it/);
 });

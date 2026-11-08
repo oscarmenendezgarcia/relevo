@@ -139,8 +139,9 @@ test("send tells the agent to look at its inbox before opening a thread", () => 
   assert.match(send.description, /answer a team question only from your own work or your person's files\./);
   assert.match(send.description, /ask @team only when you do not know who knows/);
   assert.match(send.promptSnippet, /look at relevo_inbox before opening a new one/);
-  assert.match(send.description, /If you can answer at once, just answer: no "On it\." first\./);
-  assert.match(send.description, /Send "On it\." only when the note needs work before you can answer, and never to a team question;/);
+  assert.match(send.description, /Read what you need first; if you can answer or explain from that, just answer: no "On it\." first\./);
+  assert.match(send.description, /Send "On it\." only just before you start changing files or running something long, and never to a team question;/);
+  assert.match(send.description, /A new thread starts with a one-line subject \(its title\), no greeting\./);
 });
 
 test("the inbox says it tells whom you speak for, and to look there before opening a thread", () => {
