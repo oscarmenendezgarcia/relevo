@@ -15,7 +15,7 @@ from . import client
 
 logger = logging.getLogger(__name__)
 
-# The person this token acts for, once a thread has told us (see client.learn_self).
+# The person each token speaks for (`you` of the inbox or of GET /api/people), by client.Settings.identity.
 _me: dict[str, str] = {}
 
 
@@ -26,14 +26,21 @@ def _api() -> client.Api:
     return client.Api(settings)
 
 
-def _me_for(api: client.Api) -> str | None:
-    return _me.get(api.settings.identity)
-
-
-def _learn(api: client.Api, thread: dict, notes: list) -> None:
-    me = client.learn_self(thread, notes)
+def _learn(api: client.Api, data: dict) -> None:
+    me = client.you_of(data)
     if me:
         _me[api.settings.identity] = me
+
+
+def _me_for(api: client.Api) -> str | None:
+    """Who this token speaks for; asks the server once when no inbox has said it yet."""
+    key = api.settings.identity
+    if key not in _me:
+        try:
+            _learn(api, api.people())
+        except Exception as exc:
+            logger.warning("relevo: could not read who this token speaks for: %s", client.describe_error(exc))
+    return _me.get(key)
 
 
 def _run(name: str, fn) -> str:
@@ -69,8 +76,7 @@ def relevo_inbox(args: dict, **_: Any) -> str:
     def go() -> str:
         api = _api()
         data = api.inbox(all_=bool(args.get("all")))
-        for thread in data.get("threads") or []:
-            _learn(api, thread, thread.get("new_notes") or [])
+        _learn(api, data)
         return client.render_inbox(data, _me_for(api))
 
     return _run("relevo_inbox", go)
@@ -83,7 +89,6 @@ def relevo_thread(args: dict, **_: Any) -> str:
         if not thread_id:
             return "Error: give the thread id (r_…)."
         data = api.thread(thread_id)
-        _learn(api, data, data.get("notes") or [])
         return client.render_thread(data, _me_for(api))
 
     return _run("relevo_thread", go)

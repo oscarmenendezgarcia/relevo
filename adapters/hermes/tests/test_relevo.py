@@ -58,6 +58,7 @@ ENTRY = platform_registry.get("relevo")
 assert ENTRY is not None, "the relevo platform did not register"
 _PKG = ENTRY.adapter_factory.__module__
 client = importlib.import_module(_PKG + ".client")
+tools_module = importlib.import_module(_PKG + ".tools")
 
 
 class _Tools:
@@ -223,6 +224,7 @@ class Inbound(Base):
         self.assertEqual(event.user_name, "Ana (@ana)")
         self.assertEqual(event.message_id, opened["note"])
         self.assertIn('<untrusted from="@ana" via="Claude Code"', event.text)
+        self.assertIn("You speak for @oscar", event.text)
         self.assertIn("Can your agent check the refunds endpoint?", event.text)
         self.assertIn(opened["thread"], event.text)
         self.assertFalse(event.allow_gateway_control)
@@ -465,17 +467,21 @@ class Outbound(Base):
 class Tools(Base):
     def test_send_inbox_and_thread(self):
         sent = tools.relevo_send({"to": ["ana"], "text": "# Deploy\nWhich flag turns on refunds in staging?"})
-        self.assertRegex(sent, r"^Wrote note n_\w+ in thread r_\w+ \(open\)\. You hold this thread\.$")
+        # Opening a thread claims nothing (docs/protocol.md).
+        self.assertRegex(sent, r"^Wrote note n_\w+ in thread r_\w+ \(open\)\.$")
         thread_id = sent.split(" in thread ")[1].split(" ")[0]
 
         self.ana.inbox()  # Ana's agent reads it, then answers
         self.ana.send(thread=thread_id, text="REFUNDS_ENABLED=1 in the staging env.")
         inbox = tools.relevo_inbox({})
         self.assertIn("- @ana (Ana): payments backend", inbox)
+        # Who the agent speaks for comes from the server (`you`), not from guessing.
+        self.assertIn("- @oscar (Oscar, you): the Hermes owner", inbox)
+        self.assertIn("You speak for @oscar", inbox)
         self.assertIn(f"Thread {thread_id} · direct · open", inbox)
         self.assertIn('<untrusted from="@ana"', inbox)
         self.assertIn("REFUNDS_ENABLED=1 in the staging env.", inbox)
-        self.assertIn("You hold it; waiting for your person's reply.", inbox)
+        self.assertIn("Waiting for your person's reply.", inbox)
         # Delivered: it is no longer new, though it still waits for a reply.
         again = tools.relevo_inbox({})
         self.assertIn(f"Thread {thread_id}", again)
@@ -487,11 +493,20 @@ class Tools(Base):
         # The thread told us who we are: our own note is not wrapped as someone else's.
         self.assertIn('<yours from="@oscar"', whole)
         self.assertIn("- @ana: n_", whole)
-        self.assertIn("held by Claude Code (general)", whole)
+        self.assertIn("held by Claude Code (general)", whole)  # Ana's answer claimed it for her
 
         replied = tools.relevo_send({"thread": thread_id, "text": "Thanks, that did it.", "close": True})
         self.assertIn("(closed)", replied)
         self.assertEqual(self.ana.thread(thread_id)["status"], "closed")
+
+    def test_who_you_are_comes_from_the_server_even_before_any_inbox(self):
+        opened = self.ana.send(to=["oscar"], text="Can you look at the refunds cron?")
+        tools.relevo_send({"thread": opened["thread"], "text": "Yes: it runs at 03:00 UTC."})
+        tools_module._me.clear()
+        whole = tools.relevo_thread({"id": opened["thread"]})
+        self.assertIn("You speak for @oscar", whole)
+        self.assertIn('<yours from="@oscar"', whole)
+        self.assertIn('<untrusted from="@ana"', whole)
 
     def test_refusals_read_as_errors(self):
         unknown = tools.relevo_send({"to": ["zoe"], "text": "Hi"})

@@ -188,6 +188,7 @@ class RelevoAdapter(BasePlatformAdapter):
                 logger.warning("[relevo] inbox failed: %s; retrying in %.1fs", client.describe_error(exc), delay)
             else:
                 delay = self.backoff_initial
+                self._me = client.you_of(data) or self._me
                 team = {p.get("handle"): p for p in data.get("team") or []}
                 self._holding_batch = True
                 try:
@@ -236,7 +237,6 @@ class RelevoAdapter(BasePlatformAdapter):
         if not thread_id or not notes:
             return  # only waiting: it was handed over when its notes were new
         self._titles[thread_id] = str(thread.get("title") or thread_id)
-        self._me = client.learn_self(thread, notes) or self._me
         if any(n.get("truncated") for n in notes):
             try:
                 whole = await self._unless_stopping(self.api.athread(self._ensure_http(), thread_id))
