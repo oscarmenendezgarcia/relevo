@@ -52,7 +52,20 @@ function renderDelivery(d: Delivery): string {
   return `- @${d.handle}: ${parts.join("; ")}.`;
 }
 
-export function renderThread(t: Thread): string {
+export interface ThreadOptions {
+  /** Characters to aim for; the newest note in range is shown whole even beyond it. */
+  budget?: number;
+  /** Only notes before this one (paging through a long thread with relevo_thread). */
+  before?: string;
+}
+
+/**
+ * A thread as text. Never cut inside a note: when its notes do not fit in the
+ * budget, the newest that fit are shown whole (oldest first) and a line says how
+ * to read the earlier ones. The delivery section is always shown.
+ */
+export function renderThread(t: Thread, options: ThreadOptions = {}): string {
+  const budget = options.budget ?? MAX_CHARS;
   const lines = [
     `## Thread ${t.id} (${t.kind}, ${t.status})`,
     `Title: ${untrusted(t.from, t.title, true)}`,
@@ -61,37 +74,101 @@ export function renderThread(t: Thread): string {
   if (t.context) lines.push(`Addressed to your person in context ${t.context}.`);
   if (t.waiting_for_you) lines.push("Waiting for your person's reply.");
   lines.push(holder(t.claimed));
-  const out = [lines.join("\n")];
-  if (t.notes) {
-    out.push(`Notes (${t.notes.length}):`, ...t.notes.map(renderNote));
-  } else if (t.new_notes?.length) {
-    out.push(`New notes (${t.new_notes.length}):`, ...t.new_notes.map(renderNote));
-  } else {
-    out.push("No new notes.");
+  const head = lines.join("\n");
+  const delivery = t.delivery ? ["Delivery:", ...t.delivery.map(renderDelivery)].join("\n") : null;
+
+  const whole = t.notes !== undefined && t.notes !== null;
+  const all = (whole ? t.notes : t.new_notes) ?? [];
+  let end = all.length;
+  if (options.before !== undefined) {
+    end = all.findIndex((n) => n.id === options.before);
+    if (end < 0) throw new Error(`Note ${options.before} is not in thread ${t.id}.`);
   }
-  if (t.delivery) out.push(["Delivery:", ...t.delivery.map(renderDelivery)].join("\n"));
-  return cap(out.join("\n\n"));
+
+  // Room for the head, the delivery and the lines about notes not shown.
+  let room = budget - head.length - (delivery?.length ?? 0) - 400;
+  const shown: string[] = [];
+  let start = end;
+  while (start > 0) {
+    const text = renderNote(all[start - 1]);
+    if (shown.length && text.length + 2 > room) break;
+    shown.unshift(text);
+    room -= text.length + 2;
+    start--;
+  }
+
+  const out = [head];
+  if (!all.length) {
+    out.push(whole ? "No notes." : "No new notes.");
+  } else if (whole) {
+    if (!shown.length) {
+      out.push(`No notes before ${options.before}.`);
+    } else {
+      out.push(start === 0 && end === all.length ? `Notes (${all.length}):` : `Notes ${start + 1}-${end} of ${all.length}:`);
+      if (start > 0) {
+        out.push(
+          `${start} earlier note(s) not shown here: read them with relevo_thread { id: "${t.id}", before: "${all[start].id}" }.`,
+        );
+      }
+    }
+    if (end < all.length) out.push(`${all.length - end} later note(s) not shown here: relevo_thread { id: "${t.id}" } shows the latest.`);
+  } else {
+    out.push(start === 0 ? `New notes (${all.length}):` : `New notes (${all.length}), the latest ${shown.length} shown:`);
+    if (start > 0) {
+      out.push(`${start} earlier new note(s) not shown here: read them with relevo_thread { id: "${t.id}" }.`);
+    }
+  }
+  out.push(...shown);
+  if (delivery) out.push(delivery);
+  return out.join("\n\n");
 }
 
+/** A thread left out of the inbox for length: enough to know it is there and how to read it. */
+function renderSkipped(t: Thread): string {
+  const n = t.new_notes?.length ?? 0;
+  const lines = [
+    `## Thread ${t.id} (${t.kind}, ${t.status}): not shown here for length`,
+    `Title: ${untrusted(t.from, t.title, true)}`,
+  ];
+  if (t.waiting_for_you) lines.push("Waiting for your person's reply.");
+  lines.push(
+    n
+      ? `${n} new note(s) not shown: read them with relevo_thread { id: "${t.id}" }.`
+      : `No new notes; read it with relevo_thread { id: "${t.id}" }.`,
+  );
+  return lines.join("\n");
+}
+
+/**
+ * The inbox as text. Every thread here is delivered to this session already, so
+ * none may go missing: threads are shown whole while they fit, and each one
+ * that does not is still listed, with how to read it.
+ */
 export function renderInbox(inbox: Inbox): string {
   const session = `This session: "${inbox.session.label}", ${inbox.session.context ? `context ${inbox.session.context}` : "general"}.`;
   const out = [renderTeam(inbox.team), session];
   if (!inbox.threads.length) out.push("Nothing new for this session and nothing waiting.");
-  out.push(...inbox.threads.map(renderThread));
-  if (inbox.more) out.push(`${inbox.more} more thread(s) not shown: call relevo_inbox again.`);
-  return cap(out.join("\n\n"));
+  const more = inbox.more ? `${inbox.more} more thread(s) not shown: call relevo_inbox again.` : null;
+  const skipped = inbox.threads.map(renderSkipped);
+  let room = MAX_CHARS - out.join("\n\n").length - (more ? more.length + 2 : 0);
+  // What the threads after each one take at least, listed only.
+  let after = skipped.reduce((sum, s) => sum + s.length + 2, 0);
+  inbox.threads.forEach((t, i) => {
+    after -= skipped[i].length + 2;
+    const fits = room - after - 2;
+    const full = renderThread(t, { budget: fits });
+    const text = full.length <= fits ? full : skipped[i];
+    out.push(text);
+    room -= text.length + 2;
+  });
+  if (more) out.push(more);
+  return out.join("\n\n");
 }
 
 /** What a session receives when a note arrives on its own. */
 export function renderArrival(t: Thread): string {
-  return [
+  const intro =
     `Relevo: new in thread ${t.id}. Decide from your context and current work whether it is for you. ` +
-      `If not, stay silent. If it is, claim it first with relevo_send { thread: "${t.id}", text: "On it." } before acting.`,
-    renderThread(t),
-  ].join("\n\n");
-}
-
-function cap(text: string): string {
-  if (text.length <= MAX_CHARS) return text;
-  return `${text.slice(0, MAX_CHARS)}\n[Output cut at ${MAX_CHARS} characters.]`;
+    `If not, stay silent. If it is, claim it first with relevo_send { thread: "${t.id}", text: "On it." } before acting.`;
+  return [intro, renderThread(t, { budget: MAX_CHARS - intro.length - 2 })].join("\n\n");
 }

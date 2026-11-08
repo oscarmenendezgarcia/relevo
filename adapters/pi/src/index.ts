@@ -123,17 +123,23 @@ export function relevoExtension(options: Options = {}) {
     pi.registerTool({
       name: "relevo_thread",
       label: "Relevo thread",
-      description: "A whole Relevo thread by id: every note in full, who has seen it and who holds it. Does not claim it.",
+      description:
+        "A whole Relevo thread by id: its notes in full, who has seen it and who holds it. Does not claim it. " +
+        "A long thread shows its latest notes and says how to read the earlier ones: call again with `before` set to the oldest note id shown.",
       promptSnippet: "Read a whole Relevo thread by id",
       parameters: {
         type: "object",
-        properties: { id: { type: "string", description: "Thread id (r_…)." } },
+        properties: {
+          id: { type: "string", description: "Thread id (r_…)." },
+          before: { type: "string", description: "Only notes before this note id (n_…), to read the earlier part of a long thread." },
+        },
         required: ["id"],
         additionalProperties: false,
       } as any,
       async execute(_id: string, params: any, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: any) {
         const thread = await call(ctx?.cwd, (c) => c.thread(params.id, signal));
-        return result(renderThread(thread), { thread: thread.id });
+        const before = typeof params.before === "string" && params.before ? params.before : undefined;
+        return result(renderThread(thread, { before }), { thread: thread.id });
       },
     } as any);
 
