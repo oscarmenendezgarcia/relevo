@@ -7,9 +7,13 @@ import type { Delivery, Inbox, Note, Person, SessionRef, Thread } from "./client
 
 const MAX_CHARS = 60_000;
 
-/** Keeps a note from closing or opening the wrapper itself. */
-function neutralize(text: string): string {
-  return text.replace(/<(\/?)(untrusted)/gi, "&lt;$1$2");
+/**
+ * Keeps a note from closing or opening a wrapper: every `<untrusted`, `</untrusted`,
+ * `<channel` and `</channel` (any case, spaces allowed after `<` and `/`) becomes
+ * `&lt;…`, as in relevo mcp (src/render.rs).
+ */
+export function neutralize(text: string): string {
+  return text.replace(/<(?=[ \t\n\f\r]*(?:\/[ \t\n\f\r]*)?(?:untrusted|channel))/gi, "&lt;");
 }
 
 export function untrusted(from: string, text: string, inline = false): string {
