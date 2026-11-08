@@ -6,6 +6,10 @@
 # teammate's machine must trust.
 #
 # Try it:  caddy run --config Caddyfile     Check it:  caddy validate --config Caddyfile
+#
+# Joining a Caddyfile that already has sites: the block below holds global options, which must be
+# the first block of the file and can appear only once. Merge its `servers` part into the global
+# block at the top there, and append only the site block. Its timeouts apply to every site.
 
 {
 	servers {
