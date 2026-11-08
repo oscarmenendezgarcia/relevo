@@ -66,29 +66,6 @@ fn handles(v: &Value) -> String {
         .unwrap_or_default()
 }
 
-/// The person this client acts for, when a thread shows it: a `direct` open thread is waiting
-/// for a person exactly when its latest note is not theirs.
-pub fn learn_me(thread: &Value) -> Option<String> {
-    if s(&thread["kind"]) != "direct" || s(&thread["status"]) != "open" {
-        return None;
-    }
-    // `new_notes` are the notes past what reached this session: they end at the latest note.
-    let notes = thread.get("notes").or_else(|| thread.get("new_notes"))?;
-    let latest = s(&notes.as_array()?.last()?["author"]);
-    if latest.is_empty() {
-        return None;
-    }
-    if thread["waiting_for_you"] == false {
-        return Some(latest.to_string());
-    }
-    // Waiting, so the latest author is not us: in a thread of two, we are the other one.
-    match thread["participants"].as_array().map(Vec::as_slice) {
-        Some([a, b]) if s(a) == latest => Some(s(b).to_string()),
-        Some([a, b]) if s(b) == latest => Some(s(a).to_string()),
-        _ => None,
-    }
-}
-
 /// The team list: handle, name, about, and where their agents work now.
 pub fn team(team: &Value, me: Option<&str>) -> String {
     let mut out = String::from("Team (their agents' live contexts in brackets):\n");
@@ -223,9 +200,16 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
     out
 }
 
-/// A whole inbox answer.
+/// A whole inbox answer; `me` is the person the token acts for (`you`).
 pub fn inbox(v: &Value, me: Option<&str>) -> String {
-    let mut out = format!("You are session {}.\n\n", session(&v["session"]));
+    let mut out = match me {
+        Some(me) => format!(
+            "You speak for @{me} (your person): notes by @{me} are theirs, from this session or \
+             another of theirs. This is session {}.\n\n",
+            session(&v["session"])
+        ),
+        None => format!("You are session {}.\n\n", session(&v["session"])),
+    };
     out.push_str(&team(&v["team"], me));
     let threads = v["threads"]
         .as_array()
@@ -403,7 +387,6 @@ mod tests {
                 { "handle": "ana", "note": "n_1", "delivered_at": "t2", "by": { "label": "Claude Code", "context": "pagos-api" }, "claimed_by": null, "seen_by": 2 }
             ]
         });
-        assert_eq!(learn_me(&t).as_deref(), Some("oscar"));
         let out = thread(&t, Some("oscar"));
         assert!(
             out.contains("by @oscar (you) via \"cli\", t\nmine\n"),
@@ -422,21 +405,6 @@ mod tests {
     }
 
     #[test]
-    fn who_we_are_follows_from_waiting() {
-        // Waiting for us, latest by ana, two participants: we are oscar.
-        assert_eq!(learn_me(&sample()).as_deref(), Some("oscar"));
-        let mut team = sample();
-        team["kind"] = "team".into();
-        assert_eq!(learn_me(&team), None);
-        let mut three = sample();
-        three["participants"] = json!(["ana", "oscar", "bob"]);
-        assert_eq!(learn_me(&three), None);
-        let mut closed = sample();
-        closed["status"] = "closed".into();
-        assert_eq!(learn_me(&closed), None);
-    }
-
-    #[test]
     fn inbox_and_send_results() {
         let v = json!({
             "team": [
@@ -449,7 +417,10 @@ mod tests {
         });
         let out = inbox(&v, Some("oscar"));
         assert!(
-            out.starts_with("You are session \"Claude Code\" (general)."),
+            out.starts_with(
+                "You speak for @oscar (your person): notes by @oscar are theirs, from this \
+                 session or another of theirs. This is session \"Claude Code\" (general).\n"
+            ),
             "{out}"
         );
         assert!(
@@ -471,7 +442,9 @@ mod tests {
             "{out}"
         );
         let empty = json!({ "team": [], "session": { "label": "x", "context": "a" }, "threads": [], "more": 0 });
-        assert!(inbox(&empty, None).contains("Nothing new"));
+        let out = inbox(&empty, None);
+        assert!(out.starts_with("You are session \"x\" in a."), "{out}");
+        assert!(out.contains("Nothing new"), "{out}");
 
         let other =
             json!({ "thread": "r_1", "note": "n_2", "status": "open", "claimed": "other-session" });

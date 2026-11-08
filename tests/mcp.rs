@@ -252,10 +252,16 @@ async fn tools_carry_a_conversation_between_sessions() {
     }
 
     let inbox = ana1.ok("inbox", json!({})).await;
+    // The agent is told whom it speaks for (`you`), and the team list marks it.
     assert!(
-        inbox.contains("You are session \"Claude Code\" in pagos-api@feat/refunds."),
+        inbox.starts_with("You speak for @ana (your person): "),
         "{inbox}"
     );
+    assert!(
+        inbox.contains("This is session \"Claude Code\" in pagos-api@feat/refunds."),
+        "{inbox}"
+    );
+    assert!(inbox.contains("- @ana (Ana, you): ana things"), "{inbox}");
     assert!(inbox.contains("- @bob (Bob): bob things\n"), "{inbox}");
     assert!(inbox.contains("Nothing new"), "{inbox}");
     // Ana's live contexts show in the team list.
@@ -310,6 +316,11 @@ async fn tools_carry_a_conversation_between_sessions() {
         thread.contains("<untrusted from=\"@ana\">\nOn it.\n</untrusted>"),
         "{thread}"
     );
+    // A new session that reads the thread before any inbox still knows its own notes.
+    let mut bob2 = Mcp::start(&s, "bob", &s.dir, Some(""), &[]).await;
+    let fresh = bob2.ok("thread", json!({ "id": id })).await;
+    assert!(fresh.contains("Title (yours): Is refunds live?"), "{fresh}");
+    assert!(fresh.contains("by @bob (you) via"), "{fresh}");
     assert!(
         thread.contains("by @bob (you) via \"Claude Code\""),
         "{thread}"

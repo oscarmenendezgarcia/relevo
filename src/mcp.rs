@@ -94,8 +94,6 @@ pub struct ThreadParams {
 pub struct Relevo {
     /// The client, or why there is none.
     client: Result<Arc<Client>, String>,
-    /// The handle of the person this client acts for, once a thread has shown it.
-    me: Arc<Mutex<Option<String>>>,
     /// Threads pushed as channel events that no tool has shown since: if the client dropped the
     /// events (Claude Code started without the channels flag, another client), the notes would
     /// be lost, since the push delivered them. `inbox` shows them once.
@@ -108,7 +106,6 @@ impl Relevo {
     pub fn new(client: Result<Arc<Client>, String>, channel: bool) -> Self {
         Relevo {
             client,
-            me: Arc::new(Mutex::new(None)),
             pushed: Arc::new(Mutex::new(vec![])),
             channel,
             tool_router: Self::tool_router(),
@@ -117,11 +114,6 @@ impl Relevo {
 
     fn client(&self) -> Result<&Client, String> {
         self.client.as_deref().map_err(String::clone)
-    }
-
-    /// Learns who we are from these threads, and says who we are.
-    fn me(&self, threads: &[&Value]) -> Option<String> {
-        learn(&self.me, threads)
     }
 }
 
@@ -152,14 +144,6 @@ fn remember(pushed: &Mutex<Vec<Value>>, thread: &Value) {
 /// Forgets the pushed thread `id`: a tool has shown it or written in it.
 fn forget(pushed: &Mutex<Vec<Value>>, id: &str) {
     lock(pushed).retain(|t| t["id"] != id);
-}
-
-fn learn(me: &Mutex<Option<String>>, threads: &[&Value]) -> Option<String> {
-    let mut me = lock(me);
-    if me.is_none() {
-        *me = threads.iter().find_map(|t| render::learn_me(t));
-    }
-    me.clone()
 }
 
 /// A failed call as a tool error: the server's code and message, and for `UNKNOWN_PERSON` the
@@ -217,13 +201,12 @@ impl Relevo {
                        delivers the new notes."
     )]
     async fn inbox(&self, Parameters(p): Parameters<InboxParams>) -> Result<String, String> {
-        let v = self
-            .client()?
+        let client = self.client()?;
+        let v = client
             .inbox(p.all.unwrap_or(false), 0)
             .await
             .map_err(error)?;
-        let threads: Vec<&Value> = v["threads"].as_array().into_iter().flatten().collect();
-        let me = self.me(&threads);
+        let me = client.you().await;
         let mut out = render::inbox(&v, me.as_deref());
         let pushed = std::mem::take(&mut *lock(&self.pushed));
         out.push_str(&render::pushed(&pushed, me.as_deref()));
@@ -235,9 +218,11 @@ impl Relevo {
                        Does not claim it."
     )]
     async fn thread(&self, Parameters(p): Parameters<ThreadParams>) -> Result<String, String> {
-        let v = self.client()?.thread(&p.id).await.map_err(error)?;
+        let client = self.client()?;
+        let v = client.thread(&p.id).await.map_err(error)?;
         forget(&self.pushed, &p.id);
-        let me = self.me(&[&v]);
+        // Before any inbox, who we are is asked of the server, so our own notes are not fenced.
+        let me = client.you().await;
         Ok(render::thread(&v, me.as_deref()))
     }
 }
@@ -281,12 +266,12 @@ pub async fn run(channel: bool) -> anyhow::Result<()> {
             .map_err(|e| format!("{e:#}")),
         channel,
     );
-    let (me, pushed) = (server.me.clone(), server.pushed.clone());
+    let pushed = server.pushed.clone();
     let service = server.serve(rmcp::transport::stdio()).await?;
     if channel {
         match client {
             Ok(client) => {
-                tokio::spawn(push_news(client, me, pushed, service.peer().clone()));
+                tokio::spawn(push_news(client, pushed, service.peer().clone()));
             }
             Err(e) => eprintln!("relevo mcp: no channel events: {e:#}"),
         }
@@ -322,12 +307,7 @@ pub fn channel_event(thread: &Value, me: Option<&str>) -> Option<Value> {
 /// After a failure the next request does not wait, and each direct thread that it shows only as
 /// waiting is fetched with `thread`: if its latest note is recent and was not pushed, it is
 /// pushed again. A team thread whose notes were lost leaves the inbox and cannot be found again.
-async fn push_news(
-    client: Arc<Client>,
-    me: Arc<Mutex<Option<String>>>,
-    pushed: Arc<Mutex<Vec<Value>>>,
-    peer: Peer<RoleServer>,
-) {
+async fn push_news(client: Arc<Client>, pushed: Arc<Mutex<Vec<Value>>>, peer: Peer<RoleServer>) {
     let mut backoff = Duration::from_secs(1);
     // The latest note by someone else pushed for each thread.
     let mut known: HashMap<String, String> = HashMap::new();
@@ -362,7 +342,8 @@ async fn push_news(
             }
         };
         let threads: Vec<&Value> = v["threads"].as_array().into_iter().flatten().collect();
-        let me = learn(&me, &threads);
+        // Learnt from this answer's `you`: never another request in this loop.
+        let me = client.known_you();
         let mut events = 0;
         for t in &threads {
             let (thread, event) = match channel_event(t, me.as_deref()) {
