@@ -65,6 +65,8 @@ The admin commands (`invite`, `people`, `backup`, …) open the database directl
 export RELEVO_DB=~/.local/share/relevo/relevo.db
 ```
 
+`~/.profile` is read at the next login, so run the same `export` in the shell you are in now too, and check that it finds the server's database: `relevo people` runs without an error (and lists nobody yet). Without `RELEVO_DB`, the admin commands refuse to run rather than create a new `./relevo.db` the server never reads.
+
 **Settings.** Change them with a drop-in, which upgrades leave alone: `systemctl --user edit relevo` and, for example,
 
 ```
