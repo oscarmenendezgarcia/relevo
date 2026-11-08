@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use relevo::{App, Clock, api, db};
+use relevo::{App, Clock, api, client, config, db, mcp};
 
 /// Relevo: notes that your agent hands to a teammate's agent.
 #[derive(Parser)]
@@ -48,6 +48,20 @@ enum Command {
     About { handle: String, about: String },
     /// Stop a person from using Relevo (every token of theirs is revoked).
     Deactivate { handle: String },
+    /// Check a token against a server and save both for `relevo mcp` (in
+    /// ~/.config/relevo/config.json, or the file RELEVO_CONFIG names).
+    Connect {
+        url: String,
+        /// The token. Without it (or with `-`) it is read from RELEVO_TOKEN, else from one line
+        /// of stdin, so that it stays out of shell history and the process list.
+        token: Option<String>,
+    },
+    /// Serve MCP on stdin and stdout, for Claude Code and any MCP client.
+    Mcp {
+        /// Push new notes as Claude Code channel events (keeps an inbox request waiting).
+        #[arg(long)]
+        channel: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -70,9 +84,62 @@ fn print_token(handle: &str, label: &str, token: &db::NewToken) {
     println!("This secret is shown once; only its hash is stored.");
 }
 
+/// The token for `connect`: the argument, else `RELEVO_TOKEN`, else a line of stdin.
+fn connect_token(arg: Option<String>) -> Result<String> {
+    use std::io::IsTerminal;
+    if let Some(token) = arg.filter(|t| t != "-") {
+        return Ok(token);
+    }
+    if let Some(token) = config::env("RELEVO_TOKEN").filter(|t| !t.trim().is_empty()) {
+        return Ok(token);
+    }
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        eprint!("token: ");
+    }
+    let mut line = String::new();
+    stdin.read_line(&mut line)?;
+    if line.trim().is_empty() {
+        anyhow::bail!("no token: give it on stdin or in RELEVO_TOKEN");
+    }
+    Ok(line)
+}
+
+/// Checks the token with `GET /api/people` and saves the server and token.
+async fn connect(url: &str, token: &str) -> Result<()> {
+    let config = config::Config {
+        url: config::normalize_url(url)?,
+        token: token.trim().to_string(),
+    };
+    // Before the token goes out, not after.
+    if let Some(warning) = config::plain_http_warning(&config.url) {
+        eprintln!("{warning}");
+    }
+    let client = client::Client::new(&config, Some(String::new()), "/".into())?;
+    let people = client
+        .people()
+        .await
+        .map_err(|e| anyhow::anyhow!("checking the token with {}: {e}", config.url))?;
+    let path = config::path(config::env)?;
+    config::save(&path, &config)?;
+    let team = people["team"].as_array().map(Vec::len).unwrap_or(0);
+    println!(
+        "connected to {} (a team of {team}); saved to {}",
+        config.url,
+        path.display()
+    );
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    // The client commands never touch a database.
+    match cli.command {
+        Command::Connect { url, token } => return connect(&url, &connect_token(token)?).await,
+        Command::Mcp { channel } => return mcp::run(channel).await,
+        _ => {}
+    }
     let conn = db::open(&cli.db)?;
     let now = db::now_unix();
     match cli.command {
@@ -162,6 +229,7 @@ async fn main() -> Result<()> {
             let revoked = db::deactivate(&conn, &handle, now)?;
             println!("deactivated {handle}, revoked {revoked} token(s)");
         }
+        Command::Connect { .. } | Command::Mcp { .. } => unreachable!("handled above"),
     }
     Ok(())
 }
