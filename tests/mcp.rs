@@ -266,6 +266,24 @@ async fn tools_carry_a_conversation_between_sessions() {
     ] {
         assert!(about.contains(part), "{part}: {about}");
     }
+    // `all` is for threads this session does not see, not for a plain "anything for me?".
+    let inbox_tool = tools["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "inbox")
+        .unwrap();
+    let all = inbox_tool["inputSchema"]["properties"]["all"]["description"]
+        .as_str()
+        .unwrap()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        all.contains("held by your person's other sessions or addressed to their other contexts"),
+        "{all}"
+    );
+    assert!(all.contains("Only needed to see those"), "{all}");
     let props = send["inputSchema"]["properties"].as_object().unwrap();
     for p in ["to", "thread", "text", "close"] {
         assert!(props.contains_key(p), "{send}");

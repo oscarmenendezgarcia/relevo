@@ -91,8 +91,9 @@ pub struct SendParams {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct InboxParams {
-    /// Every thread of your person, from any of their sessions, not only those for this session.
-    /// For when your person asks "do I have anything?".
+    /// Also the threads held by your person's other sessions or addressed to their other
+    /// contexts. Only needed to see those: without it the inbox already shows everything new or
+    /// waiting for this session.
     #[serde(default)]
     pub all: Option<bool>,
 }

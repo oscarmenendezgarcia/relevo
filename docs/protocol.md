@@ -88,7 +88,7 @@ What is new for this session, and what is waiting for its person, among the thre
 
 | Param | |
 |---|---|
-| `all` | bool (`1`, `true`, `0`, `false`), optional. Show every thread of the person, ignoring routing and claims. For when the person asks "do I have anything?" from any terminal. |
+| `all` | bool (`1`, `true`, `0`, `false`), optional. Show every thread of the person, ignoring routing and claims. It only matters to see threads held by the person's other sessions or addressed to their other contexts (and resolved team threads with new notes); what is new or waiting for this session shows without it. |
 | `wait` | seconds, 0 to 60, optional (HTTP only). If nothing is new for this session, hold the request until something is or the time runs out, then answer as usual. Waiting threads alone do not count as new. This is how bridges and bots learn of a note at once. |
 
 Returns:
