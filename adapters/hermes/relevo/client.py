@@ -1,6 +1,6 @@
 """Relevo HTTP client shared by the platform adapter and the client tools.
 
-Settings, the fixed session id, the three calls of docs/protocol.md (sync for tools, async for the
+Settings, the session ids, the three calls of docs/protocol.md (sync for tools, async for the
 adapter) and the text rendering the agent reads. Stdlib plus httpx (a Hermes core dependency),
 imported lazily so plugin discovery stays cheap. Never logs tokens or note text.
 """
@@ -72,16 +72,56 @@ def _saved_config() -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def session_id() -> str:
-    """One fixed Relevo-Session per Hermes profile: derived from the profile's home, so a gateway
-    restart keeps its delivery state and claims, and two profiles never share one."""
+def gateway_session_id() -> str:
+    """The gateway's Relevo-Session: fixed per Hermes profile, derived from the profile's home, so a
+    gateway restart keeps its delivery state and the threads it holds (claims of a session that is
+    gone would hide those threads from a new one for an hour), and two profiles never share one."""
     from hermes_constants import hermes_home_key
 
     digest = hashlib.sha256(hermes_home_key().encode("utf-8")).hexdigest()[:32]
     return f"hermes-{digest}"
 
 
-def resolve_settings(extra: Optional[dict] = None) -> Settings:
+_process_session: Optional[str] = None
+# The connected relevo platform adapter's session, if it runs in this process.
+_gateway_session: Optional[str] = None
+
+
+def process_session_id() -> str:
+    """A random Relevo-Session for this process, picked once and kept for its life (docs/agents.md):
+    a CLI, TUI or other Hermes process is its own running agent, apart from the gateway."""
+    global _process_session
+    if _process_session is None:
+        _process_session = f"hermes-{uuid.uuid4().hex}"
+    return _process_session
+
+
+def use_gateway_session(session: Optional[str]) -> None:
+    """The relevo platform adapter, while connected, lends its session to the tools of its own turns."""
+    global _gateway_session
+    _gateway_session = session
+
+
+def _turn_platform() -> str:
+    try:
+        from gateway.session_context import get_session_env
+
+        return str(get_session_env("HERMES_SESSION_PLATFORM", "") or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def session_id() -> str:
+    """The session a tool call acts for. In a turn of the relevo gateway platform, the gateway's: the
+    agent's "On it." and its reply claim for the same session. Anywhere else (CLI, TUI, Telegram…),
+    this process's own, so the gateway and those agents can step aside for each other and neither
+    takes the other's deliveries."""
+    if _turn_platform() == "relevo":
+        return _gateway_session or gateway_session_id()
+    return process_session_id()
+
+
+def resolve_settings(extra: Optional[dict] = None, *, session: Optional[str] = None) -> Settings:
     """RELEVO_URL / RELEVO_TOKEN (profile-scoped env) → the platform's config.yaml extra → the file
     `relevo connect` writes. RELEVO_CONTEXT sets the context; without it the session is general."""
     from gateway.platforms._shared import extra_or_secret
@@ -93,7 +133,7 @@ def resolve_settings(extra: Optional[dict] = None) -> Settings:
         url = url or str(saved.get("url") or "").strip()
         token = token or str(saved.get("token") or "").strip()
     context = str(extra_or_secret(extra, "context", "RELEVO_CONTEXT") or "").strip()
-    return Settings(url=url.rstrip("/"), token=token, context=context, session=session_id())
+    return Settings(url=url.rstrip("/"), token=token, context=context, session=session or session_id())
 
 
 def configured() -> bool:

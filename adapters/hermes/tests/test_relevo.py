@@ -185,7 +185,8 @@ class Base(unittest.IsolatedAsyncioTestCase):
             await a.disconnect()
         os.environ["RELEVO_URL"] = SERVER.url
         os.environ["RELEVO_TOKEN"] = SERVER.tokens["oscar"]
-        # Leave nothing new for the next test: this profile's session reads what is left.
+        # Leave nothing new for the next test: the gateway's session and the tools' read what is left.
+        new_adapter().api.inbox()
         tools.relevo_inbox({})
 
     def make_adapter(self, **extra):
@@ -499,16 +500,68 @@ class Tools(Base):
         os.environ["RELEVO_URL"] = "http://127.0.0.1:9"
         self.assertTrue(tools.relevo_inbox({}).startswith("Error: could not reach the Relevo server"))
 
-    def test_tools_and_adapter_share_one_session(self):
-        tools.relevo_inbox({})
-        a = new_adapter()
-        self.assertEqual(a.settings.session, client.resolve_settings().session)
-        self.assertIn(a.settings.session, SERVER.sessions("oscar"))
-
     def test_tools_hide_until_configured(self):
         self.assertTrue(client.configured())
         os.environ.pop("RELEVO_TOKEN")
         self.assertFalse(client.configured())
+
+
+class Sessions(Base):
+    """docs/agents.md: one session per running agent. The gateway keeps one fixed id per profile
+    (a restart keeps its deliveries and claims); every other Hermes process has its own."""
+
+    async def test_the_gateway_and_a_cli_agent_step_aside_for_each_other(self):
+        a = self.make_adapter()
+        await a.connect()
+        tools.relevo_inbox({})
+        self.assertNotEqual(client.resolve_settings().session, a.settings.session)
+        self.assertEqual(new_adapter().settings.session, a.settings.session)  # survives a restart
+        self.assertIn(a.settings.session, SERVER.sessions("oscar"))
+        self.assertIn(client.resolve_settings().session, SERVER.sessions("oscar"))
+
+        opened = self.ana.send(to=["oscar"], text="Who owns the refunds cron?")
+        await self.until(lambda: len(self.events) == 1)
+        claimed = await a.send(opened["thread"], "On it.", metadata=FINAL)
+        self.assertEqual(claimed.raw_response["claimed"], "this-session")
+        # Oscar's Hermes CLI agent saw it too (relevo_inbox all=true) and would also take it.
+        self.assertIn("Who owns the refunds cron?", tools.relevo_inbox({"all": True}))
+        cli = tools.relevo_send({"thread": opened["thread"], "text": "On it."})
+        self.assertIn("Another of your person's sessions holds this thread: step aside", cli)
+
+    async def test_tools_in_a_relevo_turn_act_for_the_gateway(self):
+        from gateway.session_context import clear_session_vars, set_session_vars
+
+        a = self.make_adapter()
+        await a.connect()
+        opened = self.ana.send(to=["oscar"], text="Can you rerun the refunds export?")
+        await self.until(lambda: len(self.events) == 1)
+        tokens = set_session_vars(platform="relevo", chat_id=opened["thread"])
+        try:
+            on_it = tools.relevo_send({"thread": opened["thread"], "text": "On it."})
+        finally:
+            clear_session_vars(tokens)
+        self.assertIn("You hold this thread.", on_it)
+        done = await a.send(opened["thread"], "Done: the export is in the bucket.", metadata=FINAL)
+        self.assertEqual(done.raw_response["claimed"], "this-session")
+        # The same tool in a Telegram turn of the same gateway is not the relevo chat's agent.
+        tokens = set_session_vars(platform="telegram", chat_id="12345")
+        try:
+            elsewhere = tools.relevo_send({"thread": opened["thread"], "text": "Also on it."})
+        finally:
+            clear_session_vars(tokens)
+        self.assertIn("Another of your person's sessions holds this thread", elsewhere)
+
+    async def test_reading_the_inbox_elsewhere_leaves_the_gateway_its_notes(self):
+        a = self.make_adapter()
+        await a.connect()
+        await asyncio.sleep(0.3)
+        await a.disconnect()  # a gateway restart, or a backoff
+        self.ana.send(to=["oscar"], text="Sent while the gateway was away")
+        self.assertIn("Sent while the gateway was away", tools.relevo_inbox({}))
+        b = self.make_adapter()
+        await b.connect()
+        await self.until(lambda: len(self.events) == 1)
+        self.assertIn("Sent while the gateway was away", self.events[0].text)
 
 
 class Loop(Base):
@@ -527,8 +580,11 @@ class Loop(Base):
         self.ana.send(to=["oscar"], text="Anyone there?")
         await asyncio.sleep(1.0)
         self.assertEqual(self.events, [])
-        # Nothing fetched it after the disconnect: it is still new for this session.
-        self.assertIn("Anyone there?", tools.relevo_inbox({}))
+        # Nothing fetched it after the disconnect: the gateway's session gets it once it is back.
+        b = self.make_adapter()
+        await b.connect()
+        await self.until(lambda: len(self.events) == 1)
+        self.assertIn("Anyone there?", self.events[0].text)
 
     async def test_errors_back_off_and_the_loop_recovers(self):
         a = self.make_adapter()

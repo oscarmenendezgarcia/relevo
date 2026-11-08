@@ -2,7 +2,8 @@
 
 connect() keeps one waiting inbox request open (wait=55) and backs off on errors; each thread with
 new notes becomes a MessageEvent from the author of its latest note; send() writes the agent's reply
-in that thread. One fixed Relevo-Session per profile, general unless RELEVO_CONTEXT is set.
+in that thread. One fixed Relevo-Session per profile (see client.gateway_session_id), general unless
+RELEVO_CONTEXT is set.
 """
 
 from __future__ import annotations
@@ -87,7 +88,7 @@ class RelevoAdapter(BasePlatformAdapter):
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform(PLATFORM_NAME))
-        self.settings = client.resolve_settings(config.extra or {})
+        self.settings = client.resolve_settings(config.extra or {}, session=client.gateway_session_id())
         self.api = client.Api(self.settings)
         self._http: Any = None
         self._poll_task: Optional[asyncio.Task] = None
@@ -108,12 +109,14 @@ class RelevoAdapter(BasePlatformAdapter):
         self._ensure_http()
         self._stop = asyncio.Event()
         self._poll_task = asyncio.create_task(self._poll_loop(), name="relevo-inbox")
+        client.use_gateway_session(self.settings.session)
         self._mark_connected()
         logger.info("[relevo] connected; session %s, context %s", self.settings.session,
                     self.settings.context or "general")
         return True
 
     async def disconnect(self) -> None:
+        client.use_gateway_session(None)
         if self._stop is not None:
             self._stop.set()
         task, self._poll_task = self._poll_task, None
