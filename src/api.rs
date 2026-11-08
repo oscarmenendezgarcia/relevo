@@ -618,11 +618,13 @@ async fn inbox(
 ) -> Result<Json<Value>, ApiError> {
     let (all, wait) = inbox_params(query)?;
     if wait > 0 {
-        let _slot = app.wait_slot(&caller.token_id).ok_or_else(|| {
-            ApiError::rate_limited(&format!(
+        let Some(_slot) = app.wait_slot(&caller.token_id) else {
+            // Past its parameter checks, a refused request still counts as seen.
+            as_session(&app, &caller, true, |_, _, _| Ok(()))?;
+            return Err(ApiError::rate_limited(&format!(
                 "at most {MAX_WAITS_PER_TOKEN} waiting inbox requests per token; wait for one to answer"
-            ))
-        })?;
+            )));
+        };
         // Subscribed before the first look, so a note landing in between still wakes us.
         let mut news = app.news(caller.person_id);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(wait);
@@ -803,9 +805,15 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<(SendResult, Ve
             "text is required (it may be left out only to close a thread)",
         ));
     }
+    let to = req
+        .to
+        .as_deref()
+        .map(|to| recipients(to, &caller.handle))
+        .transpose()?;
 
+    // Only a request past its own parameter checks counts as seen.
     as_session(app, caller, true, |tx, session, now| {
-        write_as(tx, app, caller, session, &req, now)
+        write_as(tx, app, caller, session, &req, to.as_ref(), now)
     })
 }
 
@@ -816,6 +824,7 @@ fn write_as(
     caller: &Caller,
     session: &Session,
     req: &SendRequest,
+    to: Option<&To>,
     now: i64,
 ) -> Result<(SendResult, Vec<i64>), ApiError> {
     // Keys expire 24 hours after the send that used them. Forgetting them here keeps the table
@@ -847,7 +856,7 @@ fn write_as(
 
     // `caught_up`: every note of the thread had reached this session before it wrote, the
     // person's own from other sessions included.
-    let (thread_id, caught_up) = match (&req.to, &req.thread) {
+    let (thread_id, caught_up) = match (to, &req.thread) {
         (Some(to), _) => {
             let text = req.text.as_deref().unwrap_or_default();
             (open_thread(tx, app, caller, to, text, now)?, true)
@@ -977,67 +986,51 @@ fn open_thread(
     conn: &Connection,
     app: &App,
     caller: &Caller,
-    to: &[String],
+    to: &To,
     text: &str,
     now: i64,
 ) -> Result<String, ApiError> {
-    let addresses = addresses(to)?;
-    let is_team = addresses.iter().any(|(h, _)| h == "team");
-
     // The others, each with the context the thread is addressed to for them.
-    let (kind, others): (&str, Vec<(i64, Option<String>)>) = if is_team {
-        if addresses.len() != 1 {
-            return Err(ApiError::bad_request(
-                "'@team' must be the only entry of 'to'",
-            ));
-        }
-        if addresses[0].1.is_some() {
-            return Err(ApiError::bad_request("'@team' takes no context"));
-        }
-        let others: Vec<(i64, Option<String>)> = conn
-            .prepare("SELECT id FROM people WHERE active = 1 AND id != ?1 ORDER BY handle")?
-            .query_map([caller.person_id], |r| Ok((r.get(0)?, None)))?
-            .collect::<rusqlite::Result<_>>()?;
-        if others.is_empty() {
-            return Err(ApiError::no_recipients());
-        }
-        let asked: i64 = conn.query_row(
-            "SELECT count(*) FROM threads
-             WHERE opener_id = ?1 AND kind = 'team' AND created_at > ?2",
-            params![caller.person_id, now - 24 * 3600],
-            |r| r.get(0),
-        )?;
-        if asked >= i64::from(app.team_questions_per_day) {
-            return Err(ApiError::team_limit(app.team_questions_per_day));
-        }
-        ("team", others)
-    } else {
-        if addresses.is_empty() || addresses.len() > MAX_RECIPIENTS {
-            return Err(ApiError::bad_request(
-                "'to' needs 1 to 20 handles, or [\"@team\"]",
-            ));
-        }
-        let mut others = Vec::new();
-        for (handle, context) in addresses {
-            if handle == caller.handle {
-                return Err(ApiError::bad_request("you cannot send a note to yourself"));
+    let (kind, others): (&str, Vec<(i64, Option<String>)>) = match to {
+        To::Team => {
+            let others: Vec<(i64, Option<String>)> = conn
+                .prepare("SELECT id FROM people WHERE active = 1 AND id != ?1 ORDER BY handle")?
+                .query_map([caller.person_id], |r| Ok((r.get(0)?, None)))?
+                .collect::<rusqlite::Result<_>>()?;
+            if others.is_empty() {
+                return Err(ApiError::no_recipients());
             }
-            let id: Option<i64> = conn
-                .query_row(
-                    "SELECT id FROM people WHERE handle = ?1 AND active = 1",
-                    [&handle],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            match id {
-                Some(id) => others.push((id, context)),
-                None => {
-                    let valid = serde_json::to_value(team(conn, now)?).unwrap_or_default();
-                    return Err(ApiError::unknown_person(&handle, valid));
+            let asked: i64 = conn.query_row(
+                "SELECT count(*) FROM threads
+             WHERE opener_id = ?1 AND kind = 'team' AND created_at > ?2",
+                params![caller.person_id, now - 24 * 3600],
+                |r| r.get(0),
+            )?;
+            if asked >= i64::from(app.team_questions_per_day) {
+                return Err(ApiError::team_limit(app.team_questions_per_day));
+            }
+            ("team", others)
+        }
+        To::People(addresses) => {
+            let mut others = Vec::new();
+            for (handle, context) in addresses {
+                let id: Option<i64> = conn
+                    .query_row(
+                        "SELECT id FROM people WHERE handle = ?1 AND active = 1",
+                        [handle],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                match id {
+                    Some(id) => others.push((id, context.clone())),
+                    None => {
+                        let valid = serde_json::to_value(team(conn, now)?).unwrap_or_default();
+                        return Err(ApiError::unknown_person(handle, valid));
+                    }
                 }
             }
+            ("direct", others)
         }
-        ("direct", others)
     };
 
     let id = random_id("r_");
@@ -1053,6 +1046,39 @@ fn open_thread(
         add.execute(params![id, person, context])?;
     }
     Ok(id)
+}
+
+/// Whom `send` opens a thread for.
+enum To {
+    Team,
+    /// (handle, context) pairs, the writer not among them.
+    People(Vec<(String, Option<String>)>),
+}
+
+/// `to`, checked as far as it can be without the database: `@team` alone and without a context,
+/// or 1 to 20 people other than the writer (`me`).
+fn recipients(to: &[String], me: &str) -> Result<To, ApiError> {
+    let addresses = addresses(to)?;
+    if addresses.iter().any(|(h, _)| h == "team") {
+        if addresses.len() != 1 {
+            return Err(ApiError::bad_request(
+                "'@team' must be the only entry of 'to'",
+            ));
+        }
+        if addresses[0].1.is_some() {
+            return Err(ApiError::bad_request("'@team' takes no context"));
+        }
+        return Ok(To::Team);
+    }
+    if addresses.is_empty() || addresses.len() > MAX_RECIPIENTS {
+        return Err(ApiError::bad_request(
+            "'to' needs 1 to 20 handles, or [\"@team\"]",
+        ));
+    }
+    if addresses.iter().any(|(h, _)| h == me) {
+        return Err(ApiError::bad_request("you cannot send a note to yourself"));
+    }
+    Ok(To::People(addresses))
 }
 
 /// `to`, read as (handle, context) pairs: without leading `@`, lowercased, `equipo` read as

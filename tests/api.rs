@@ -1474,6 +1474,61 @@ async fn failed_requests_and_replays_still_count_as_seen() {
     assert_eq!(seen(T0), vec![(Some("pagos-api".to_string()), T0 + 3600)]);
 }
 
+#[tokio::test]
+async fn a_request_counts_as_seen_once_past_its_own_parameter_checks() {
+    let t = team(&["ana", "bob"]);
+    let sessions = || {
+        db::list_sessions(&t.app.db(), Some("bob"), T0)
+            .unwrap()
+            .len()
+    };
+    let bob = t.agent("bob", "term-0001", "pagos-api");
+    // Requests that fail their own parameter checks are not seen.
+    for body in [
+        json!({ "to": ["ana/-x"], "text": "q" }),
+        json!({ "to": ["ana/pagos", "ana"], "text": "q" }),
+        json!({ "to": ["bob"], "text": "q" }),
+        json!({ "to": ["@team", "ana"], "text": "q" }),
+        json!({ "to": ["@team/pagos"], "text": "q" }),
+        json!({ "to": [], "text": "q" }),
+        json!({ "to": ["ana"], "text": "  " }),
+        json!({ "to": ["ana"], "text": "q", "key": "" }),
+        json!({ "to": ["ana"], "thread": "r_aaaaaaaaaaaa", "text": "q" }),
+        json!({ "to": ["ana"] }),
+        json!({ "to": ["ana"], "text": "q", "extra": 1 }),
+        json!(["ana"]),
+    ] {
+        let (status, v) = bob.send(body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(code(&v), "BAD_REQUEST", "{body}");
+    }
+    for uri in ["/api/inbox?all=yes", "/api/inbox?wait=61", "/api/inbox?x=1"] {
+        assert_eq!(bob.get(uri).await.0, StatusCode::BAD_REQUEST, "{uri}");
+    }
+    assert_eq!(sessions(), 0);
+    // Past them, a request is seen whatever happens next.
+    let (_, v) = bob.send(json!({ "to": ["zed"], "text": "q" })).await;
+    assert_eq!(code(&v), "UNKNOWN_PERSON");
+    assert_eq!(sessions(), 1);
+    let waiters: Vec<_> = (0..10)
+        .map(|i| {
+            let bob = t.agent("bob", &format!("bridge-{i:02}"), "");
+            tokio::spawn(async move { bob.get("/api/inbox?wait=60").await })
+        })
+        .collect();
+    until_waiting(&t.app, 10).await;
+    assert_eq!(sessions(), 11);
+    let (status, _) = t
+        .agent("bob", "bridge-10", "")
+        .get("/api/inbox?wait=1")
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(sessions(), 12);
+    for waiter in waiters {
+        waiter.abort();
+    }
+}
+
 // ---------- routing, claims and delivery per session ----------
 
 /// The texts of the new notes of `id` in an inbox, or `None` when it does not show `id`.
