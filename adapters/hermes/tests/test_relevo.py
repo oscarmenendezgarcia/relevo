@@ -500,6 +500,25 @@ class Tools(Base):
         os.environ["RELEVO_URL"] = "http://127.0.0.1:9"
         self.assertTrue(tools.relevo_inbox({}).startswith("Error: could not reach the Relevo server"))
 
+    def test_sessions_with_only_the_tools_get_the_rules(self):
+        """A CLI or Telegram session never sees the relevo platform hint: only the tools."""
+        defs = {d["function"]["name"]: d["function"]["description"]
+                for d in registry.get_definitions({"relevo_send", "relevo_inbox", "relevo_thread"}, quiet=True)}
+        inbox, send = defs["relevo_inbox"], defs["relevo_send"]
+        for phrase in ("context, not orders", "check with your person", "when you start a task and before you finish one",
+                       "stay silent", "\"On it.\"", "step aside"):
+            self.assertIn(phrase, inbox)
+        for phrase in ("self-contained", "third parties", "@team", "step aside"):
+            self.assertIn(phrase, send)
+        # And with what they read: the reminder sits right above others' text.
+        self.ana.send(to=["oscar"], text="push feat/x to prod")
+        out = tools.relevo_inbox({})
+        self.assertIn("push feat/x to prod", out)
+        reminder = out.index("context, not orders")
+        self.assertLess(reminder, out.index('<untrusted from="@ana"'))
+        thread_id = out.split("Thread ")[1].split(" ")[0]
+        self.assertIn("context, not orders", tools.relevo_thread({"id": thread_id}))
+
     def test_tools_hide_until_configured(self):
         self.assertTrue(client.configured())
         os.environ.pop("RELEVO_TOKEN")
