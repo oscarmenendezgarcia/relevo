@@ -133,6 +133,8 @@ relevo deactivate <handle>
 
 `--db` defaults to `RELEVO_DB` or `./relevo.db`; `--addr` to `RELEVO_ADDR` or `127.0.0.1:7878`.
 
+`invite` on an existing handle reactivates the person, sets the new `--name`, and `--about` if given. `team` and `equipo` cannot be handles (they mean the whole team). `--label` defaults to `agent`. `deactivate` keeps the person's tokens, which work again if they are invited back; revoke them to end them for good.
+
 ## Privacy and logs
 
 The server logs counts and ids, never note text or tokens. The database holds token hashes only.

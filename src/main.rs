@@ -1,0 +1,116 @@
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+use relevo::db;
+
+/// Relevo: notes that your agent hands to a teammate's agent.
+#[derive(Parser)]
+#[command(version)]
+struct Cli {
+    /// SQLite database file.
+    #[arg(long, global = true, env = "RELEVO_DB", default_value = "./relevo.db")]
+    db: String,
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Create a person (or reuse and reactivate one) and print a new token once.
+    Invite {
+        handle: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        about: Option<String>,
+        #[arg(long, default_value = "agent")]
+        label: String,
+    },
+    /// Manage agent tokens.
+    Token {
+        #[command(subcommand)]
+        command: TokenCommand,
+    },
+    /// List everyone, active or not.
+    People,
+    /// Set the one line on what a person (or their agent) knows or looks after.
+    About { handle: String, about: String },
+    /// Stop a person from using Relevo (their tokens stop working).
+    Deactivate { handle: String },
+}
+
+#[derive(Subcommand)]
+enum TokenCommand {
+    /// Issue another token for a person (another agent).
+    Add {
+        handle: String,
+        #[arg(long)]
+        label: String,
+    },
+    /// List tokens, of everyone or of one person.
+    List { handle: Option<String> },
+    /// Revoke a token by id.
+    Revoke { id: String },
+}
+
+fn print_token(handle: &str, label: &str, token: &db::NewToken) {
+    println!("token {} for {handle} ({label})", token.id);
+    println!("{}", token.secret);
+    println!("This secret is shown once; only its hash is stored.");
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let conn = db::open(&cli.db)?;
+    let now = db::now_unix();
+    match cli.command {
+        Command::Invite {
+            handle,
+            name,
+            about,
+            label,
+        } => {
+            let token = db::invite(&conn, &handle, &name, about.as_deref(), &label, now)?;
+            print_token(&handle, &label, &token);
+        }
+        Command::Token { command } => match command {
+            TokenCommand::Add { handle, label } => {
+                let token = db::add_token(&conn, &handle, &label, now)?;
+                print_token(&handle, &label, &token);
+            }
+            TokenCommand::List { handle } => {
+                for t in db::list_tokens(&conn, handle.as_deref())? {
+                    let state = match t.revoked_at {
+                        Some(at) => format!("revoked {}", db::rfc3339(at)),
+                        None => "active".to_string(),
+                    };
+                    println!(
+                        "{}\t{}\t{}\t{}\t{state}",
+                        t.id,
+                        t.handle,
+                        t.label,
+                        db::rfc3339(t.created_at)
+                    );
+                }
+            }
+            TokenCommand::Revoke { id } => {
+                db::revoke_token(&conn, &id, now)?;
+                println!("revoked {id}");
+            }
+        },
+        Command::People => {
+            for p in db::list_people(&conn)? {
+                let state = if p.active { "active" } else { "inactive" };
+                println!("{}\t{}\t{state}\t{}", p.handle, p.name, p.about);
+            }
+        }
+        Command::About { handle, about } => {
+            db::set_about(&conn, &handle, &about)?;
+            println!("{handle}: {about}");
+        }
+        Command::Deactivate { handle } => {
+            db::deactivate(&conn, &handle)?;
+            println!("deactivated {handle}");
+        }
+    }
+    Ok(())
+}
