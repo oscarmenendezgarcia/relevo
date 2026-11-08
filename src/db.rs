@@ -71,12 +71,27 @@ pub const RESERVED_HANDLES: [&str; 2] = ["team", "equipo"];
 
 /// Opens (or creates) the database and applies the schema. `":memory:"` works for tests.
 pub fn open(path: &str) -> Result<Connection> {
+    create_private(path).with_context(|| format!("creating database {path}"))?;
     let conn = Connection::open(path).with_context(|| format!("opening database {path}"))?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.execute_batch(SCHEMA)?;
     Ok(conn)
+}
+
+/// Creates a missing database file readable by the server user only: it holds every note in
+/// plain text. SQLite gives the `-wal` and `-shm` files the same mode. Existing files are left as
+/// they are.
+fn create_private(path: &str) -> std::io::Result<()> {
+    if path == ":memory:" {
+        return Ok(());
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path).map(drop)
 }
 
 pub fn now_unix() -> i64 {
@@ -318,6 +333,26 @@ mod tests {
         assert_eq!(people[0].name, "Ana B");
         assert_eq!(list_tokens(&conn, Some("ana")).unwrap().len(), 2);
         assert!(invite(&conn, "team", "T", None, "x", 0).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn database_files_are_private_to_the_server_user() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(random_id("relevo-test-"));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("relevo.db");
+        let conn = open(path.to_str().unwrap()).unwrap();
+        invite(&conn, "ana", "Ana", None, "laptop", 0).unwrap();
+        for file in ["relevo.db", "relevo.db-wal", "relevo.db-shm"] {
+            let mode = std::fs::metadata(dir.join(file))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "{file}");
+        }
+        drop(conn);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

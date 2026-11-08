@@ -149,7 +149,7 @@ relevo deactivate <handle>
 
 ## Privacy and logs
 
-The server logs counts and ids, never note text or tokens. The database holds token hashes only.
+The server logs counts and ids, never note text or tokens. The database holds token hashes only, but note text in plain form, so the server creates it (and SQLite its `-wal` and `-shm` files) readable by the server's user only (mode 0600).
 
 ## Later (not v0)
 
