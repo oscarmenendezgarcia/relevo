@@ -82,10 +82,19 @@ struct Delivery {
     delivered_at: Option<String>,
     /// The session the note reached.
     by: Option<SessionOut>,
-    /// The session of theirs that claimed the thread, with its context when it claimed it.
-    claimed_by: Option<SessionOut>,
+    /// The session of theirs that claimed the thread, with its context when it claimed it and
+    /// since when it holds it.
+    claimed_by: Option<ClaimOut>,
     /// How many of their sessions have `note`.
     seen_by: i64,
+}
+
+/// Who holds a thread for a participant, and since when.
+#[derive(Serialize)]
+struct ClaimOut {
+    label: String,
+    context: Option<String>,
+    since: String,
 }
 
 #[derive(Serialize)]
@@ -119,6 +128,9 @@ struct SendRequest {
     text: Option<String>,
     #[serde(default)]
     close: bool,
+    /// With `thread`: claims it for this session, without a note when there is no `text`.
+    #[serde(default)]
+    claim: bool,
     key: Option<String>,
 }
 
@@ -560,12 +572,12 @@ fn claim(claimed_by: Option<i64>, session: &Session) -> Option<&'static str> {
 
 /// For each participant, in order: the latest note by someone else that reached one of their
 /// sessions, which session it reached first, which session claimed the thread (each with its
-/// context then), and how many of their sessions have that note: those without a row of their own
+/// context then) and when, and how many of their sessions have that note: those without a row of their own
 /// have what their person has.
 fn delivery(conn: &Connection, thread: &str) -> Result<Vec<Delivery>, ApiError> {
     let mut stmt = conn.prepare(
         "SELECT pe.handle, n.id, p.delivered_at, p.delivered_label, p.delivered_context,
-                ct.label, p.claimed_context,
+                ct.label, p.claimed_context, p.claimed_at,
                 (SELECT count(*) FROM sessions s
                  LEFT JOIN session_threads st ON st.session_id = s.id AND st.thread_id = p.thread_id
                  WHERE s.person_id = p.person_id
@@ -588,8 +600,15 @@ fn delivery(conn: &Connection, thread: &str) -> Result<Vec<Delivery>, ApiError> 
             note: r.get(1)?,
             delivered_at: r.get::<_, Option<i64>>(2)?.map(rfc3339),
             by: session(r.get(3)?, r.get(4)?),
-            claimed_by: session(r.get(5)?, r.get(6)?),
-            seen_by: r.get(7)?,
+            claimed_by: match (r.get(5)?, r.get::<_, Option<i64>>(7)?) {
+                (Some(label), Some(at)) => Some(ClaimOut {
+                    label,
+                    context: r.get(6)?,
+                    since: rfc3339(at),
+                }),
+                _ => None,
+            },
+            seen_by: r.get(8)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -871,9 +890,14 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<(SendResult, Ve
             "give exactly one of 'to' and 'thread'",
         ));
     }
-    if req.text.is_none() && !(req.thread.is_some() && req.close) {
+    if req.claim && req.to.is_some() {
         return Err(ApiError::bad_request(
-            "text is required (it may be left out only to close a thread)",
+            "claim goes with 'thread' only: opening a thread claims nothing",
+        ));
+    }
+    if req.text.is_none() && !(req.thread.is_some() && (req.close || req.claim)) {
+        return Err(ApiError::bad_request(
+            "text is required (it may be left out only to close or claim a thread)",
         ));
     }
     let to = req
@@ -994,29 +1018,16 @@ fn write_as(
             if caught_up {
                 deliver(tx, session, &thread_id, seq, now)?;
             }
-            // Writing in an existing thread claims it for this session, unless another session
-            // of the person holds it: a claim is never taken from a session that still has it.
-            // (A lapsed claim was already ended when this request was seen.) A note from the
-            // holder is not a new claim: `claimed_context` stays the context it claimed in.
-            // Opening a thread claims nothing: the asker has nothing to take on, and the answers
-            // must reach the person's next session too.
-            if to.is_none() {
-                let claimed = tx.execute(
-                    "UPDATE participants SET claimed_by = ?3,
-                            claimed_context = CASE WHEN claimed_by IS NULL THEN ?4
-                                                   ELSE claimed_context END
-                     WHERE thread_id = ?1 AND person_id = ?2
-                       AND (claimed_by IS NULL OR claimed_by = ?3)",
-                    params![thread_id, caller.person_id, session.id, session.context],
-                )?;
-                if claimed > 0 {
-                    tx.execute("UPDATE sessions SET claims = 1 WHERE id = ?1", [session.id])?;
-                }
-            }
             Some(id)
         }
         None => None,
     };
+    // Writing in an existing thread claims it for this session, and so does `claim` without a
+    // note. Opening a thread claims nothing: the asker has nothing to take on, and the answers
+    // must reach the person's next session too. Closing without text does not claim.
+    if to.is_none() && (note_id.is_some() || req.claim) {
+        take_claim(tx, caller, session, &thread_id, now)?;
+    }
 
     if req.close {
         tx.execute(
@@ -1059,6 +1070,37 @@ fn write_as(
         None => Vec::new(),
     };
     Ok((result, woken))
+}
+
+/// Claims the thread for this session, unless another session of the person holds it: a claim is
+/// never taken from a session that still has it. (A lapsed claim was already ended when this
+/// request was seen.) Claiming again is not a new claim: `claimed_context` and `claimed_at` stay
+/// the context it claimed in and when.
+fn take_claim(
+    tx: &Connection,
+    caller: &Caller,
+    session: &Session,
+    thread_id: &str,
+    now: i64,
+) -> Result<(), ApiError> {
+    let claimed = tx.execute(
+        "UPDATE participants SET claimed_by = ?3,
+                claimed_context = CASE WHEN claimed_by IS NULL THEN ?4 ELSE claimed_context END,
+                claimed_at = CASE WHEN claimed_by IS NULL THEN ?5 ELSE claimed_at END
+         WHERE thread_id = ?1 AND person_id = ?2
+           AND (claimed_by IS NULL OR claimed_by = ?3)",
+        params![
+            thread_id,
+            caller.person_id,
+            session.id,
+            session.context,
+            now
+        ],
+    )?;
+    if claimed > 0 {
+        tx.execute("UPDATE sessions SET claims = 1 WHERE id = ?1", [session.id])?;
+    }
+    Ok(())
 }
 
 /// Creates a `direct` or `team` thread with its participants (the writer first). Returns its id.

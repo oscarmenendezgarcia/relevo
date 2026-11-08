@@ -55,8 +55,8 @@ CREATE INDEX IF NOT EXISTS sessions_claiming ON sessions(last_seen) WHERE claims
 CREATE INDEX IF NOT EXISTS threads_by_opener ON threads(opener_id, kind, created_at);
 -- One row per participant of a thread; rows are inserted in participant order, which rowid keeps.
 -- `context` is the context the thread was addressed to for this person; `claimed_by` the session
--- of theirs that claimed it (the first to write while nobody held it), and `claimed_context` its
--- context then. `delivered_seq` is the latest note that reached any of their sessions;
+-- of theirs that claimed it (the first to write, or to claim without a note, while nobody held
+-- it), `claimed_context` its context then and `claimed_at` when. `delivered_seq` is the latest note that reached any of their sessions;
 -- `delivered_at`, `_label` and `_context` say when the latest one by someone else first did, and
 -- which session (its label and context then). `last_seq` is the thread's latest note, `last_other_seq` the
 -- latest one not theirs; `has_new` (no session of theirs has that one),
@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS participants (
     context           TEXT,
     claimed_by        INTEGER REFERENCES sessions(id),
     claimed_context   TEXT,
+    claimed_at        INTEGER,
     delivered_seq     INTEGER,
     delivered_at      INTEGER,
     delivered_label   TEXT,
@@ -171,7 +172,7 @@ pub const CLAIM_LAPSE_SECS: i64 = 15 * 60;
 /// The layout of `SCHEMA`, kept in SQLite's `user_version`. v0 does not migrate: a database with
 /// another layout is refused, never half-updated (`CREATE TABLE IF NOT EXISTS` would skip the
 /// old tables and fail on their missing columns).
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// Opens (or creates) the database and applies the schema. `":memory:"` works for tests.
 pub fn open(path: &str) -> Result<Connection> {
@@ -454,7 +455,8 @@ pub fn forget_sessions(conn: &Connection, ids: &[i64]) -> rusqlite::Result<()> {
 /// Ends every claim of the session: those threads count as unclaimed for its person.
 pub fn release_claims(conn: &Connection, id: i64) -> rusqlite::Result<()> {
     conn.prepare_cached(
-        "UPDATE participants SET claimed_by = NULL, claimed_context = NULL WHERE claimed_by = ?1",
+        "UPDATE participants SET claimed_by = NULL, claimed_context = NULL, claimed_at = NULL
+         WHERE claimed_by = ?1",
     )?
     .execute([id])?;
     conn.prepare_cached("UPDATE session_threads SET claimed_by = NULL WHERE claimed_by = ?1")?
