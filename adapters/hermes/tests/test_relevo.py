@@ -68,6 +68,11 @@ class _Tools:
 tools = _Tools()
 
 
+# What the base adapter passes with a final reply (_mark_notify_metadata); progress, interim
+# messages, busy acknowledgements and error notices go without it.
+FINAL = {"notify": True}
+
+
 def new_adapter(**extra):
     return ENTRY.adapter_factory(PlatformConfig(enabled=True, extra=extra))
 
@@ -264,7 +269,7 @@ class Outbound(Base):
         opened = self.ana.send(to=["oscar"], text="Is the refunds endpoint idempotent?")
         await self.until(lambda: len(self.events) == 1)
 
-        result = await a.send(self.events[0].source.chat_id, "Yes: it takes an idempotency key.")
+        result = await a.send(self.events[0].source.chat_id, "Yes: it takes an idempotency key.", metadata=FINAL)
         self.assertTrue(result.success, result.error)
         self.assertEqual(result.raw_response["claimed"], "this-session")
         notes = self.ana.thread(opened["thread"])["notes"]
@@ -273,10 +278,10 @@ class Outbound(Base):
         self.assertEqual(notes[-1]["via"], "Hermes")
         self.assertEqual(notes[-1]["id"], result.message_id)
 
-        # The gateway's own busy acknowledgements are not notes.
+        # The gateway's own busy acknowledgements (sent without the final-reply mark) are not notes.
         self.assertTrue((await a.send(opened["thread"], "⏳ Queued for the next turn")).success)
         # Nor is a silence marker.
-        self.assertTrue((await a.send(opened["thread"], "[SILENT]")).success)
+        self.assertTrue((await a.send(opened["thread"], "[SILENT]", metadata=FINAL)).success)
         self.assertEqual(len(self.ana.thread(opened["thread"])["notes"]), 2)
         # Our own reply does not come back as a message.
         await asyncio.sleep(1.0)
@@ -309,10 +314,120 @@ class Outbound(Base):
         await a.connect()
         opened = self.ana.send(to=["oscar"], text="Done, closing.", close=True)
         await self.until(lambda: len(self.events) == 1)
-        result = await a.send(opened["thread"], "Thanks!")
+        result = await a.send(opened["thread"], "Thanks!", metadata=FINAL)
         self.assertFalse(result.success)
         self.assertIn("THREAD_CLOSED", result.error)
         self.assertEqual(result.error_kind, "forbidden")
+
+    async def test_a_refused_final_is_neither_retried_nor_rewritten(self):
+        """The base class would retry it and then send a plain-text copy with a gateway banner."""
+        a = self.make_adapter()
+        await a.connect()
+        opened = self.ana.send(to=["oscar"], text="Busy thread")
+        await self.until(lambda: len(self.events) == 1)
+        bodies: list = []
+        real = a.api.asend
+
+        async def counted(http, payload):
+            bodies.append(payload)
+            return await real(http, payload)
+
+        a.api.asend = counted
+        # The loop guard: 20 notes per thread per hour.
+        for i in range(19):
+            self.ana.send(thread=opened["thread"], text=f"note {i}")
+        result = await a._send_with_retry(chat_id=opened["thread"], content="My answer.", metadata=FINAL)
+        self.assertFalse(result.success)
+        self.assertIn("THREAD_BUSY", result.error)
+        self.assertEqual(len(bodies), 1)
+        self.assertEqual(bodies[0]["text"], "My answer.")
+
+    async def test_only_the_final_reply_becomes_a_note_whatever_the_owner_display_config(self):
+        """The owner's global display keys beat the platform's minimal tier in Hermes' resolver."""
+        from gateway.display_config import resolve_display_setting
+        from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
+
+        owner = {"display": {"tool_progress": "all", "interim_assistant_messages": True,
+                             "long_running_notifications": True, "busy_ack_detail": True}}
+        self.assertEqual(resolve_display_setting(owner, "relevo", "tool_progress"), "all")
+        self.assertTrue(resolve_display_setting(owner, "relevo", "interim_assistant_messages"))
+
+        a = self.make_adapter()
+        await a.connect()
+        opened = self.ana.send(to=["oscar"], text="Can you check the nightly job?")
+        await self.until(lambda: len(self.events) == 1)
+        chat = opened["thread"]
+        # Tool progress goes out as plain sends with the thread metadata (no edit_message here).
+        for line in ("💻 terminal: \"ls /var/log\"", "📖 read_file: \"cron.log\"", "⏳ Still working... (10 min)"):
+            self.assertTrue((await a.send(chat, line, metadata={"thread_id": None})).success)
+        # Interim commentary goes through the stream consumer, as the gateway wires it.
+        consumer = GatewayStreamConsumer(a, chat, StreamConsumerConfig(cursor=""))
+        consumer.stream_deltas_enabled = False
+        runner = asyncio.create_task(consumer.run())
+        consumer.on_commentary("Let me check the logs first.")
+        consumer.finish()
+        await asyncio.wait_for(runner, 5)
+        # The final reply carries the base adapter's notify mark.
+        final = await a.send(chat, "The nightly job failed at 03:02: disk full on /var.", metadata=FINAL)
+        self.assertTrue(final.success, final.error)
+        notes = self.ana.thread(chat)["notes"]
+        self.assertEqual([n["text"] for n in notes[1:]], ["The nightly job failed at 03:02: disk full on /var."])
+
+    async def test_a_failed_turn_writes_nothing_and_claims_nothing(self):
+        a = new_adapter()
+        self.adapters.append(a)
+        calls: list = []
+
+        async def agent(event):
+            calls.append(event)
+            raise RuntimeError("provider said: invalid x-api-key for /home/oscar/secret-project")
+
+        a.set_message_handler(agent)
+        await a.connect()
+        opened = self.ana.send(to=["oscar"], text="Can you look at the refunds bug?")
+        await self.until(lambda: len(calls) == 1)
+        await asyncio.sleep(1.0)
+        thread = self.ana.thread(opened["thread"])
+        self.assertEqual(len(thread["notes"]), 1)
+        oscar = next(d for d in thread["delivery"] if d["handle"] == "oscar")
+        self.assertIsNone(oscar["claimed_by"])
+
+    async def test_gateway_error_replies_are_not_notes(self):
+        """When the model fails, the gateway's final reply is its own error copy, marked final."""
+        from agent.i18n import t
+
+        a = new_adapter()
+        self.adapters.append(a)
+        replies = iter([t("gateway.errors.unreachable"),
+                        t("gateway.errors.stopped_before_finishing", reason=": output length limit"),
+                        t("gateway.errors.generic_failed")])
+        calls: list = []
+
+        async def agent(event):
+            calls.append(event)
+            return next(replies)
+
+        a.set_message_handler(agent)
+        await a.connect()
+        threads = [self.ana.send(to=["oscar"], text=f"Question {i}")["thread"] for i in range(3)]
+        await self.until(lambda: len(calls) == 3)
+        await asyncio.sleep(1.0)
+        for thread_id in threads:
+            thread = self.ana.thread(thread_id)
+            self.assertEqual(len(thread["notes"]), 1)
+            self.assertIsNone(next(d for d in thread["delivery"] if d["handle"] == "oscar")["claimed_by"])
+
+    async def test_a_genuine_reply_that_looks_like_gateway_chrome_is_written(self):
+        a = self.make_adapter()
+        await a.connect()
+        opened = self.ana.send(to=["oscar"], text="Did the vendor answer? Is the migration done?")
+        await self.until(lambda: len(self.events) == 1)
+        for text in ("⏳ The migration is still running; I will write when it finishes.", "No reply",
+                     "⚡ Done: the cache is warm again.", "SILENT"):
+            result = await a.send(opened["thread"], text, metadata=FINAL)
+            self.assertTrue(result.success, result.error)
+            self.assertIsNotNone(result.message_id, text)
+        self.assertEqual(len(self.ana.thread(opened["thread"])["notes"]), 5)
 
 
 class Tools(Base):

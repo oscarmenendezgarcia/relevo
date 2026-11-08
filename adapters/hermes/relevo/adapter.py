@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections import OrderedDict
 from typing import Any, Optional
 
@@ -21,12 +22,8 @@ from . import client
 logger = logging.getLogger(__name__)
 
 PLATFORM_NAME = "relevo"
-# The gateway's own busy acknowledgements (interrupting, queued, steered, saved): chat chrome that a
-# teammate reading the thread has no use for.
-_GATEWAY_ACK_PREFIXES = ("⚡", "⏳", "⏩", "\U0001f4be")
-# The gateway drops a bare silence marker before sending (reply_expected=False); should one get
-# through anyway, it is still not a note.
-_SILENCE = frozenset({"[SILENT]", "SILENT", "NO_REPLY", "NO REPLY"})
+# The one silence marker. The gateway already drops a bare one when reply_expected is False.
+_SILENCE = "[SILENT]"
 _SEEN_LIMIT = 2048
 _ERROR_KINDS = {
     "NOT_FOUND": "not_found", "THREAD_CLOSED": "forbidden", "FORBIDDEN": "forbidden",
@@ -34,7 +31,56 @@ _ERROR_KINDS = {
 }
 
 
+# The gateway's own copy for a turn that failed (gateway.errors.*, the turn-error and delivery-
+# failure notices). When the model fails, the gateway sends it as the turn's final reply.
+_DIAGNOSTIC_KEY_PREFIXES = ("gateway.errors.",)
+_DIAGNOSTIC_KEYS = ("gateway.notify.turn_error", "gateway.notify.turn_error_detailed",
+                    "gateway.notify.delivery_failed_retry")
+# Catalog entries shorter than this are fragments of the copy above ("The model"), not replies.
+_DIAGNOSTIC_MIN_CHARS = 24
+_diagnostic_cache: dict[str, list[re.Pattern]] = {}
+
+
+def _diagnostic_patterns() -> list[re.Pattern]:
+    """The gateway's failure copy in the active language and English, placeholders as wildcards."""
+    try:
+        from agent.i18n import get_language
+
+        lang = get_language()
+    except Exception:
+        lang = "en"
+    cached = _diagnostic_cache.get(lang)
+    if cached is not None:
+        return cached
+    templates: set[str] = set()
+    try:
+        from agent.i18n import _load_catalog
+
+        for code in {lang, "en"}:
+            for key, value in _load_catalog(code).items():
+                if key.startswith(_DIAGNOSTIC_KEY_PREFIXES) or key in _DIAGNOSTIC_KEYS:
+                    templates.add(str(value))
+    except Exception:
+        try:
+            from agent.i18n import t
+
+            templates.update(t(key) for key in _DIAGNOSTIC_KEYS)
+        except Exception:
+            pass
+    patterns = [re.compile(".*?".join(re.escape(part) for part in re.split(r"\{[^{}]*\}", tpl.strip())), re.S)
+                for tpl in templates if len(tpl.strip()) >= _DIAGNOSTIC_MIN_CHARS]
+    _diagnostic_cache[lang] = patterns
+    return patterns
+
+
+def is_gateway_diagnostic(content: str) -> bool:
+    text = content.strip()
+    return any(p.fullmatch(text) for p in _diagnostic_patterns())
+
+
 class RelevoAdapter(BasePlatformAdapter):
+    # No edits on Relevo: a note is final. The gateway then streams nothing.
+    SUPPORTS_MESSAGE_EDITING = False
     wait_seconds = client.WAIT_SECONDS
     backoff_initial = 1.0
     backoff_max = 60.0
@@ -184,7 +230,18 @@ class RelevoAdapter(BasePlatformAdapter):
 
     async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None,
                    metadata: Optional[dict[str, Any]] = None) -> SendResult:
-        if content.startswith(_GATEWAY_ACK_PREFIXES) or content.strip().upper() in _SILENCE:
+        """Write the agent's final reply in the thread, and nothing else. Teammates read every note,
+        and each one claims the thread: tool progress, interim messages, busy acknowledgements,
+        pairing codes and warnings stay out, whatever the owner's display settings say. The base
+        adapter marks a final reply with metadata["notify"]; everything else goes without it."""
+        if not (metadata or {}).get("notify"):
+            logger.debug("[relevo] kept a gateway message out of thread %s: not a final reply", chat_id)
+            return SendResult(success=True)
+        if content.strip() == _SILENCE:
+            return SendResult(success=True)
+        if is_gateway_diagnostic(content):
+            logger.warning("[relevo] the turn for thread %s failed; the gateway's notice is kept out of the "
+                           "thread (details in the gateway log)", chat_id)
             return SendResult(success=True)
         if not content.strip():
             return SendResult(success=False, error="empty note", error_kind="unknown")
@@ -202,6 +259,16 @@ class RelevoAdapter(BasePlatformAdapter):
         if result.get("claimed") == "other-session":
             logger.info("[relevo] wrote in %s, held by another session of this person", chat_id)
         return SendResult(success=True, message_id=result.get("note"), raw_response=result)
+
+    def _send_retry_is_final(self, result: SendResult) -> bool:
+        """send() already retried once with the same key. Another attempt would carry a new key (a
+        duplicate note if the first one landed), and the base class's plain-text fallback would write
+        a copy with a gateway banner."""
+        return True
+
+    def warning_notifications_enabled(self, logical_platform=None, *, chat_id=None, metadata=None) -> bool:
+        """Gateway diagnostics are for the owner's log, never for a teammate's thread."""
+        return False
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         return {"name": self._titles.get(str(chat_id), str(chat_id)), "type": "dm"}

@@ -85,7 +85,8 @@ def register(ctx) -> None:
     except Exception:
         known = set()
     for key, value in (
-        # No tool progress, streaming or interim messages: only the final answer becomes a note.
+        # No tool progress, streaming or interim messages by default. The owner's global display
+        # keys beat a tier, so RelevoAdapter.send() is what keeps everything but the final out.
         ("display_tier", "minimal"),
         # With RELEVO_ALLOWED_USERS set, unknown senders are ignored instead of sent a pairing code.
         ("allowlist_suppresses_pairing", True),
