@@ -2133,3 +2133,21 @@ async fn a_forgotten_session_releasing_a_thread_wakes_the_others() {
         Some(vec!["q".to_string(), "mine".to_string()])
     );
 }
+
+#[tokio::test]
+async fn a_wait_does_not_outlive_its_token() {
+    let t = team(&["ana", "bob"]);
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
+    t.inbox("bob").await;
+    let waiter = tokio::spawn({
+        let bob = t.agent("bob", "bridge-01", "");
+        async move { bob.get("/api/inbox?wait=30").await }
+    });
+    until_waiting(&t.app, 1).await;
+    db::deactivate(&t.app.db(), "bob", T0).unwrap();
+    // Notes still land in Bob's old threads, but his waiting request does not get them.
+    t.ok("ana", json!({ "thread": id, "text": "after" })).await;
+    let (status, v) = waiter.await.unwrap();
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{v}");
+    assert_eq!(code(&v), "UNAUTHORIZED");
+}

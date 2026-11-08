@@ -36,7 +36,19 @@ impl Session {
 
 /// Records that the caller's session was seen now, with the context it sent (the latest one
 /// wins), and returns it. First forgets sessions not seen for 7 days.
+///
+/// The token is checked again here: a waiting `inbox` request looks and answers long after it
+/// was authenticated, and must not answer for a token revoked (or a person deactivated) since.
 pub fn touch(conn: &Connection, app: &App, caller: &Caller, now: i64) -> Result<Session, ApiError> {
+    let valid: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM tokens t JOIN people p ON p.id = t.person_id
+                        WHERE t.id = ?1 AND t.revoked_at IS NULL AND p.active = 1)",
+        [&caller.token_id],
+        |r| r.get(0),
+    )?;
+    if !valid {
+        return Err(ApiError::unauthorized());
+    }
     forget(conn, app, now)?;
     let id = conn.query_row(
         "INSERT INTO sessions (token_id, client_id, person_id, context, last_seen)
