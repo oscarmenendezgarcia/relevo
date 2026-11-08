@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::auth::Caller;
-use crate::db::{RESERVED_HANDLES, random_id, rfc3339, valid_context};
+use crate::db::{
+    CONTEXT_FORMAT, RESERVED_HANDLES, context_repo, random_id, rfc3339, valid_context,
+};
 use crate::error::ApiError;
 use crate::session::{Session, SessionOut, find, touch};
 use crate::{App, MAX_WAITS_PER_TOKEN};
@@ -185,27 +187,36 @@ fn find_thread(conn: &Connection, session: &Session, id: &str) -> Result<ThreadR
 
 /// The index ranges that hold the threads a session sees, each as (index on `participants`,
 /// index on `session_threads`, condition on `x`, the row read through either). `?2` is the
-/// session, `?3` its context. With `all`, every thread of the person.
-fn routes(contextual: bool, all: bool) -> Vec<(&'static str, &'static str, &'static str)> {
+/// session, `?3` its context and `?4` that context's repository when it names a branch: a thread
+/// addressed to the repository alone reaches the session on any branch. With `all`, every thread
+/// of the person. The routes do not overlap.
+fn routes(context: Option<&str>, all: bool) -> Vec<(&'static str, &'static str, &'static str)> {
     const CLAIM: (&str, &str) = ("participants_inbox_claim", "session_new_claim");
     const CONTEXT: (&str, &str) = ("participants_inbox_context", "session_new_context");
     if all {
         return vec![("participants_inbox", "session_new", "1")];
     }
     let mut routes = vec![(CLAIM.0, CLAIM.1, "x.claimed_by = ?2")];
-    if contextual {
-        routes.push((
-            CONTEXT.0,
-            CONTEXT.1,
-            "x.claimed_by IS NULL AND x.context IS NULL",
-        ));
-        routes.push((
-            CONTEXT.0,
-            CONTEXT.1,
-            "x.claimed_by IS NULL AND x.context = ?3",
-        ));
-    } else {
+    let Some(context) = context else {
         routes.push((CLAIM.0, CLAIM.1, "x.claimed_by IS NULL"));
+        return routes;
+    };
+    routes.push((
+        CONTEXT.0,
+        CONTEXT.1,
+        "x.claimed_by IS NULL AND x.context IS NULL",
+    ));
+    routes.push((
+        CONTEXT.0,
+        CONTEXT.1,
+        "x.claimed_by IS NULL AND x.context = ?3",
+    ));
+    if context_repo(context).is_some() {
+        routes.push((
+            CONTEXT.0,
+            CONTEXT.1,
+            "x.claimed_by IS NULL AND x.context = ?4",
+        ));
     }
     routes
 }
@@ -222,8 +233,8 @@ fn routes(contextual: bool, all: bool) -> Vec<(&'static str, &'static str, &'sta
 /// full, its threads alone fill the page ahead of any it left out; if not, it holds them all.
 /// And a range's rows before the last one the page needs are new ones (which the page counts)
 /// or needed ones, so they fit in a page.
-fn page_sqls(contextual: bool, all: bool) -> Vec<String> {
-    routes(contextual, all)
+fn page_sqls(context: Option<&str>, all: bool) -> Vec<String> {
+    routes(context, all)
         .into_iter()
         .flat_map(|(person_index, session_index, route)| {
             [
@@ -247,8 +258,8 @@ fn page_sqls(contextual: bool, all: bool) -> Vec<String> {
 /// How many threads the session's inbox holds: the person's flagged threads it sees, plus those
 /// new only for the session. The routes do not overlap, so their counts add up; each counts the
 /// entries of one index range, reading nothing else.
-fn count_sql(contextual: bool, all: bool) -> String {
-    let counts: Vec<String> = routes(contextual, all)
+fn count_sql(context: Option<&str>, all: bool) -> String {
+    let counts: Vec<String> = routes(context, all)
         .into_iter()
         .flat_map(|(person_index, _, route)| {
             [
@@ -267,7 +278,7 @@ fn count_sql(contextual: bool, all: bool) -> String {
 }
 
 /// Runs one of the inbox queries with the parameters it uses: `?1` person, `?2` session,
-/// `?3` context.
+/// `?3` context, `?4` its repository when it names a branch.
 fn run<T>(
     conn: &Connection,
     sql: &str,
@@ -275,13 +286,13 @@ fn run<T>(
     f: impl FnMut(&rusqlite::Row) -> rusqlite::Result<T>,
 ) -> Result<Vec<T>, ApiError> {
     let mut stmt = conn.prepare_cached(sql)?;
+    let context = session.context.as_deref();
+    let text = |t: Option<&str>| t.map_or(SqlValue::Null, |t| SqlValue::Text(t.to_string()));
     let values = [
         SqlValue::Integer(session.person_id),
         SqlValue::Integer(session.id),
-        session
-            .context
-            .clone()
-            .map_or(SqlValue::Null, SqlValue::Text),
+        text(context),
+        text(context.and_then(context_repo)),
     ];
     let n = stmt.parameter_count();
     let rows = stmt.query_map(params_from_iter(&values[..n]), f)?;
@@ -292,7 +303,7 @@ fn run<T>(
 /// among them), then waiting ones with nothing new; newest first within each.
 fn page(conn: &Connection, session: &Session, all: bool) -> Result<Vec<Candidate>, ApiError> {
     let mut found: HashMap<String, Candidate> = HashMap::new();
-    for sql in page_sqls(session.context.is_some(), all) {
+    for sql in page_sqls(session.context.as_deref(), all) {
         let rows = run(conn, &sql, session, |r| {
             Ok(Candidate {
                 thread: r.get(0)?,
@@ -315,7 +326,7 @@ fn page(conn: &Connection, session: &Session, all: bool) -> Result<Vec<Candidate
 }
 
 fn inbox_count(conn: &Connection, session: &Session, all: bool) -> Result<usize, ApiError> {
-    let sql = count_sql(session.context.is_some(), all);
+    let sql = count_sql(session.context.as_deref(), all);
     let counts = run(conn, &sql, session, |r| r.get::<_, i64>(0))?;
     Ok(counts.first().copied().unwrap_or(0) as usize)
 }
@@ -1006,7 +1017,7 @@ fn addresses(to: &[String]) -> Result<Vec<(String, Option<String>)>, ApiError> {
             && !valid_context(context)
         {
             return Err(ApiError::bad_request(format!(
-                "'{raw}': a context must match ^[a-z0-9][a-z0-9._-]{{0,63}}$"
+                "'{raw}': a context must be {CONTEXT_FORMAT}"
             )));
         }
         let handle = if RESERVED_HANDLES.contains(&handle.as_str()) {
@@ -1041,12 +1052,18 @@ fn title_of(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{count_sql, page_sqls, title_of};
+    use rusqlite::types::Value as SqlValue;
 
     fn plan(sql: &str) -> Vec<String> {
         let conn = crate::db::open(":memory:").unwrap();
         let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
         let n = stmt.parameter_count();
-        let values = [1i64, 2, 3];
+        let values = [
+            SqlValue::Integer(1),
+            SqlValue::Integer(2),
+            SqlValue::Text("a@b".into()),
+            SqlValue::Text("a".into()),
+        ];
         stmt.query_map(rusqlite::params_from_iter(&values[..n]), |r| r.get(3))
             .unwrap()
             .collect::<rusqlite::Result<_>>()
@@ -1061,8 +1078,13 @@ mod tests {
     /// done per thread it does not return.
     #[test]
     fn inbox_page_reads_index_ranges_in_order_without_sorting() {
-        for (contextual, all, queries) in [(false, false, 4), (true, false, 6), (false, true, 2)] {
-            let sqls = page_sqls(contextual, all);
+        for (context, all, queries) in [
+            (None, false, 4),
+            (Some("pagos-api"), false, 6),
+            (Some("pagos-api@main"), false, 8),
+            (None, true, 2),
+        ] {
+            let sqls = page_sqls(context, all);
             assert_eq!(sqls.len(), queries);
             for sql in sqls {
                 let plan = plan(&sql);
@@ -1097,9 +1119,9 @@ mod tests {
     /// by another session, or addressed to another context).
     #[test]
     fn inbox_count_reads_only_the_index_entries_it_counts() {
-        for contextual in [false, true] {
+        for context in [None, Some("pagos-api"), Some("pagos-api@main")] {
             for all in [false, true] {
-                let plan = plan(&count_sql(contextual, all));
+                let plan = plan(&count_sql(context, all));
                 let steps: Vec<&String> = plan.iter().filter(|s| s.contains(" x ")).collect();
                 assert!(!steps.is_empty(), "{plan:#?}");
                 for step in steps {

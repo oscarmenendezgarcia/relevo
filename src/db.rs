@@ -226,16 +226,38 @@ pub fn valid_session_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
 }
 
-/// A context: `^[a-z0-9][a-z0-9._-]{0,63}$`.
+/// What `valid_context` accepts, for error messages.
+pub const CONTEXT_FORMAT: &str = "a repository ^[a-z0-9][a-z0-9._-]{0,63}$, optionally followed by @ and a branch ^[a-z0-9._/-]{1,100}$";
+
+/// A context: a repository, `^[a-z0-9][a-z0-9._-]{0,63}$`, optionally followed by `@` and a
+/// branch, `^[a-z0-9._/-]{1,100}$`.
 pub fn valid_context(context: &str) -> bool {
-    let b = context.as_bytes();
+    let (repo, branch) = match context.split_once('@') {
+        Some((repo, branch)) => (repo, Some(branch)),
+        None => (context, None),
+    };
+    let b = repo.as_bytes();
     let first_ok = b
         .first()
         .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
     let rest_ok = b[1.min(b.len())..]
         .iter()
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'.' | b'_' | b'-'));
-    first_ok && rest_ok && b.len() <= 64
+    let branch_ok = branch.is_none_or(|branch| {
+        (1..=100).contains(&branch.len())
+            && branch.bytes().all(|c| {
+                c.is_ascii_lowercase()
+                    || c.is_ascii_digit()
+                    || matches!(c, b'.' | b'_' | b'/' | b'-')
+            })
+    });
+    first_ok && rest_ok && b.len() <= 64 && branch_ok
+}
+
+/// The repository part of a context that names a branch (`pagos-api` for
+/// `pagos-api@feat/refunds`); `None` for a context without one.
+pub fn context_repo(context: &str) -> Option<&str> {
+    context.split_once('@').map(|(repo, _)| repo)
 }
 
 fn one_line(what: &str, value: &str) -> Result<()> {
@@ -510,6 +532,18 @@ mod tests {
         assert!(!valid_context(".x"));
         assert!(!valid_context("Pagos"));
         assert!(!valid_context("a/b"));
+        assert!(valid_context("pagos-api@feat/refunds"));
+        assert!(valid_context("pagos-api@v1.2_x-y/z"));
+        assert!(valid_context(&format!("a@{}", "b".repeat(100))));
+        assert!(!valid_context(&format!("a@{}", "b".repeat(101))));
+        assert!(!valid_context("a@"));
+        assert!(!valid_context("@main"));
+        assert!(!valid_context("a@Main"));
+        assert!(!valid_context("a@b@c"));
+        assert!(!valid_context("a@b c"));
+        assert!(!valid_context("a/b@main"));
+        assert_eq!(context_repo("pagos-api@feat/refunds"), Some("pagos-api"));
+        assert_eq!(context_repo("pagos-api"), None);
     }
 
     #[test]

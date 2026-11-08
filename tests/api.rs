@@ -1276,6 +1276,11 @@ async fn malformed_session_headers_are_bad_requests() {
         (&*"a".repeat(65), ""),
         ("abcd1234", "-pagos"),
         ("abcd1234", "pagos/api"),
+        ("abcd1234", "pagos@"),
+        ("abcd1234", "@main"),
+        ("abcd1234", "pagos@feat refunds"),
+        ("abcd1234", "pagos@a@b"),
+        ("abcd1234", &*format!("pagos@{}", "b".repeat(101))),
         ("abcd1234", &*"a".repeat(65)),
         ("", "pagos api"),
     ] {
@@ -1568,6 +1573,68 @@ async fn a_note_to_a_context_shows_there_and_in_general_sessions_only() {
 }
 
 #[tokio::test]
+async fn a_note_to_a_repository_reaches_it_on_any_branch_and_one_to_a_branch_only_there() {
+    let t = team(&["ana", "bob"]);
+    let refunds = t.agent("ana", "term-refunds", "Pagos-API@Feat/Refunds");
+    let main = t.agent("ana", "term-main", "pagos-api@main");
+    let repo = t.agent("ana", "term-repo", "pagos-api");
+    let front = t.agent("ana", "term-front", "frontend@feat/refunds");
+    let general = t.agent("ana", "bot-00001", "");
+    assert_eq!(
+        refunds.inbox().await["session"]["context"],
+        "pagos-api@feat/refunds"
+    );
+    // An address splits at its first `/`: the rest, slashes and all, is the context.
+    let to_branch = t
+        .ok(
+            "bob",
+            json!({ "to": ["ana/pagos-api@feat/refunds"], "text": "branch?" }),
+        )
+        .await;
+    assert_eq!(
+        t.thread("ana", &to_branch).await["context"],
+        "pagos-api@feat/refunds"
+    );
+    let to_repo = t
+        .ok("bob", json!({ "to": ["ana/pagos-api"], "text": "repo?" }))
+        .await;
+    // The repository alone reaches it on any branch, and without one.
+    assert_eq!(
+        thread_ids(&refunds.inbox().await),
+        vec![to_repo.clone(), to_branch.clone()]
+    );
+    for agent in [&main, &repo] {
+        assert_eq!(thread_ids(&agent.inbox().await), vec![to_repo.clone()]);
+    }
+    // A branch reaches only itself: not another branch, nor the same branch of another repository.
+    assert!(thread_ids(&front.inbox().await).is_empty());
+    // General sessions see both.
+    assert_eq!(
+        thread_ids(&general.inbox().await),
+        vec![to_repo.clone(), to_branch.clone()]
+    );
+    assert_eq!(
+        thread_ids(&t.inbox("ana").await),
+        vec![to_repo.clone(), to_branch.clone()]
+    );
+    // `all` shows both anywhere, and the team list names branches as sessions sent them.
+    assert_eq!(
+        thread_ids(&main.inbox_at("/api/inbox?all=1").await),
+        vec![to_repo, to_branch]
+    );
+    let (_, v) = t.get("bob", "/api/people").await;
+    assert_eq!(
+        v["team"][0]["contexts"],
+        json!([
+            "frontend@feat/refunds",
+            "pagos-api",
+            "pagos-api@feat/refunds",
+            "pagos-api@main"
+        ])
+    );
+}
+
+#[tokio::test]
 async fn addresses_with_contexts_are_checked_and_merged() {
     let t = team(&["ana", "bob", "carl"]);
     for to in [
@@ -1577,6 +1644,12 @@ async fn addresses_with_contexts_are_checked_and_merged() {
         json!(["ana/-x"]),
         json!(["ana/a b"]),
         json!(["ana/pagos/api"]),
+        json!(["ana/pagos-api@"]),
+        json!(["ana/@main"]),
+        json!(["ana/pagos-api@feat refunds"]),
+        json!(["ana/pagos-api@main", "ana/pagos-api"]),
+        json!(["ana/pagos-api@main", "ana/pagos-api@dev"]),
+        json!([format!("ana/pagos-api@{}", "b".repeat(101))]),
         json!(["@team/pagos-api"]),
         json!(["bob/frontend"]),
     ] {
@@ -1592,7 +1665,7 @@ async fn addresses_with_contexts_are_checked_and_merged() {
     let id = t
         .ok(
             "bob",
-            json!({ "to": ["ana/pagos-api", "@Ana/PAGOS-API", "carl"], "text": "x" }),
+            json!({ "to": ["ana/pagos-api", "@Ana/PAGOS-API", "carl/web@Feat/X"], "text": "x" }),
         )
         .await;
     assert_eq!(
@@ -1600,6 +1673,8 @@ async fn addresses_with_contexts_are_checked_and_merged() {
         json!(["bob", "ana", "carl"])
     );
     assert_eq!(t.thread("ana", &id).await["context"], "pagos-api");
+    assert_eq!(t.thread("carl", &id).await["context"], "web@feat/x");
+    let id = t.ok("bob", json!({ "to": ["carl"], "text": "x" })).await;
     assert_eq!(t.thread("carl", &id).await["context"], Value::Null);
 }
 
@@ -1922,7 +1997,7 @@ async fn a_token_keeps_at_most_20_sessions_and_forgets_the_least_recently_seen()
     assert_eq!(v["team"][1]["contexts"].as_array().unwrap().len(), 19);
 }
 
-/// A thread as the model sees it, for the person `bob` and his three sessions.
+/// A thread as the model sees it, for the person `bob` and his sessions.
 struct ModelThread {
     id: String,
     from: &'static str,
@@ -1935,15 +2010,22 @@ struct ModelThread {
     context: Option<&'static str>,
     claimed: Option<usize>,
     /// What reached each session.
-    delivered: [u64; 3],
+    delivered: [u64; SESSIONS.len()],
 }
 
-/// Bob's sessions: general, pagos-api, frontend.
-const SESSIONS: [(&str, &str); 3] = [
+/// Bob's sessions: general, pagos-api, frontend, and pagos-api on a branch.
+const SESSIONS: [(&str, &str); 4] = [
     ("model-general", ""),
     ("model-pagos", "pagos-api"),
     ("model-front", "frontend"),
+    ("model-branch", "pagos-api@feat/x"),
 ];
+
+/// Whether a thread addressed to `to` shows in a session in `context`: the repository alone
+/// matches it on any branch, a branch only itself.
+fn context_matches(to: &str, context: &str) -> bool {
+    to == context || context.split_once('@').is_some_and(|(repo, _)| repo == to)
+}
 
 /// Checks one inbox call of session `s` against the model, then applies its deliveries.
 async fn session_inbox_matches(t: &Team, s: usize, all: bool, model: &mut [ModelThread]) {
@@ -1951,7 +2033,7 @@ async fn session_inbox_matches(t: &Team, s: usize, all: bool, model: &mut [Model
     let sees = |th: &ModelThread| {
         all || th.claimed == Some(s)
             || (th.claimed.is_none()
-                && (th.context.is_none() || context.is_empty() || th.context == Some(context)))
+                && (context.is_empty() || th.context.is_none_or(|to| context_matches(to, context))))
     };
     let mut expected: Vec<(bool, bool, u64, String)> = model
         .iter()
@@ -2003,11 +2085,18 @@ async fn session_inboxes_hold_order_and_more_over_hundreds_of_routed_threads() {
     };
     let mut order = 0;
     let mut model: Vec<ModelThread> = Vec::new();
-    let contexts = [None, Some("pagos-api"), Some("frontend"), Some("billing")];
+    let contexts = [
+        None,
+        Some("pagos-api"),
+        Some("frontend"),
+        Some("billing"),
+        Some("pagos-api@feat/x"),
+        Some("pagos-api@main"),
+    ];
     for i in 0..150 {
         t.app.clock.advance(5);
         let from = if i % 2 == 0 { "ana" } else { "carl" };
-        let context = contexts[next(4) as usize];
+        let context = contexts[next(contexts.len() as u64) as usize];
         let team = i % 50 == 7;
         let to = match (team, context) {
             (true, _) => json!(["@team"]),
@@ -2028,12 +2117,12 @@ async fn session_inboxes_hold_order_and_more_over_hundreds_of_routed_threads() {
             last_is_bobs: false,
             context: if team { None } else { context },
             claimed: None,
-            delivered: [0; 3],
+            delivered: [0; SESSIONS.len()],
         });
     }
     for step in 0..400 {
         t.app.clock.advance(10);
-        let s = next(3) as usize;
+        let s = next(SESSIONS.len() as u64) as usize;
         match next(10) {
             // A session reads its inbox (sometimes all of it).
             0..=3 => session_inbox_matches(&t, s, next(4) == 0, &mut model).await,
@@ -2086,7 +2175,7 @@ async fn session_inboxes_hold_order_and_more_over_hundreds_of_routed_threads() {
     }
     // Every session, routed and not, until nothing is new.
     for _ in 0..12 {
-        for s in 0..3 {
+        for s in 0..SESSIONS.len() {
             session_inbox_matches(&t, s, false, &mut model).await;
             session_inbox_matches(&t, s, true, &mut model).await;
         }

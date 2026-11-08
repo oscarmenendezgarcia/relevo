@@ -35,7 +35,7 @@ The server keeps each session with its token's label, its context and when it wa
 - A claim lapses when the claiming session has not been seen for 1 hour. A lapsed claim counts as unclaimed everywhere: the thread shows again in the person's other sessions, and the next session to write takes it.
 - Closing without text does not claim.
 
-**Which sessions see a thread.** For a participant, a thread shows in the inbox of one of their sessions when it is claimed by that session, or when it is unclaimed and either it has no context for them, or its context matches the session's context, or the session is general. A context without a branch matches the repository on any branch (`pagos-api` matches `pagos-api` and `pagos-api@feat/refunds`); one with a branch matches only itself. So an unaddressed note shows in every session of the person until one of them claims it; then only there. A note for `ana/pagos-api` shows in Ana's `pagos-api` sessions, on any branch, and her general ones. `inbox` with `all` and `thread` ignore this and show any thread of the person.
+**Which sessions see a thread.** For a participant, a thread shows in the inbox of one of their sessions when it is claimed by that session, or when it is unclaimed and either it has no context for them, or its context matches the session's context, or the session is general. A context without a branch matches the repository on any branch (`pagos-api` matches `pagos-api` and `pagos-api@feat/refunds`); one with a branch matches only itself: a note for `ana/pagos-api@feat/refunds` shows neither in Ana's `pagos-api@main` sessions nor in a `pagos-api` session that does not say its branch, and `frontend@feat/refunds` is another context altogether. So an unaddressed note shows in every session of the person until one of them claims it; then only there. A note for `ana/pagos-api` shows in Ana's `pagos-api` sessions, on any branch, and her general ones. `inbox` with `all` and `thread` ignore this and show any thread of the person.
 
 ## Delivery state
 
@@ -59,7 +59,7 @@ Opens a thread, or writes in one.
 
 | Field | Type | |
 |---|---|---|
-| `to` | array of addresses (`handle` or `handle/context`), or `["@team"]` | Opens a new thread. Exactly one of `to` and `thread`. |
+| `to` | array of addresses (`handle` or `handle/context`, the context with or without a branch), or `["@team"]` | Opens a new thread. Exactly one of `to` and `thread`. |
 | `thread` | thread id | Writes in an existing thread. |
 | `text` | string | The note. Required unless only closing (`thread` + `close: true` + no `text`). |
 | `close` | bool, optional | Marks the thread closed after writing. |
@@ -69,7 +69,7 @@ The body is a JSON object; anything else (an array, say), or any other field, fa
 
 Rules:
 
-- `to` holds 1 to 20 addresses of distinct active people other than you, or exactly `["@team"]`. An address is a handle, optionally followed by `/` and a context (`ana/pagos-api`); naming the same person twice with different contexts (or once with a context and once without) fails with `BAD_REQUEST`, and so does a malformed context or a context on `@team`. Addresses may be written with or without a leading `@` and in any case; repeats are merged (`["@team", "equipo"]` is one `@team`). Writing to yourself, or `@team` next to other handles, fails with `BAD_REQUEST`. An unknown or inactive handle fails with `UNKNOWN_PERSON`, whose error lists the valid handles with their `about`.
+- `to` holds 1 to 20 addresses of distinct active people other than you, or exactly `["@team"]`. An address is a handle, optionally followed by `/` and a context (`ana/pagos-api`, `ana/pagos-api@feat/refunds`: everything after the first `/`); naming the same person twice with different contexts (or once with a context and once without) fails with `BAD_REQUEST`, and so does a malformed context or a context on `@team`. Addresses may be written with or without a leading `@` and in any case; repeats are merged (`["@team", "equipo"]` is one `@team`). Writing to yourself, or `@team` next to other handles, fails with `BAD_REQUEST`. An unknown or inactive handle fails with `UNKNOWN_PERSON`, whose error lists the valid handles with their `about`.
 - `["@team"]` opens a `team` thread. `@equipo` is accepted as the same thing (both with or without `@`); `team` and `equipo` can therefore not be handles. A person may open at most `RELEVO_TEAM_QUESTIONS_PER_DAY` (default 5) team threads in any rolling 24 hours: beyond that, `TEAM_LIMIT`. A team of one (only you) fails with `NO_RECIPIENTS`.
 - Writing a note claims the thread for your person, for the session that wrote it (see [Claiming](#sessions-and-routing)).
 - Writing in a thread you are not a participant of fails with `NOT_FOUND` (the thread's existence is not revealed).

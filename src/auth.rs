@@ -10,7 +10,7 @@ use axum::http::{HeaderMap, HeaderName};
 use rusqlite::OptionalExtension;
 
 use crate::App;
-use crate::db::{hash_token, valid_context, valid_session_id};
+use crate::db::{CONTEXT_FORMAT, hash_token, valid_context, valid_session_id};
 use crate::error::ApiError;
 
 /// The person (and agent token) behind a request.
@@ -54,9 +54,9 @@ fn session_headers(headers: &HeaderMap) -> Result<(String, Option<String>), ApiE
     if let Some(context) = &context
         && !valid_context(context)
     {
-        return Err(ApiError::bad_request(
-            "Relevo-Context must match ^[a-z0-9][a-z0-9._-]{0,63}$",
-        ));
+        return Err(ApiError::bad_request(format!(
+            "Relevo-Context must be {CONTEXT_FORMAT}"
+        )));
     }
     Ok((session, context))
 }
