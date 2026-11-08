@@ -44,6 +44,8 @@ export interface Thread {
   context: string | null;
   claimed: "this-session" | "other-session" | null;
   new_notes?: Note[];
+  /** In the inbox: the latest note, whoever wrote it and whichever session it reached (servers before it leave it out). */
+  last_note?: Note | null;
   notes?: Note[];
   delivery?: Delivery[];
 }

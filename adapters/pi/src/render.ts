@@ -53,11 +53,21 @@ function holder(claimed: Thread["claimed"]): string {
   return "Nobody of your person holds it yet.";
 }
 
+function cut(n: Note): string {
+  return n.truncated ? `\n[Cut at 4,000 characters: read it whole with relevo_thread.]` : "";
+}
+
 function renderNote(n: Note, me: string | undefined): string {
   const you = n.author === me ? " (you)" : "";
   const head = `--- note ${n.id} by @${n.author}${you} via "${n.via}", ${n.created_at}`;
-  const cut = n.truncated ? `\n[Cut at 4,000 characters: read it whole with relevo_thread.]` : "";
-  return `${head}\n${body(n.author, n.text, me)}${cut}`;
+  return `${head}\n${body(n.author, n.text, me)}${cut(n)}`;
+}
+
+/** A waiting thread's latest note (`last_note`), which may have reached another session of the person. */
+function renderLatest(n: Note, me: string | undefined): string {
+  const you = n.author === me ? " (you)" : "";
+  const head = `Latest: @${n.author}${you} at ${n.created_at} (note ${n.id} via "${n.via}"; it may have reached another of your sessions):`;
+  return `${head}\n${body(n.author, n.text, me)}${cut(n)}`;
 }
 
 function renderDelivery(d: Delivery): string {
@@ -126,6 +136,8 @@ export function renderThread(t: Thread, options: ThreadOptions = {}): string {
   const out = [head];
   if (!all.length) {
     out.push(whole ? "No notes." : "No new notes.");
+    // What it waits on, which another session of the person may have fetched already.
+    if (!whole && t.waiting_for_you && t.last_note) out.push(renderLatest(t.last_note, me));
   } else if (whole) {
     if (!shown.length) {
       out.push(`No notes before ${options.before}.`);
