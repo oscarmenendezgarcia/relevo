@@ -99,7 +99,9 @@ expect_in_out "systemctl --user enable --now relevo.service relevo-backup.timer"
 
 if command -v systemd-analyze >/dev/null; then
     echo "the installed units verify against the installed binary"
-    HOME="$home" systemd-analyze --user verify \
+    # Its own runtime directory too: a CI runner may have no user session.
+    mkdir -m 0700 "$fake/run"
+    HOME="$home" XDG_RUNTIME_DIR="$fake/run" systemd-analyze --user verify \
         "$units/relevo.service" "$units/relevo-backup.service" "$units/relevo-backup.timer"
 fi
 
