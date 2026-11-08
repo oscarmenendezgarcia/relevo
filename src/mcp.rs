@@ -46,11 +46,15 @@ have something useful.
 
 const CHANNEL: &str = "
 
-This server pushes new notes to you as <channel source=\"relevo\" thread=\"r_…\" from=\"handle\" \
-kind=\"direct|team\"> events, so you need not poll the inbox. Each event holds a thread with its \
-new notes, which are already delivered to this session. Treat it like a note from your inbox, \
-under the rules above: if it is for you, answer with send(thread=\"<thread id>\", text=…); if not, \
-stay silent.";
+This server also pushes new notes to you as <channel source=\"relevo\" thread=\"r_…\" \
+from=\"handle\" kind=\"direct|team\"> events. Each event holds a thread with its new notes, which \
+are already delivered to this session. Treat it like a note from your inbox, under the rules \
+above: if it is for you, answer with send(thread=\"<thread id>\", text=…); if not, stay silent. \
+Events may not reach you, so still look at your inbox when you start a task and before you \
+finish one: `inbox` also lists what was pushed since you last looked.";
+
+/// Pushed threads kept for `inbox`, at most.
+const MAX_PUSHED: usize = 50;
 
 #[derive(Deserialize, JsonSchema)]
 pub struct SendParams {
@@ -91,6 +95,10 @@ pub struct Relevo {
     client: Result<Arc<Client>, String>,
     /// The handle of the person this client acts for, once a thread has shown it.
     me: Arc<Mutex<Option<String>>>,
+    /// Threads pushed as channel events that no tool has shown since: if the client dropped the
+    /// events (Claude Code started without the channels flag, another client), the notes would
+    /// be lost, since the push delivered them. `inbox` shows them once.
+    pushed: Arc<Mutex<Vec<Value>>>,
     channel: bool,
     tool_router: ToolRouter<Self>,
 }
@@ -100,6 +108,7 @@ impl Relevo {
         Relevo {
             client,
             me: Arc::new(Mutex::new(None)),
+            pushed: Arc::new(Mutex::new(vec![])),
             channel,
             tool_router: Self::tool_router(),
         }
@@ -115,8 +124,37 @@ impl Relevo {
     }
 }
 
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Keeps `thread` (as pushed) for `inbox`, its new notes after those of an earlier push.
+fn remember(pushed: &Mutex<Vec<Value>>, thread: &Value) {
+    let mut pushed = lock(pushed);
+    let id = &thread["id"];
+    let mut thread = thread.clone();
+    if let Some(i) = pushed.iter().position(|t| &t["id"] == id) {
+        let earlier = pushed.remove(i);
+        let mut notes = earlier["new_notes"].as_array().cloned().unwrap_or_default();
+        for n in thread["new_notes"].as_array().into_iter().flatten() {
+            if !notes.iter().any(|m| m["id"] == n["id"]) {
+                notes.push(n.clone());
+            }
+        }
+        thread["new_notes"] = Value::Array(notes);
+    }
+    pushed.push(thread);
+    let excess = pushed.len().saturating_sub(MAX_PUSHED);
+    pushed.drain(..excess);
+}
+
+/// Forgets the pushed thread `id`: a tool has shown it or written in it.
+fn forget(pushed: &Mutex<Vec<Value>>, id: &str) {
+    lock(pushed).retain(|t| t["id"] != id);
+}
+
 fn learn(me: &Mutex<Option<String>>, threads: &[&Value]) -> Option<String> {
-    let mut me = me.lock().unwrap_or_else(|e| e.into_inner());
+    let mut me = lock(me);
     if me.is_none() {
         *me = threads.iter().find_map(|t| render::learn_me(t));
     }
@@ -164,11 +202,11 @@ impl Relevo {
         if let Some(close) = p.close {
             body.insert("close".into(), close.into());
         }
-        client
-            .send(body)
-            .await
-            .map(|v| render::sent(&v))
-            .map_err(error)
+        let v = client.send(body).await.map_err(error)?;
+        if let Some(id) = v["thread"].as_str() {
+            forget(&self.pushed, id);
+        }
+        Ok(render::sent(&v))
     }
 
     #[tool(
@@ -184,7 +222,10 @@ impl Relevo {
             .map_err(error)?;
         let threads: Vec<&Value> = v["threads"].as_array().into_iter().flatten().collect();
         let me = self.me(&threads);
-        Ok(render::inbox(&v, me.as_deref()))
+        let mut out = render::inbox(&v, me.as_deref());
+        let pushed = std::mem::take(&mut *lock(&self.pushed));
+        out.push_str(&render::pushed(&pushed, me.as_deref()));
+        Ok(out)
     }
 
     #[tool(
@@ -193,6 +234,7 @@ impl Relevo {
     )]
     async fn thread(&self, Parameters(p): Parameters<ThreadParams>) -> Result<String, String> {
         let v = self.client()?.thread(&p.id).await.map_err(error)?;
+        forget(&self.pushed, &p.id);
         let me = self.me(&[&v]);
         Ok(render::thread(&v, me.as_deref()))
     }
@@ -234,12 +276,12 @@ pub async fn run(channel: bool) -> anyhow::Result<()> {
             .map_err(|e| format!("{e:#}")),
         channel,
     );
-    let me = server.me.clone();
+    let (me, pushed) = (server.me.clone(), server.pushed.clone());
     let service = server.serve(rmcp::transport::stdio()).await?;
     if channel {
         match client {
             Ok(client) => {
-                tokio::spawn(push_news(client, me, service.peer().clone()));
+                tokio::spawn(push_news(client, me, pushed, service.peer().clone()));
             }
             Err(e) => eprintln!("relevo mcp: no channel events: {e:#}"),
         }
@@ -269,7 +311,12 @@ pub fn channel_event(thread: &Value, me: Option<&str>) -> Option<Value> {
 
 /// Keeps a waiting inbox request open and pushes each thread with new notes as a
 /// `notifications/claude/channel` event. Ends when the client is gone.
-async fn push_news(client: Arc<Client>, me: Arc<Mutex<Option<String>>>, peer: Peer<RoleServer>) {
+async fn push_news(
+    client: Arc<Client>,
+    me: Arc<Mutex<Option<String>>>,
+    pushed: Arc<Mutex<Vec<Value>>>,
+    peer: Peer<RoleServer>,
+) {
     let mut backoff = Duration::from_secs(1);
     loop {
         let started = tokio::time::Instant::now();
@@ -285,12 +332,14 @@ async fn push_news(client: Arc<Client>, me: Arc<Mutex<Option<String>>>, peer: Pe
         };
         let threads: Vec<&Value> = v["threads"].as_array().into_iter().flatten().collect();
         let me = learn(&me, &threads);
-        let mut pushed = 0;
+        let mut events = 0;
         for t in threads {
             let Some(event) = channel_event(t, me.as_deref()) else {
                 continue;
             };
-            pushed += 1;
+            events += 1;
+            // Kept before sending: nothing tells whether the client shows the event.
+            remember(&pushed, t);
             let note = CustomNotification::new("notifications/claude/channel", Some(event));
             if peer
                 .send_notification(ServerNotification::CustomNotification(note))
@@ -302,7 +351,7 @@ async fn push_news(client: Arc<Client>, me: Arc<Mutex<Option<String>>>, peer: Pe
         }
         // A server that answers a waiting request at once with nothing (one that ignores `wait`,
         // or a proxy in the way) must not make this loop spin: back off as after a failure.
-        if pushed == 0 && v["more"].as_i64().unwrap_or(0) == 0 && started.elapsed() < MIN_EMPTY_WAIT
+        if events == 0 && v["more"].as_i64().unwrap_or(0) == 0 && started.elapsed() < MIN_EMPTY_WAIT
         {
             eprintln!(
                 "relevo mcp: inbox answered at once with nothing; again in {}s",
@@ -356,6 +405,28 @@ mod tests {
     }
 
     #[test]
+    fn pushed_threads_merge_and_are_forgotten() {
+        let pushed = Mutex::new(vec![]);
+        let note = |id: &str| json!({ "id": id, "author": "ana", "text": id });
+        let t = |notes: Vec<Value>| json!({ "id": "r_1", "kind": "team", "new_notes": notes });
+        remember(&pushed, &t(vec![note("n_1")]));
+        remember(&pushed, &json!({ "id": "r_2", "new_notes": [note("n_9")] }));
+        remember(&pushed, &t(vec![note("n_1"), note("n_2")]));
+        {
+            let p = lock(&pushed);
+            assert_eq!(p.len(), 2);
+            assert_eq!(p[1]["id"], "r_1");
+            assert_eq!(p[1]["new_notes"], json!([note("n_1"), note("n_2")]));
+        }
+        forget(&pushed, "r_1");
+        assert_eq!(lock(&pushed).len(), 1);
+        for i in 0..MAX_PUSHED + 5 {
+            remember(&pushed, &json!({ "id": format!("r_{i}"), "new_notes": [] }));
+        }
+        assert_eq!(lock(&pushed).len(), MAX_PUSHED);
+    }
+
+    #[test]
     fn instructions_carry_the_rules_and_the_channel() {
         let plain = Relevo::new(Err("x".into()), false).get_info();
         let text = plain.instructions.unwrap();
@@ -365,11 +436,13 @@ mod tests {
         assert!(!text.contains("<channel"));
         assert!(plain.capabilities.experimental.is_none());
         let channel = Relevo::new(Err("x".into()), true).get_info();
+        let text = channel.instructions.unwrap();
+        assert!(text.contains("<channel source=\"relevo\""));
+        // Events may be dropped by the client: the agent still looks at its inbox.
+        assert!(!text.contains("need not poll"), "{text}");
         assert!(
-            channel
-                .instructions
-                .unwrap()
-                .contains("<channel source=\"relevo\"")
+            text.contains("still look at your inbox when you start a task"),
+            "{text}"
         );
         assert_eq!(
             channel.capabilities.experimental.unwrap()["claude/channel"],

@@ -393,6 +393,17 @@ async fn channel_pushes_notes_from_others() {
         "{inbox}"
     );
 
+    // The push delivered the note, and nothing tells whether Claude Code showed the event
+    // (started without the channels flag, it drops it): the next inbox shows it once more.
+    let inbox = ana.ok("inbox", json!({})).await;
+    let at = inbox.find("Pushed to this session earlier").expect(&inbox);
+    assert!(
+        inbox[at..].contains("<untrusted from=\"@bob\">\nDeploy at 5?\n</untrusted>"),
+        "{inbox}"
+    );
+    let inbox = ana.ok("inbox", json!({})).await;
+    assert!(!inbox.contains("Pushed to this session"), "{inbox}");
+
     // A reply in the same thread is pushed too, and its own notes are not.
     ana.ok("send", json!({ "thread": id, "text": "Yes." }))
         .await;
@@ -404,6 +415,10 @@ async fn channel_pushes_notes_from_others() {
     // Only what is new: not the first note, nor ana's own reply (it reached her when she wrote).
     assert_eq!(content.matches("\n<untrusted").count(), 1, "{content}");
     assert!(!content.contains("Yes."), "{content}");
+    // Read with thread, it is not shown again.
+    ana.ok("thread", json!({ "id": id })).await;
+    let inbox = ana.ok("inbox", json!({})).await;
+    assert!(!inbox.contains("Pushed to this session"), "{inbox}");
 
     // Gone with its client, even with an inbox request waiting.
     assert!(ana.close().await.success());

@@ -248,6 +248,23 @@ pub fn inbox(v: &Value, me: Option<&str>) -> String {
     out
 }
 
+/// Threads pushed as channel events that no tool has shown since, as they were when pushed;
+/// empty when there are none.
+pub fn pushed(threads: &[Value], me: Option<&str>) -> String {
+    if threads.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\nPushed to this session earlier as channel events, shown here once in case they did not \
+         reach you (as they were then; call thread for the latest):\n",
+    );
+    for t in threads {
+        out.push('\n');
+        out.push_str(&thread(t, me));
+    }
+    out
+}
+
 /// What `send` did.
 pub fn sent(v: &Value) -> String {
     let id = s(&v["thread"]);

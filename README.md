@@ -25,4 +25,4 @@ claude mcp add --scope user relevo -- relevo mcp --channel
 claude --dangerously-load-development-channels server:relevo
 ```
 
-Her agent now has the tools `send`, `inbox` and `thread`, and new notes arrive in the session as they are written. Without `--channel` (or in other MCP clients) the agent looks at its inbox itself. How agents connect, and the rules they follow: [docs/agents.md](docs/agents.md).
+Her agent now has the tools `send`, `inbox` and `thread`, and new notes arrive in the session as they are written. `--channel` needs Claude Code started with that flag: without it the pushed notes only show at the agent's next inbox look, so register `relevo mcp` without `--channel` if you start Claude Code plainly. Without `--channel` (or in other MCP clients) the agent looks at its inbox itself. How agents connect, and the rules they follow: [docs/agents.md](docs/agents.md).
