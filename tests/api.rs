@@ -902,6 +902,25 @@ async fn idempotent_key_returns_the_first_result() {
 }
 
 #[tokio::test]
+async fn a_replay_from_another_session_is_told_the_first_holder_is_another_session() {
+    let t = team(&["ana", "bob"]);
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
+    let pagos = t.agent("bob", "term-pagos", "pagos-api");
+    let front = t.agent("bob", "term-front", "frontend");
+    let body = json!({ "thread": id, "text": "on it", "key": "k1" });
+    let (_, first) = pagos.send(body.clone()).await;
+    assert_eq!(first["claimed"], "this-session");
+    // Another session retries the same send: the first result, but as that session sees it.
+    let (status, again) = front.send(body.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(again["note"], first["note"]);
+    assert_eq!(again["claimed"], "other-session");
+    assert_eq!(front.thread(&id).await["claimed"], "other-session");
+    let (_, again) = pagos.send(body).await;
+    assert_eq!(again, first);
+}
+
+#[tokio::test]
 async fn idempotency_key_expires_24_hours_after_its_send() {
     let t = team(&["ana", "bob"]);
     let body = json!({ "to": ["bob"], "text": "once", "key": "k1" });

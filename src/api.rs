@@ -123,8 +123,9 @@ struct SendResult {
     /// `None` when the send only closed the thread.
     note: Option<String>,
     status: String,
-    /// Who holds the thread for the writer's person afterwards, as `claim` names it.
-    claimed: Option<String>,
+    /// Who holds the thread for the writer's person afterwards, as `claim` names it for the
+    /// session that asks.
+    claimed: Option<&'static str>,
 }
 
 /// A thread as seen by one session of a participant.
@@ -833,10 +834,12 @@ fn write_as(
         "DELETE FROM send_keys WHERE created_at <= ?1",
         [now - KEY_LIFETIME_SECS],
     )?;
+    // A replay keeps who held the thread after the first send, named for the session that asks:
+    // a retry from another session is not told it holds a thread it does not.
     if let Some(key) = &req.key {
         let first = tx
             .query_row(
-                "SELECT thread_id, note_id, status, claimed FROM send_keys
+                "SELECT thread_id, note_id, status, claimed_by FROM send_keys
                  WHERE person_id = ?1 AND key = ?2",
                 params![caller.person_id, key],
                 |r| {
@@ -844,7 +847,7 @@ fn write_as(
                         thread: r.get(0)?,
                         note: r.get(1)?,
                         status: r.get(2)?,
-                        claimed: r.get(3)?,
+                        claimed: claim(r.get(3)?, session),
                     })
                 },
             )
@@ -957,11 +960,11 @@ fn write_as(
         thread: thread_id,
         note: note_id,
         status: if req.close { "closed" } else { "open" }.to_string(),
-        claimed: claim(claimed_by, session).map(str::to_string),
+        claimed: claim(claimed_by, session),
     };
     if let Some(key) = &req.key {
         tx.execute(
-            "INSERT INTO send_keys (person_id, key, thread_id, note_id, status, claimed, created_at)
+            "INSERT INTO send_keys (person_id, key, thread_id, note_id, status, claimed_by, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 caller.person_id,
@@ -969,7 +972,7 @@ fn write_as(
                 result.thread,
                 result.note,
                 result.status,
-                result.claimed,
+                claimed_by,
                 now
             ],
         )?;
