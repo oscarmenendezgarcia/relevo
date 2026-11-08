@@ -37,9 +37,10 @@ CREATE TABLE IF NOT EXISTS threads (
 -- token (`client_id` is '' for the token's default session). `context` is the latest
 -- `Relevo-Context` (NULL: general). `claims` is 1 while the session may hold claims: from its
 -- first claim until they lapse, an hour after it was last seen (see `session::lapse`). Sessions
--- not seen for 7 days are forgotten.
+-- not seen for 7 days are forgotten. Ids are never reused (AUTOINCREMENT): `send_keys` keeps the
+-- id of a session that may be forgotten since, and a replay must not name a newer one for it.
 CREATE TABLE IF NOT EXISTS sessions (
-    id         INTEGER PRIMARY KEY,
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
     token_id   TEXT NOT NULL REFERENCES tokens(id),
     client_id  TEXT NOT NULL,
     person_id  INTEGER NOT NULL REFERENCES people(id),
@@ -170,7 +171,7 @@ pub const CLAIM_LAPSE_SECS: i64 = 3600;
 /// The layout of `SCHEMA`, kept in SQLite's `user_version`. v0 does not migrate: a database with
 /// another layout is refused, never half-updated (`CREATE TABLE IF NOT EXISTS` would skip the
 /// old tables and fail on their missing columns).
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// Opens (or creates) the database and applies the schema. `":memory:"` works for tests.
 pub fn open(path: &str) -> Result<Connection> {

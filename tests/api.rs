@@ -995,6 +995,31 @@ async fn a_replay_from_another_session_is_told_the_first_holder_is_another_sessi
 }
 
 #[tokio::test]
+async fn a_replay_after_its_holder_was_forgotten_names_another_session() {
+    let t = team(&["ana", "bob"]);
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
+    let codex = db::add_token(&t.app.db(), "bob", "Codex desktop", T0).unwrap();
+    let body = json!({ "thread": id, "text": "on it", "key": "k1" });
+    // The newest session holds the thread after the first send; then it is forgotten.
+    let (status, first) = call(
+        &t.app,
+        "POST",
+        "/api/send",
+        Some(&codex.secret),
+        &[],
+        Body::from(body.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["claimed"], "this-session");
+    db::revoke_token(&t.app.db(), &codex.id, T0).unwrap();
+    // A session started now never takes the forgotten one's place.
+    let (_, again) = t.agent("bob", "term-late", "").send(body).await;
+    assert_eq!(again["note"], first["note"]);
+    assert_eq!(again["claimed"], "other-session");
+}
+
+#[tokio::test]
 async fn idempotency_key_expires_24_hours_after_its_send() {
     let t = team(&["ana", "bob"]);
     let body = json!({ "to": ["bob"], "text": "once", "key": "k1" });
