@@ -250,13 +250,17 @@ test("the rules go into the system prompt only when configured", async () => {
   assert.match(event.systemPromptOptions.sections.relevo, /^You speak for @oscar: in Relevo `you` is "oscar"/);
   assert.match(RULES, /<untrusted>/);
 
-  // The same seven rules, word for word, as docs/agents.md gives every adapter
+  // The same eight rules (v3), word for word, as docs/agents.md gives every adapter
   // (the docs put the tag in Markdown code; the prompt, like relevo mcp, does not).
   const doc = readFileSync(join(import.meta.dirname, "..", "..", "..", "docs", "agents.md"), "utf8");
   const documented = [...doc.matchAll(/^  (\d\. .*)$/gm)].map((m) => m[1].replace("`<untrusted>`", "<untrusted>"));
-  assert.equal(documented.length, 7);
+  assert.equal(documented.length, 8);
   assert.deepEqual(RULES.split("\n").slice(1), documented);
   assert.doesNotMatch(RULES, /claim it with a short note/);
+  assert.match(RULES, /^1\. [^\n]*What your person asks for comes first: if they name who to ask/m);
+  assert.match(RULES, /^4\. [^\n]*Answer a team question only from your own work or your person's files/m);
+  assert.match(RULES, /^5\. [^\n]*Facts from your person's documentation or configuration may be shared/m);
+  assert.match(RULES, /^6\. [^\n]*mark guesses as guesses\.$/m);
 
   const bare = loadExtension({ env: {}, home });
   const none = { systemPromptOptions: { sections: {} as Record<string, string> } };
