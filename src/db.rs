@@ -48,25 +48,69 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS sessions_by_person ON sessions(person_id, last_seen);
 CREATE INDEX IF NOT EXISTS sessions_by_last_seen ON sessions(last_seen);
 CREATE INDEX IF NOT EXISTS threads_by_opener ON threads(opener_id, kind, created_at);
--- Rows are inserted in participant order; rowid keeps that order.
--- `last_seq` (the thread's latest note), `has_new` (notes not yet delivered to this person),
+-- One row per participant of a thread; rows are inserted in participant order, which rowid keeps.
+-- `context` is the context the thread was addressed to for this person; `claimed_by` the session
+-- of theirs that last wrote in it. `delivered_*` is the latest note that reached any of their
+-- sessions, and which one (its label and context then). `last_seq` is the thread's latest note,
+-- `last_other_seq` the latest one not theirs; `has_new` (no session of theirs has that one),
 -- `waiting` (open, direct, latest note not theirs) and `inbox` (`has_new` or `waiting`) are kept
--- by `api::refresh` after every change to the thread. The partial index holds only inbox rows,
--- in inbox order, so the inbox reads its 20 threads and stops, however many are flagged.
+-- by `api::refresh` after every change to the thread.
 CREATE TABLE IF NOT EXISTS participants (
-    thread_id     TEXT NOT NULL REFERENCES threads(id),
-    person_id     INTEGER NOT NULL REFERENCES people(id),
-    delivered_seq INTEGER,
-    delivered_at  INTEGER,
-    last_seq      INTEGER NOT NULL DEFAULT 0,
-    has_new       INTEGER NOT NULL DEFAULT 0,
-    waiting       INTEGER NOT NULL DEFAULT 0,
-    inbox         INTEGER NOT NULL DEFAULT 0,
+    thread_id         TEXT NOT NULL REFERENCES threads(id),
+    person_id         INTEGER NOT NULL REFERENCES people(id),
+    context           TEXT,
+    claimed_by        INTEGER REFERENCES sessions(id),
+    delivered_seq     INTEGER,
+    delivered_at      INTEGER,
+    delivered_label   TEXT,
+    delivered_context TEXT,
+    last_seq          INTEGER NOT NULL DEFAULT 0,
+    last_other_seq    INTEGER NOT NULL DEFAULT 0,
+    has_new           INTEGER NOT NULL DEFAULT 0,
+    waiting           INTEGER NOT NULL DEFAULT 0,
+    inbox             INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (thread_id, person_id)
 );
+-- What a session has of a thread, once it differs from its person's: a session without a row has
+-- what its person has (`participants.delivered_seq`). Before that moves, every other session of
+-- the person gets a row with the old value, so one session reading never delivers to another.
+-- The other columns copy the participant row (kept by `api::refresh`) so that the inbox can read
+-- a session's new threads, in order, from an index.
+CREATE TABLE IF NOT EXISTS session_threads (
+    session_id    INTEGER NOT NULL REFERENCES sessions(id),
+    thread_id     TEXT NOT NULL REFERENCES threads(id),
+    person_id     INTEGER NOT NULL REFERENCES people(id),
+    delivered_seq INTEGER NOT NULL,
+    has_new       INTEGER NOT NULL DEFAULT 0,
+    waiting       INTEGER NOT NULL DEFAULT 0,
+    last_seq      INTEGER NOT NULL DEFAULT 0,
+    claimed_by    INTEGER,
+    context       TEXT,
+    person_inbox  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (session_id, thread_id)
+);
+CREATE INDEX IF NOT EXISTS session_threads_by_thread ON session_threads(thread_id);
+CREATE INDEX IF NOT EXISTS session_threads_by_claim
+    ON session_threads(claimed_by) WHERE claimed_by IS NOT NULL;
 CREATE INDEX IF NOT EXISTS participants_by_person ON participants(person_id);
+CREATE INDEX IF NOT EXISTS participants_by_claim
+    ON participants(claimed_by) WHERE claimed_by IS NOT NULL;
+-- The inbox of a session is the union of a few index ranges, each already in inbox order, so it
+-- reads at most a page from each and stops, however many threads are flagged (see `api::page`):
+-- every thread of the person (`all`), those claimed by the session or unclaimed (general), those
+-- unclaimed with no context or the session's context.
 CREATE INDEX IF NOT EXISTS participants_inbox
     ON participants(person_id, has_new, waiting, last_seq) WHERE inbox = 1;
+CREATE INDEX IF NOT EXISTS participants_inbox_claim
+    ON participants(person_id, claimed_by, has_new, waiting, last_seq) WHERE inbox = 1;
+CREATE INDEX IF NOT EXISTS participants_inbox_context
+    ON participants(person_id, claimed_by, context, has_new, waiting, last_seq) WHERE inbox = 1;
+CREATE INDEX IF NOT EXISTS session_new
+    ON session_threads(session_id, waiting, last_seq) WHERE has_new = 1;
+CREATE INDEX IF NOT EXISTS session_new_claim
+    ON session_threads(session_id, claimed_by, waiting, last_seq) WHERE has_new = 1;
+CREATE INDEX IF NOT EXISTS session_new_context
+    ON session_threads(session_id, claimed_by, context, waiting, last_seq) WHERE has_new = 1;
 CREATE TABLE IF NOT EXISTS notes (
     seq        INTEGER PRIMARY KEY AUTOINCREMENT,
     id         TEXT NOT NULL UNIQUE,

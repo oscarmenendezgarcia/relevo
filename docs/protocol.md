@@ -35,7 +35,7 @@ The server keeps each session with its token's label, its context and when it wa
 
 ## Delivery state
 
-Delivery is kept per session. For each session the server knows the last note of each thread that reached it. A note reaches a session when that session fetches it through `inbox` or `thread`.
+Delivery is kept per session. For each session the server knows the last note of each thread that reached it. A note reaches a session when that session fetches it through `inbox` or `thread`. A session starts with what its person already has: a note that had reached one of their sessions before this one was first seen counts as having reached it, so a new terminal does not replay the person's whole history; notes that reached none of them are new for it too.
 
 A thread is **new for a session** when it holds notes, not written by the session's person, that have not reached that session. A person's own notes are never new for any of their sessions. When a session writes a note, everything in the thread up to that note has reached it, unless earlier notes had not: then nothing moves, so a reply written without reading never hides a note.
 
@@ -43,7 +43,7 @@ A thread is **waiting** for a person when it is `direct`, `open`, and its latest
 
 A `team` thread is never "waiting": it shows only while it has notes new for the session. So a teammate's agent with nothing to add does not keep seeing it.
 
-For others, a participant's delivery is the latest note that reached any of their sessions, and which session (its label and context): "picked up by Claude Code in pagos-api, 5 minutes ago".
+For others, a participant's delivery is the latest note that reached any of their sessions, and which session (its label, and its context at that moment): "picked up by Claude Code in pagos-api, 5 minutes ago".
 
 ## Operations
 
@@ -65,7 +65,7 @@ The body is a JSON object; anything else (an array, say), or any other field, fa
 
 Rules:
 
-- `to` holds 1 to 20 addresses of distinct active people other than you, or exactly `["@team"]`. An address is a handle, optionally followed by `/` and a context (`ana/pagos-api`); naming the same person twice with different contexts fails with `BAD_REQUEST`. Addresses may be written with or without a leading `@` and in any case; repeats are merged (`["@team", "equipo"]` is one `@team`). Writing to yourself, or `@team` next to other handles, fails with `BAD_REQUEST`. An unknown or inactive handle fails with `UNKNOWN_PERSON`, whose error lists the valid handles with their `about`.
+- `to` holds 1 to 20 addresses of distinct active people other than you, or exactly `["@team"]`. An address is a handle, optionally followed by `/` and a context (`ana/pagos-api`); naming the same person twice with different contexts (or once with a context and once without) fails with `BAD_REQUEST`, and so does a malformed context or a context on `@team`. Addresses may be written with or without a leading `@` and in any case; repeats are merged (`["@team", "equipo"]` is one `@team`). Writing to yourself, or `@team` next to other handles, fails with `BAD_REQUEST`. An unknown or inactive handle fails with `UNKNOWN_PERSON`, whose error lists the valid handles with their `about`.
 - `["@team"]` opens a `team` thread. `@equipo` is accepted as the same thing (both with or without `@`); `team` and `equipo` can therefore not be handles. A person may open at most `RELEVO_TEAM_QUESTIONS_PER_DAY` (default 5) team threads in any rolling 24 hours: beyond that, `TEAM_LIMIT`. A team of one (only you) fails with `NO_RECIPIENTS`.
 - Writing a note claims the thread for your person, for the session that wrote it (see [Claiming](#sessions-and-routing)).
 - Writing in a thread you are not a participant of fails with `NOT_FOUND` (the thread's existence is not revealed).
@@ -84,7 +84,7 @@ What is new for this session, and what is waiting for its person, among the thre
 
 | Param | |
 |---|---|
-| `all` | bool, optional. Show every thread of the person, ignoring routing and claims. For when the person asks "do I have anything?" from any terminal. |
+| `all` | bool (`1`, `true`, `0`, `false`), optional. Show every thread of the person, ignoring routing and claims. For when the person asks "do I have anything?" from any terminal. |
 | `wait` | seconds, 0 to 60, optional (HTTP only). If nothing is new for this session, hold the request until something is or the time runs out, then answer as usual. Waiting threads alone do not count as new. This is how bridges and bots learn of a note at once. |
 
 Returns:
@@ -116,9 +116,9 @@ Returns:
 
 - `team` lists every active person, you included, so the agent knows whom to ask. `contexts` are the distinct contexts of their sessions seen in the last 15 minutes, sorted.
 - `session` is the session this request counts as.
-- A thread's `context` is the context it was addressed to for you, or `null`. `claimed` is `null` (unclaimed), `"this-session"`, or, only with `all`, `"other-session"`.
+- A thread's `context` is the context it was addressed to for you, or `null`. `claimed` is `null` (unclaimed), `"this-session"`, or, only with `all` (and in `thread`, which also shows any thread of the person), `"other-session"`.
 - At most 20 threads: first those with new notes (waiting ones first among them), then waiting ones with nothing new; within each group, by latest note, newest first. `more` counts the rest. So threads that are only waiting, which stay until someone replies, never keep new notes out.
-- `new_notes` holds the notes not yet delivered to you, oldest first. A note's `text` is cut to 4,000 characters with `truncated: true`; the agent reads it whole with `thread`.
+- `new_notes` holds the notes that have not reached this session, oldest first. That may include the person's own (written without reading, or by another session of theirs), for context: they never make a thread new, but they are part of what this session has not seen. A note's `text` is cut to 4,000 characters with `truncated: true`; the agent reads it whole with `thread`.
 - Returning a thread here delivers its new notes to this session. Threads counted in `more` are not delivered.
 - `from` is the person who opened the thread.
 
@@ -135,7 +135,7 @@ Returns the same thread object as `inbox`, with `notes` (every note, in full, ol
 
 ## HTTP
 
-Every route needs `Authorization: Bearer <token>`, and takes the optional `Relevo-Session` and `Relevo-Context` headers. Bodies and responses are JSON. A malformed session id or context fails with `BAD_REQUEST`.
+Every route needs `Authorization: Bearer <token>`, and takes the optional `Relevo-Session` and `Relevo-Context` headers. Bodies and responses are JSON. A malformed session id or context fails with `BAD_REQUEST` (checked after the token). So does an unknown, repeated or malformed `inbox` parameter.
 
 ```
 GET  /api/inbox?all=1&wait=30

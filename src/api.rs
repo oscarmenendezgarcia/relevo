@@ -1,23 +1,24 @@
 //! The HTTP API: `send`, `inbox`, `thread`, `people` and `health`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::rejection::{BytesRejection, PathRejection};
-use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::extract::rejection::{BytesRejection, PathRejection, QueryRejection};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::types::Value as SqlValue;
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::App;
 use crate::auth::Caller;
-use crate::db::{RESERVED_HANDLES, random_id, rfc3339};
+use crate::db::{RESERVED_HANDLES, random_id, rfc3339, valid_context};
 use crate::error::ApiError;
-use crate::session::touch;
+use crate::session::{Session, SessionOut, touch};
 
 const MAX_TEXT: usize = 64 * 1024;
 /// Room for 64 KiB of text even when every byte is JSON-escaped as `\u00XX` (6 bytes), plus the
@@ -26,7 +27,7 @@ const MAX_BODY: usize = 400 * 1024;
 const MAX_RECIPIENTS: usize = 20;
 const MAX_KEY_CHARS: usize = 100;
 const TITLE_CHARS: usize = 80;
-const INBOX_THREADS: i64 = 20;
+const INBOX_THREADS: usize = 20;
 const INBOX_TEXT_CHARS: usize = 4000;
 const THREAD_NOTES_PER_HOUR: i64 = 20;
 const PERSON_NOTES_PER_MINUTE: i64 = 60;
@@ -74,6 +75,10 @@ struct Delivery {
     handle: String,
     note: Option<String>,
     delivered_at: Option<String>,
+    /// The session the note reached.
+    by: Option<SessionOut>,
+    /// The session of theirs that claimed the thread.
+    claimed_by: Option<SessionOut>,
 }
 
 #[derive(Serialize)]
@@ -85,6 +90,8 @@ struct ThreadOut {
     participants: Vec<String>,
     status: String,
     waiting_for_you: bool,
+    context: Option<String>,
+    claimed: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     new_notes: Option<Vec<NoteOut>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -112,7 +119,7 @@ struct SendResult {
     status: String,
 }
 
-/// A thread as seen by one participant.
+/// A thread as seen by one session of a participant.
 struct ThreadRow {
     id: String,
     kind: String,
@@ -120,41 +127,199 @@ struct ThreadRow {
     from: String,
     opener_id: i64,
     status: String,
+    /// The latest note that reached this session.
     delivered_seq: i64,
     last_seq: i64,
+    /// The latest note not written by this person.
+    last_other_seq: i64,
     waiting: bool,
+    context: Option<String>,
+    claimed_by: Option<i64>,
+}
+
+/// One thread of an inbox page, with what orders it.
+struct Candidate {
+    thread: String,
+    new: bool,
+    waiting: bool,
+    last_seq: i64,
 }
 
 // ---------- queries shared by the handlers ----------
 
-/// Threads of person `?1` that match `filter` (on `p`, their participant row, and `t`, the
-/// thread), with what `inbox` and `thread` need to know about each. Reads only the thread and
-/// participant rows: the latest note and whether it waits are kept on `p` by `refresh`.
-fn threads_of(filter: &str) -> String {
-    format!(
-        "
+/// The thread `?3` of person `?1` as session `?2` sees it. A session without its own delivery row
+/// has what its person has.
+const THREAD_SQL: &str = "
 SELECT t.id, t.kind, t.title, o.handle, t.opener_id, t.status,
-       coalesce(p.delivered_seq, 0), p.last_seq, p.waiting
+       coalesce(s.delivered_seq, p.delivered_seq, 0), p.last_seq, p.last_other_seq, p.waiting,
+       p.context, p.claimed_by
 FROM participants p
 JOIN threads t ON t.id = p.thread_id
 JOIN people o ON o.id = t.opener_id
-WHERE p.person_id = ?1 AND ({filter})"
+LEFT JOIN session_threads s ON s.session_id = ?2 AND s.thread_id = p.thread_id
+WHERE p.person_id = ?1 AND p.thread_id = ?3";
+
+fn find_thread(conn: &Connection, session: &Session, id: &str) -> Result<ThreadRow, ApiError> {
+    conn.query_row(
+        THREAD_SQL,
+        params![session.person_id, session.id, id],
+        |r| {
+            Ok(ThreadRow {
+                id: r.get(0)?,
+                kind: r.get(1)?,
+                title: r.get(2)?,
+                from: r.get(3)?,
+                opener_id: r.get(4)?,
+                status: r.get(5)?,
+                delivered_seq: r.get(6)?,
+                last_seq: r.get(7)?,
+                last_other_seq: r.get(8)?,
+                waiting: r.get(9)?,
+                context: r.get(10)?,
+                claimed_by: r.get(11)?,
+            })
+        },
     )
+    .optional()?
+    .ok_or_else(|| ApiError::not_found("no such thread"))
 }
 
-/// The threads `inbox` shows, in its order: new ones first (waiting ones first among them),
-/// then waiting ones with nothing new; newest first within each. `participants_inbox` holds
-/// exactly these rows in this order, so the query stops after `?2` rows instead of sorting them
-/// all.
-fn inbox_sql() -> String {
+/// The index ranges that hold the threads a session sees, each as (index on `participants`,
+/// index on `session_threads`, condition on `x`, the row read through either). `?2` is the
+/// session, `?3` its context. With `all`, every thread of the person.
+fn routes(contextual: bool, all: bool) -> Vec<(&'static str, &'static str, &'static str)> {
+    const CLAIM: (&str, &str) = ("participants_inbox_claim", "session_new_claim");
+    const CONTEXT: (&str, &str) = ("participants_inbox_context", "session_new_context");
+    if all {
+        return vec![("participants_inbox", "session_new", "1")];
+    }
+    let mut routes = vec![(CLAIM.0, CLAIM.1, "x.claimed_by = ?2")];
+    if contextual {
+        routes.push((
+            CONTEXT.0,
+            CONTEXT.1,
+            "x.claimed_by IS NULL AND x.context IS NULL",
+        ));
+        routes.push((
+            CONTEXT.0,
+            CONTEXT.1,
+            "x.claimed_by IS NULL AND x.context = ?3",
+        ));
+    } else {
+        routes.push((CLAIM.0, CLAIM.1, "x.claimed_by IS NULL"));
+    }
+    routes
+}
+
+/// The queries whose rows hold a session's inbox page: for each route, the person's flagged
+/// threads in inbox order, and the threads new for this session alone (another session of the
+/// person has their latest note) in the order of their group. Each reads its index in order and
+/// stops after a page, so the cost does not grow with the number of flagged threads.
+///
+/// A thread is new for the session when it is new for the person (`x.has_new`: no session of
+/// theirs has its latest note) or for the session's own row. The first query orders by the
+/// person's flag, so a thread new only for the session reads as only waiting there; `page`
+/// takes its flag from the second query. One page of each is enough: if the second query is
+/// full, its threads alone fill the page ahead of any it left out; if not, it holds them all.
+/// And a range's rows before the last one the page needs are new ones (which the page counts)
+/// or needed ones, so they fit in a page.
+fn page_sqls(contextual: bool, all: bool) -> Vec<String> {
+    routes(contextual, all)
+        .into_iter()
+        .flat_map(|(person_index, session_index, route)| {
+            [
+                format!(
+                    "SELECT x.thread_id, x.has_new, x.waiting, x.last_seq
+                     FROM participants x INDEXED BY {person_index}
+                     WHERE x.person_id = ?1 AND x.inbox = 1 AND {route}
+                     ORDER BY x.has_new DESC, x.waiting DESC, x.last_seq DESC LIMIT {INBOX_THREADS}"
+                ),
+                format!(
+                    "SELECT x.thread_id, 1, x.waiting, x.last_seq
+                     FROM session_threads x INDEXED BY {session_index}
+                     WHERE x.session_id = ?2 AND x.has_new = 1 AND {route}
+                     ORDER BY x.waiting DESC, x.last_seq DESC LIMIT {INBOX_THREADS}"
+                ),
+            ]
+        })
+        .collect()
+}
+
+/// How many threads the session's inbox holds: the person's flagged threads it sees, plus those
+/// new only for the session. Counts index entries only.
+fn count_sql(contextual: bool, all: bool) -> String {
+    let sees = match (all, contextual) {
+        (true, _) => "1",
+        (false, false) => "(x.claimed_by = ?2 OR x.claimed_by IS NULL)",
+        (false, true) => {
+            "(x.claimed_by = ?2 OR (x.claimed_by IS NULL AND (x.context IS NULL OR x.context = ?3)))"
+        }
+    };
     format!(
-        "{} ORDER BY p.has_new DESC, p.waiting DESC, p.last_seq DESC LIMIT ?2",
-        threads_of("p.inbox = 1")
+        "SELECT (SELECT count(*) FROM participants x
+                 WHERE x.person_id = ?1 AND x.inbox = 1 AND {sees})
+              + (SELECT count(*) FROM session_threads x
+                 WHERE x.session_id = ?2 AND x.has_new = 1 AND x.person_inbox = 0 AND {sees})"
     )
 }
 
-/// Recomputes what every participant's row knows about a thread (latest note, new, waiting,
-/// inbox). Runs after every change to the thread: a note, a close, a delivery.
+/// Runs one of the inbox queries with the parameters it uses: `?1` person, `?2` session,
+/// `?3` context.
+fn run<T>(
+    conn: &Connection,
+    sql: &str,
+    session: &Session,
+    f: impl FnMut(&rusqlite::Row) -> rusqlite::Result<T>,
+) -> Result<Vec<T>, ApiError> {
+    let mut stmt = conn.prepare_cached(sql)?;
+    let values = [
+        SqlValue::Integer(session.person_id),
+        SqlValue::Integer(session.id),
+        session
+            .context
+            .clone()
+            .map_or(SqlValue::Null, SqlValue::Text),
+    ];
+    let n = stmt.parameter_count();
+    let rows = stmt.query_map(params_from_iter(&values[..n]), f)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// The threads of a session's inbox page, in inbox order: new ones first (waiting ones first
+/// among them), then waiting ones with nothing new; newest first within each.
+fn page(conn: &Connection, session: &Session, all: bool) -> Result<Vec<Candidate>, ApiError> {
+    let mut found: HashMap<String, Candidate> = HashMap::new();
+    for sql in page_sqls(session.context.is_some(), all) {
+        let rows = run(conn, &sql, session, |r| {
+            Ok(Candidate {
+                thread: r.get(0)?,
+                new: r.get(1)?,
+                waiting: r.get(2)?,
+                last_seq: r.get(3)?,
+            })
+        })?;
+        for c in rows {
+            found
+                .entry(c.thread.clone())
+                .and_modify(|seen| seen.new |= c.new)
+                .or_insert(c);
+        }
+    }
+    let mut page: Vec<Candidate> = found.into_values().collect();
+    page.sort_by_key(|c| std::cmp::Reverse((c.new, c.waiting, c.last_seq)));
+    page.truncate(INBOX_THREADS);
+    Ok(page)
+}
+
+fn inbox_count(conn: &Connection, session: &Session, all: bool) -> Result<usize, ApiError> {
+    let sql = count_sql(session.context.is_some(), all);
+    let counts = run(conn, &sql, session, |r| r.get::<_, i64>(0))?;
+    Ok(counts.first().copied().unwrap_or(0) as usize)
+}
+
+/// Recomputes what the rows of a thread know about it (latest note, new, waiting, inbox, and the
+/// copies on the sessions' rows). Runs after every change to the thread: a note, a close, a
+/// delivery, a claim.
 fn refresh(conn: &Connection, thread: &str) -> Result<(), ApiError> {
     // A thread is opened by its first note, so it always has a latest one.
     let (last_seq, last_author, open_direct): (i64, i64, bool) = conn.query_row(
@@ -167,33 +332,25 @@ fn refresh(conn: &Connection, thread: &str) -> Result<(), ApiError> {
     conn.execute(
         "UPDATE participants SET
              last_seq = ?2,
-             has_new = coalesce(delivered_seq, 0) < ?2,
+             has_new = coalesce(delivered_seq, 0) < last_other_seq,
              waiting = ?3 AND person_id != ?4,
-             inbox = coalesce(delivered_seq, 0) < ?2 OR (?3 AND person_id != ?4)
+             inbox = coalesce(delivered_seq, 0) < last_other_seq OR (?3 AND person_id != ?4)
          WHERE thread_id = ?1",
         params![thread, last_seq, open_direct, last_author],
     )?;
+    conn.execute(
+        "UPDATE session_threads AS s SET
+             has_new = s.delivered_seq < p.last_other_seq,
+             waiting = p.waiting,
+             last_seq = p.last_seq,
+             claimed_by = p.claimed_by,
+             context = p.context,
+             person_inbox = p.inbox
+         FROM participants p
+         WHERE s.thread_id = ?1 AND p.thread_id = s.thread_id AND p.person_id = s.person_id",
+        [thread],
+    )?;
     Ok(())
-}
-
-fn thread_row(r: &rusqlite::Row) -> rusqlite::Result<ThreadRow> {
-    Ok(ThreadRow {
-        id: r.get(0)?,
-        kind: r.get(1)?,
-        title: r.get(2)?,
-        from: r.get(3)?,
-        opener_id: r.get(4)?,
-        status: r.get(5)?,
-        delivered_seq: r.get(6)?,
-        last_seq: r.get(7)?,
-        waiting: r.get(8)?,
-    })
-}
-
-fn find_thread(conn: &Connection, me: i64, id: &str) -> Result<ThreadRow, ApiError> {
-    conn.query_row(&threads_of("t.id = ?2"), params![me, id], thread_row)
-        .optional()?
-        .ok_or_else(|| ApiError::not_found("no such thread"))
 }
 
 /// Every active person, with the contexts of their sessions seen in the last 15 minutes.
@@ -261,22 +418,55 @@ fn notes_after(
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// Delivers the notes of `thread` up to `seq` to `session`. When that moves what its person has,
+/// every other session of theirs first gets a row keeping what it had, so that it still gets
+/// those notes. Callers `refresh` the thread afterwards.
 fn deliver(
     conn: &Connection,
+    session: &Session,
     thread: &str,
-    person: i64,
     seq: i64,
     now: i64,
 ) -> Result<(), ApiError> {
-    conn.execute(
-        "UPDATE participants SET delivered_seq = ?3, delivered_at = ?4
-         WHERE thread_id = ?1 AND person_id = ?2 AND coalesce(delivered_seq, 0) < ?3",
-        params![thread, person, seq, now],
+    let person_has: i64 = conn.query_row(
+        "SELECT coalesce(delivered_seq, 0) FROM participants
+         WHERE thread_id = ?1 AND person_id = ?2",
+        params![thread, session.person_id],
+        |r| r.get(0),
     )?;
-    refresh(conn, thread)
+    if seq > person_has {
+        conn.execute(
+            "INSERT OR IGNORE INTO session_threads (session_id, thread_id, person_id, delivered_seq)
+             SELECT id, ?2, ?3, ?4 FROM sessions WHERE person_id = ?3 AND id != ?1",
+            params![session.id, thread, session.person_id, person_has],
+        )?;
+        conn.execute(
+            "UPDATE participants SET delivered_seq = ?3, delivered_at = ?4,
+                 delivered_label = ?5, delivered_context = ?6
+             WHERE thread_id = ?1 AND person_id = ?2",
+            params![
+                thread,
+                session.person_id,
+                seq,
+                now,
+                session.label,
+                session.context
+            ],
+        )?;
+    }
+    conn.execute(
+        "UPDATE session_threads SET delivered_seq = ?3
+         WHERE session_id = ?1 AND thread_id = ?2 AND delivered_seq < ?3",
+        params![session.id, thread, seq],
+    )?;
+    Ok(())
 }
 
-fn thread_out(conn: &Connection, row: &ThreadRow) -> Result<ThreadOut, ApiError> {
+fn thread_out(
+    conn: &Connection,
+    session: &Session,
+    row: &ThreadRow,
+) -> Result<ThreadOut, ApiError> {
     Ok(ThreadOut {
         id: row.id.clone(),
         kind: row.kind.clone(),
@@ -285,10 +475,67 @@ fn thread_out(conn: &Connection, row: &ThreadRow) -> Result<ThreadOut, ApiError>
         participants: participants(conn, &row.id)?,
         status: row.status.clone(),
         waiting_for_you: row.waiting,
+        context: row.context.clone(),
+        claimed: row.claimed_by.map(|by| {
+            if by == session.id {
+                "this-session"
+            } else {
+                "other-session"
+            }
+        }),
         new_notes: None,
         notes: None,
         delivery: None,
     })
+}
+
+/// For each participant, in order: the latest note that reached one of their sessions, which
+/// session that was, and which session claimed the thread.
+fn delivery(conn: &Connection, thread: &str) -> Result<Vec<Delivery>, ApiError> {
+    let mut stmt = conn.prepare(
+        "SELECT pe.handle, n.id, p.delivered_at, p.delivered_label, p.delivered_context,
+                ct.label, cs.context
+         FROM participants p JOIN people pe ON pe.id = p.person_id
+         LEFT JOIN notes n ON n.seq = p.delivered_seq
+         LEFT JOIN sessions cs ON cs.id = p.claimed_by
+         LEFT JOIN tokens ct ON ct.id = cs.token_id
+         WHERE p.thread_id = ?1 ORDER BY p.rowid",
+    )?;
+    let rows = stmt.query_map([thread], |r| {
+        let session = |label: Option<String>, context: Option<String>| {
+            label.map(|label| SessionOut { label, context })
+        };
+        Ok(Delivery {
+            handle: r.get(0)?,
+            note: r.get(1)?,
+            delivered_at: r.get::<_, Option<i64>>(2)?.map(rfc3339),
+            by: session(r.get(3)?, r.get(4)?),
+            claimed_by: session(r.get(5)?, r.get(6)?),
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// `inbox`'s query string: `all` (`1`/`true` or `0`/`false`).
+fn inbox_params(
+    query: Result<Query<Vec<(String, String)>>, QueryRejection>,
+) -> Result<bool, ApiError> {
+    let Query(pairs) = query.map_err(|e| ApiError::bad_request(e.body_text()))?;
+    let mut all = None;
+    for (name, value) in pairs {
+        match name.as_str() {
+            "all" if all.is_none() => {
+                all = Some(match value.as_str() {
+                    "1" | "true" => true,
+                    "0" | "false" => false,
+                    _ => return Err(ApiError::bad_request("'all' must be 1, 0, true or false")),
+                })
+            }
+            "all" => return Err(ApiError::bad_request("'all' given twice")),
+            _ => return Err(ApiError::bad_request(format!("unknown parameter '{name}'"))),
+        }
+    }
+    Ok(all.unwrap_or(false))
 }
 
 // ---------- handlers ----------
@@ -303,37 +550,43 @@ async fn people(State(app): State<Arc<App>>, caller: Caller) -> Result<Json<Valu
     Ok(Json(json!({ "team": team })))
 }
 
-async fn inbox(State(app): State<Arc<App>>, caller: Caller) -> Result<Json<Value>, ApiError> {
+async fn inbox(
+    State(app): State<Arc<App>>,
+    caller: Caller,
+    query: Result<Query<Vec<(String, String)>>, QueryRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let all = inbox_params(query)?;
     let mut conn = app.db();
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     // Read under the lock, so that times follow the order of `seq`.
     let now = app.clock.now();
     let session = touch(&tx, &caller, now)?;
-    let rows: Vec<ThreadRow> = tx
-        .prepare(&inbox_sql())?
-        .query_map(params![caller.person_id, INBOX_THREADS], thread_row)?
-        .collect::<rusqlite::Result<_>>()?;
-    let flagged: i64 = tx.query_row(
-        "SELECT count(*) FROM participants WHERE person_id = ?1 AND inbox = 1",
-        [caller.person_id],
-        |r| r.get(0),
-    )?;
-    let more = flagged - rows.len() as i64;
+    let page = page(&tx, &session, all)?;
+    let more = inbox_count(&tx, &session, all)?.saturating_sub(page.len());
     let mut threads = Vec::new();
-    for row in &rows {
-        let mut out = thread_out(&tx, row)?;
+    for candidate in &page {
+        let row = find_thread(&tx, &session, &candidate.thread)?;
+        let mut out = thread_out(&tx, &session, &row)?;
         out.new_notes = Some(notes_after(
             &tx,
             &row.id,
             row.delivered_seq,
             Some(INBOX_TEXT_CHARS),
         )?);
-        deliver(&tx, &row.id, caller.person_id, row.last_seq, now)?;
+        deliver(&tx, &session, &row.id, row.last_seq, now)?;
+        refresh(&tx, &row.id)?;
         threads.push(out);
     }
     let team = team(&tx, now)?;
     tx.commit()?;
-    tracing::info!(person = %caller.handle, session = session.id, threads = threads.len(), more, "inbox");
+    tracing::info!(
+        person = %caller.handle,
+        session = session.id,
+        all,
+        threads = threads.len(),
+        more,
+        "inbox"
+    );
     Ok(Json(json!({
         "team": team,
         "session": session.out(),
@@ -352,30 +605,15 @@ async fn thread(
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     // Read under the lock, so that times follow the order of `seq`.
     let now = app.clock.now();
-    touch(&tx, &caller, now)?;
-    let row = find_thread(&tx, caller.person_id, &id)?;
-    deliver(&tx, &row.id, caller.person_id, row.last_seq, now)?;
-    let mut out = thread_out(&tx, &row)?;
+    let session = touch(&tx, &caller, now)?;
+    let row = find_thread(&tx, &session, &id)?;
+    deliver(&tx, &session, &row.id, row.last_seq, now)?;
+    refresh(&tx, &row.id)?;
+    let mut out = thread_out(&tx, &session, &row)?;
     out.notes = Some(notes_after(&tx, &row.id, 0, None)?);
-    let mut stmt = tx.prepare(
-        "SELECT pe.handle, n.id, p.delivered_at
-         FROM participants p JOIN people pe ON pe.id = p.person_id
-         LEFT JOIN notes n ON n.seq = p.delivered_seq
-         WHERE p.thread_id = ?1 ORDER BY p.rowid",
-    )?;
-    let delivery = stmt
-        .query_map([&row.id], |r| {
-            Ok(Delivery {
-                handle: r.get(0)?,
-                note: r.get(1)?,
-                delivered_at: r.get::<_, Option<i64>>(2)?.map(rfc3339),
-            })
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    out.delivery = Some(delivery);
-    drop(stmt);
+    out.delivery = Some(delivery(&tx, &row.id)?);
     tx.commit()?;
-    tracing::info!(person = %caller.handle, thread = %row.id, "thread");
+    tracing::info!(person = %caller.handle, session = session.id, thread = %row.id, "thread");
     Ok(Json(out))
 }
 
@@ -441,7 +679,7 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<SendResult, Api
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     // Read under the lock, so that times follow the order of `seq`.
     let now = app.clock.now();
-    touch(&tx, caller, now)?;
+    let session = touch(&tx, caller, now)?;
 
     // Keys expire 24 hours after the send that used them. Forgetting them here keeps the table
     // small, and lets an expired key be used again as a fresh send.
@@ -468,13 +706,14 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<SendResult, Api
         }
     }
 
-    let thread_id = match (&req.to, &req.thread) {
+    // `caught_up`: every note of the others had reached this session before it wrote.
+    let (thread_id, caught_up) = match (&req.to, &req.thread) {
         (Some(to), _) => {
             let text = req.text.as_deref().unwrap_or_default();
-            open_thread(&tx, app, caller, to, text, now)?
+            (open_thread(&tx, app, caller, to, text, now)?, true)
         }
         (None, Some(id)) => {
-            let row = find_thread(&tx, caller.person_id, id)?;
+            let row = find_thread(&tx, &session, id)?;
             if row.status == "closed" {
                 return Err(ApiError::thread_closed());
             }
@@ -491,7 +730,8 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<SendResult, Api
                     return Err(ApiError::thread_busy());
                 }
             }
-            row.id
+            let caught_up = row.delivered_seq >= row.last_other_seq;
+            (row.id, caught_up)
         }
         (None, None) => unreachable!("checked above"),
     };
@@ -520,14 +760,20 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<SendResult, Api
                     now
                 ],
             )?;
-            // The writer has their own note delivered at once, unless notes before it never
-            // reached them: then the pointer stays, so those notes are not skipped.
+            let seq = tx.last_insert_rowid();
             tx.execute(
-                "UPDATE participants SET delivered_seq = ?3, delivered_at = ?4
-                 WHERE thread_id = ?1 AND person_id = ?2
-                   AND coalesce(delivered_seq, 0) >= (SELECT coalesce(max(seq), 0) FROM notes
-                                                      WHERE thread_id = ?1 AND seq < ?3)",
-                params![thread_id, caller.person_id, tx.last_insert_rowid(), now],
+                "UPDATE participants SET last_other_seq = ?2 WHERE thread_id = ?1 AND person_id != ?3",
+                params![thread_id, seq, caller.person_id],
+            )?;
+            // The writing session has the thread up to its note, unless notes of the others never
+            // reached it: then nothing moves, so those notes are not skipped.
+            if caught_up {
+                deliver(&tx, &session, &thread_id, seq, now)?;
+            }
+            // Writing claims the thread for the person, for this session.
+            tx.execute(
+                "UPDATE participants SET claimed_by = ?3 WHERE thread_id = ?1 AND person_id = ?2",
+                params![thread_id, caller.person_id, session.id],
             )?;
             Some(id)
         }
@@ -573,31 +819,22 @@ fn open_thread(
     text: &str,
     now: i64,
 ) -> Result<String, ApiError> {
-    // Normalised, with `equipo` read as `team`, and repeats merged (first one kept).
-    let mut seen = HashSet::new();
-    let handles: Vec<String> = to
-        .iter()
-        .map(|h| h.trim().trim_start_matches('@').to_lowercase())
-        .map(|h| {
-            if RESERVED_HANDLES.contains(&h.as_str()) {
-                "team".to_string()
-            } else {
-                h
-            }
-        })
-        .filter(|h| seen.insert(h.clone()))
-        .collect();
-    let is_team = handles.iter().any(|h| h == "team");
+    let addresses = addresses(to)?;
+    let is_team = addresses.iter().any(|(h, _)| h == "team");
 
-    let (kind, others): (&str, Vec<i64>) = if is_team {
-        if handles.len() != 1 {
+    // The others, each with the context the thread is addressed to for them.
+    let (kind, others): (&str, Vec<(i64, Option<String>)>) = if is_team {
+        if addresses.len() != 1 {
             return Err(ApiError::bad_request(
                 "'@team' must be the only entry of 'to'",
             ));
         }
-        let others: Vec<i64> = conn
+        if addresses[0].1.is_some() {
+            return Err(ApiError::bad_request("'@team' takes no context"));
+        }
+        let others: Vec<(i64, Option<String>)> = conn
             .prepare("SELECT id FROM people WHERE active = 1 AND id != ?1 ORDER BY handle")?
-            .query_map([caller.person_id], |r| r.get(0))?
+            .query_map([caller.person_id], |r| Ok((r.get(0)?, None)))?
             .collect::<rusqlite::Result<_>>()?;
         if others.is_empty() {
             return Err(ApiError::no_recipients());
@@ -613,28 +850,28 @@ fn open_thread(
         }
         ("team", others)
     } else {
-        if handles.is_empty() || handles.len() > MAX_RECIPIENTS {
+        if addresses.is_empty() || addresses.len() > MAX_RECIPIENTS {
             return Err(ApiError::bad_request(
                 "'to' needs 1 to 20 handles, or [\"@team\"]",
             ));
         }
         let mut others = Vec::new();
-        for handle in &handles {
-            if *handle == caller.handle {
+        for (handle, context) in addresses {
+            if handle == caller.handle {
                 return Err(ApiError::bad_request("you cannot send a note to yourself"));
             }
             let id: Option<i64> = conn
                 .query_row(
                     "SELECT id FROM people WHERE handle = ?1 AND active = 1",
-                    [handle],
+                    [&handle],
                     |r| r.get(0),
                 )
                 .optional()?;
             match id {
-                Some(id) => others.push(id),
+                Some(id) => others.push((id, context)),
                 None => {
                     let valid = serde_json::to_value(team(conn, now)?).unwrap_or_default();
-                    return Err(ApiError::unknown_person(handle, valid));
+                    return Err(ApiError::unknown_person(&handle, valid));
                 }
             }
         }
@@ -647,13 +884,49 @@ fn open_thread(
          VALUES (?1, ?2, ?3, ?4, 'open', ?5)",
         params![id, kind, title_of(text), caller.person_id, now],
     )?;
-    let mut add =
-        conn.prepare("INSERT INTO participants (thread_id, person_id) VALUES (?1, ?2)")?;
-    add.execute(params![id, caller.person_id])?;
-    for person in others {
-        add.execute(params![id, person])?;
+    let mut add = conn
+        .prepare("INSERT INTO participants (thread_id, person_id, context) VALUES (?1, ?2, ?3)")?;
+    add.execute(params![id, caller.person_id, None::<String>])?;
+    for (person, context) in others {
+        add.execute(params![id, person, context])?;
     }
     Ok(id)
+}
+
+/// `to`, read as (handle, context) pairs: without leading `@`, lowercased, `equipo` read as
+/// `team`, and repeats merged (the first one kept). The same person under two contexts (or
+/// with and without one) is a `BAD_REQUEST`.
+fn addresses(to: &[String]) -> Result<Vec<(String, Option<String>)>, ApiError> {
+    let mut out: Vec<(String, Option<String>)> = Vec::new();
+    for raw in to {
+        let address = raw.trim().trim_start_matches('@').to_lowercase();
+        let (handle, context) = match address.split_once('/') {
+            Some((handle, context)) => (handle.to_string(), Some(context.to_string())),
+            None => (address, None),
+        };
+        if let Some(context) = &context
+            && !valid_context(context)
+        {
+            return Err(ApiError::bad_request(format!(
+                "'{raw}': a context must match ^[a-z0-9][a-z0-9._-]{{0,63}}$"
+            )));
+        }
+        let handle = if RESERVED_HANDLES.contains(&handle.as_str()) {
+            "team".to_string()
+        } else {
+            handle
+        };
+        match out.iter().find(|(seen, _)| *seen == handle) {
+            Some((_, seen)) if *seen == context => {}
+            Some(_) => {
+                return Err(ApiError::bad_request(format!(
+                    "'{handle}' is named twice with different contexts"
+                )));
+            }
+            None => out.push((handle, context)),
+        }
+    }
+    Ok(out)
 }
 
 /// The first non-empty line of the note, without leading `#`s, cut to 80 characters.
@@ -669,34 +942,75 @@ fn title_of(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{inbox_sql, title_of};
+    use super::{count_sql, page_sqls, title_of};
+
+    fn plan(sql: &str) -> Vec<String> {
+        let conn = crate::db::open(":memory:").unwrap();
+        let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let n = stmt.parameter_count();
+        let values = [1i64, 2, 3];
+        stmt.query_map(rusqlite::params_from_iter(&values[..n]), |r| r.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
 
     /// The inbox must cost the same for 20 flagged threads as for 100,000: agents poll it, a
     /// runaway agent can open thousands of threads a day for one person, and it runs under the
-    /// lock every request needs. So it reads only flagged rows, already in inbox order from the
-    /// index, and stops after 20: no sort over all of them, and no work per row it skips.
+    /// lock every request needs. So each query of a session's page reads its rows already in
+    /// inbox order from an index whose leading columns pick exactly the threads that session
+    /// sees, and stops after a page: no sort, no rows read only to be skipped, and nothing
+    /// done per thread it does not return.
     #[test]
-    fn inbox_reads_its_20_threads_in_index_order_without_sorting() {
-        let conn = crate::db::open(":memory:").unwrap();
-        let mut stmt = conn
-            .prepare(&format!("EXPLAIN QUERY PLAN {}", inbox_sql()))
-            .unwrap();
-        let plan: Vec<String> = stmt
-            .query_map(rusqlite::params![1, 20], |r| r.get(3))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
-        assert!(
-            plan[0].contains("p USING INDEX participants_inbox"),
-            "{plan:#?}"
-        );
-        assert!(
-            !plan.iter().any(|step| step.contains("TEMP B-TREE")
-                || step.contains("SUBQUERY")
-                || step.contains("SCAN t")
-                || step.contains("SCAN o")),
-            "{plan:#?}"
-        );
+    fn inbox_page_reads_index_ranges_in_order_without_sorting() {
+        for (contextual, all, queries) in [(false, false, 4), (true, false, 6), (false, true, 2)] {
+            let sqls = page_sqls(contextual, all);
+            assert_eq!(sqls.len(), queries);
+            for sql in sqls {
+                let plan = plan(&sql);
+                let first = &plan[0];
+                assert!(
+                    first.starts_with("SEARCH x USING INDEX participants_inbox")
+                        || first.starts_with("SEARCH x USING INDEX session_new"),
+                    "{plan:#?}"
+                );
+                // Every condition is an equality on the index's leading columns, so the range
+                // holds only threads the session sees.
+                let leading = if all {
+                    "_id=?)"
+                } else {
+                    "_id=? AND claimed_by=?"
+                };
+                assert!(first.contains(leading), "{plan:#?}");
+                assert!(!sql.contains(" OR x."), "{sql}");
+                assert!(
+                    !plan.iter().any(|step| step.contains("TEMP B-TREE")
+                        || step.contains("SUBQUERY")
+                        || step.starts_with("SCAN")),
+                    "{plan:#?}"
+                );
+                assert_eq!(plan.len(), 1, "{plan:#?}");
+            }
+        }
+    }
+
+    /// `more` counts index entries of flagged threads only, never every thread of the person.
+    #[test]
+    fn inbox_count_reads_only_flagged_index_entries() {
+        for contextual in [false, true] {
+            for all in [false, true] {
+                let plan = plan(&count_sql(contextual, all));
+                for step in plan.iter().filter(|s| s.contains(" x ")) {
+                    assert!(
+                        step.contains("USING INDEX participants_inbox")
+                            || step.contains("USING COVERING INDEX participants_inbox")
+                            || step.contains("INDEX session_new"),
+                        "{plan:#?}"
+                    );
+                }
+                assert!(!plan.iter().any(|s| s.contains("TEMP B-TREE")), "{plan:#?}");
+            }
+        }
     }
 
     #[test]

@@ -60,11 +60,24 @@ pub fn touch(conn: &Connection, caller: &Caller, now: i64) -> Result<Session, Ap
     })
 }
 
-/// Forgets every session not seen for 7 days.
+/// Forgets every session not seen for 7 days, and its claims: the threads it claimed go back to
+/// every session of the person that sees them.
 fn forget(conn: &Connection, now: i64) -> Result<(), ApiError> {
-    conn.execute(
-        "DELETE FROM sessions WHERE last_seen <= ?1",
-        [now - SESSION_LIFETIME_SECS],
-    )?;
+    let expired: Vec<i64> = conn
+        .prepare("SELECT id FROM sessions WHERE last_seen <= ?1")?
+        .query_map([now - SESSION_LIFETIME_SECS], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for id in expired {
+        conn.execute(
+            "UPDATE participants SET claimed_by = NULL WHERE claimed_by = ?1",
+            [id],
+        )?;
+        conn.execute(
+            "UPDATE session_threads SET claimed_by = NULL WHERE claimed_by = ?1",
+            [id],
+        )?;
+        conn.execute("DELETE FROM session_threads WHERE session_id = ?1", [id])?;
+        conn.execute("DELETE FROM sessions WHERE id = ?1", [id])?;
+    }
     Ok(())
 }

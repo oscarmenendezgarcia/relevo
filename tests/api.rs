@@ -153,8 +153,20 @@ impl Agent {
         .await
     }
 
+    async fn ok(&self, body: Value) -> String {
+        let (status, v) = self.send(body).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        v["thread"].as_str().unwrap().to_string()
+    }
+
     async fn inbox(&self) -> Value {
         self.inbox_at("/api/inbox").await
+    }
+
+    async fn thread(&self, id: &str) -> Value {
+        let (status, v) = self.get(&format!("/api/threads/{id}")).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        v
     }
 
     async fn inbox_at(&self, uri: &str) -> Value {
@@ -426,9 +438,12 @@ async fn writers_own_notes_are_delivered_at_once() {
     assert_eq!(delivery[0]["handle"], "ana");
     assert_eq!(delivery[0]["note"], th["notes"][0]["id"]);
     assert_eq!(delivery[0]["delivered_at"], "2026-11-08T10:41:00Z");
+    let ana = json!({ "label": "laptop", "context": null });
+    assert_eq!(delivery[0]["by"], ana);
+    assert_eq!(delivery[0]["claimed_by"], ana);
     assert_eq!(
         delivery[1],
-        json!({ "handle": "bob", "note": null, "delivered_at": null })
+        json!({ "handle": "bob", "note": null, "delivered_at": null, "by": null, "claimed_by": null })
     );
 }
 
@@ -1397,4 +1412,530 @@ async fn sessions_not_seen_for_7_days_are_forgotten() {
         .query_row("SELECT count(*) FROM sessions", [], |r| r.get(0))
         .unwrap();
     assert_eq!(left, 1, "only bob's default session is left");
+}
+
+// ---------- routing, claims and delivery per session ----------
+
+/// The texts of the new notes of `id` in an inbox, or `None` when it does not show `id`.
+fn new_texts(inbox: &Value, id: &str) -> Option<Vec<String>> {
+    let th = inbox["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == id)?;
+    Some(
+        th["new_notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["text"].as_str().unwrap().to_string())
+            .collect(),
+    )
+}
+
+#[tokio::test]
+async fn an_unaddressed_note_shows_in_every_session_until_one_answers() {
+    let t = team(&["ana", "bob"]);
+    let pagos = t.agent("bob", "term-pagos", "pagos-api");
+    let front = t.agent("bob", "term-front", "frontend");
+    // Both sessions exist before the note lands.
+    pagos.inbox().await;
+    front.inbox().await;
+    let id = t
+        .ok("ana", json!({ "to": ["bob"], "text": "refunds?" }))
+        .await;
+    let v = pagos.inbox().await;
+    assert_eq!(new_texts(&v, &id), Some(vec!["refunds?".to_string()]));
+    let th = &v["threads"][0];
+    assert_eq!(th["context"], Value::Null);
+    assert_eq!(th["claimed"], Value::Null);
+    assert_eq!(th["waiting_for_you"], true);
+    // The frontend session still gets it as new: pagos reading it did not deliver it there.
+    assert_eq!(
+        new_texts(&front.inbox().await, &id),
+        Some(vec!["refunds?".to_string()])
+    );
+
+    // Frontend answers: it claims the thread, and pagos stops seeing it.
+    front.ok(json!({ "thread": id, "text": "mine" })).await;
+    assert_eq!(new_texts(&pagos.inbox().await, &id), None);
+    t.ok("ana", json!({ "thread": id, "text": "thanks, and?" }))
+        .await;
+    assert_eq!(new_texts(&pagos.inbox().await, &id), None);
+    assert!(
+        thread_ids(&t.inbox("bob").await).is_empty(),
+        "nor does a general one"
+    );
+    let v = front.inbox().await;
+    assert_eq!(new_texts(&v, &id), Some(vec!["thanks, and?".to_string()]));
+    assert_eq!(v["threads"][0]["claimed"], "this-session");
+
+    // Pagos reads it whole and takes it over by writing in it.
+    pagos.thread(&id).await;
+    pagos
+        .ok(json!({ "thread": id, "text": "I'll take it" }))
+        .await;
+    t.ok("ana", json!({ "thread": id, "text": "ok" })).await;
+    assert_eq!(new_texts(&front.inbox().await, &id), None);
+    assert_eq!(
+        new_texts(&pagos.inbox().await, &id),
+        Some(vec!["ok".to_string()])
+    );
+}
+
+#[tokio::test]
+async fn a_note_to_a_context_shows_there_and_in_general_sessions_only() {
+    let t = team(&["ana", "bob"]);
+    let pagos = t.agent("ana", "term-pagos", "pagos-api");
+    let pagos2 = t.agent("ana", "term-pagos2", "pagos-api");
+    let front = t.agent("ana", "term-front", "frontend");
+    let general = t.agent("ana", "bot-00001", "");
+    // The context needs no live session: the thread waits for one.
+    let id = t
+        .ok(
+            "bob",
+            json!({ "to": ["Ana/Pagos-API"], "text": "refunds?" }),
+        )
+        .await;
+    assert!(thread_ids(&front.inbox().await).is_empty());
+    for agent in [&pagos, &pagos2, &general] {
+        let v = agent.inbox().await;
+        assert_eq!(thread_ids(&v), vec![id.clone()]);
+        assert_eq!(v["threads"][0]["context"], "pagos-api");
+    }
+    assert_eq!(
+        t.inbox("ana").await["threads"][0]["id"],
+        id,
+        "default session is general"
+    );
+    // The writer sees no context of theirs on it.
+    assert_eq!(t.thread("bob", &id).await["context"], Value::Null);
+
+    // A session that moves into the context sees it.
+    let moved = t.agent("ana", "term-front", "pagos-api");
+    assert_eq!(thread_ids(&moved.inbox().await), vec![id.clone()]);
+}
+
+#[tokio::test]
+async fn addresses_with_contexts_are_checked_and_merged() {
+    let t = team(&["ana", "bob", "carl"]);
+    for to in [
+        json!(["ana/pagos-api", "ana/frontend"]),
+        json!(["ana", "ana/pagos-api"]),
+        json!(["ana/"]),
+        json!(["ana/-x"]),
+        json!(["ana/a b"]),
+        json!(["ana/pagos/api"]),
+        json!(["@team/pagos-api"]),
+        json!(["bob/frontend"]),
+    ] {
+        let (status, v) = t.send("bob", json!({ "to": to, "text": "x" })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{to}");
+        assert_eq!(code(&v), "BAD_REQUEST", "{to}: {v}");
+    }
+    let (status, v) = t
+        .send("bob", json!({ "to": ["zed/pagos-api"], "text": "x" }))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(code(&v), "UNKNOWN_PERSON");
+    let id = t
+        .ok(
+            "bob",
+            json!({ "to": ["ana/pagos-api", "@Ana/PAGOS-API", "carl"], "text": "x" }),
+        )
+        .await;
+    assert_eq!(
+        t.thread("bob", &id).await["participants"],
+        json!(["bob", "ana", "carl"])
+    );
+    assert_eq!(t.thread("ana", &id).await["context"], "pagos-api");
+    assert_eq!(t.thread("carl", &id).await["context"], Value::Null);
+}
+
+#[tokio::test]
+async fn all_shows_every_thread_of_the_person_and_marks_other_claims() {
+    let t = team(&["ana", "bob"]);
+    let pagos = t.agent("bob", "term-pagos", "pagos-api");
+    let front = t.agent("bob", "term-front", "frontend");
+    pagos.inbox().await;
+    let to_front = t
+        .ok("ana", json!({ "to": ["bob/frontend"], "text": "css?" }))
+        .await;
+    let claimed = t
+        .ok("ana", json!({ "to": ["bob"], "text": "deploy?" }))
+        .await;
+    front.inbox().await;
+    front
+        .ok(json!({ "thread": claimed, "text": "on it" }))
+        .await;
+    t.ok("ana", json!({ "thread": claimed, "text": "thanks" }))
+        .await;
+    assert!(thread_ids(&pagos.inbox().await).is_empty());
+
+    for uri in ["/api/inbox?all=1", "/api/inbox?all=true"] {
+        let v = t
+            .agent("bob", "term-pagos", "pagos-api")
+            .inbox_at(uri)
+            .await;
+        assert_eq!(
+            thread_ids(&v),
+            vec![claimed.clone(), to_front.clone()],
+            "{uri}"
+        );
+        assert_eq!(v["threads"][0]["claimed"], "other-session");
+        assert_eq!(v["threads"][1]["claimed"], Value::Null);
+        assert_eq!(v["threads"][1]["context"], "frontend");
+    }
+    // The first call delivered them to pagos; the second showed them as only waiting.
+    let v = pagos.inbox_at("/api/inbox?all=1").await;
+    assert_eq!(new_texts(&v, &claimed), Some(vec![]));
+    assert_eq!(new_texts(&v, &to_front), Some(vec![]));
+    // all=0 is the routed inbox.
+    assert!(thread_ids(&pagos.inbox_at("/api/inbox?all=0").await).is_empty());
+    // Delivered to pagos only: frontend still gets the new note.
+    assert_eq!(
+        new_texts(&front.inbox().await, &claimed),
+        Some(vec!["thanks".to_string()])
+    );
+    for uri in [
+        "/api/inbox?all=yes",
+        "/api/inbox?all=",
+        "/api/inbox?all=1&all=1",
+        "/api/inbox?al=1",
+    ] {
+        let (status, v) = pagos.get(uri).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+        assert_eq!(code(&v), "BAD_REQUEST");
+    }
+}
+
+#[tokio::test]
+async fn thread_works_from_any_session_and_does_not_claim() {
+    let t = team(&["ana", "bob"]);
+    let pagos = t.agent("bob", "term-pagos", "pagos-api");
+    let front = t.agent("bob", "term-front", "frontend");
+    pagos.inbox().await;
+    let id = t
+        .ok(
+            "ana",
+            json!({ "to": ["bob/pagos-api"], "text": "refunds?" }),
+        )
+        .await;
+    // Frontend does not see it routed, but may read it whole.
+    assert!(thread_ids(&front.inbox().await).is_empty());
+    let th = front.thread(&id).await;
+    assert_eq!(th["notes"][0]["text"], "refunds?");
+    assert_eq!(th["claimed"], Value::Null);
+    assert_eq!(th["context"], "pagos-api");
+    // Reading did not claim it: pagos still sees it, and as new.
+    assert_eq!(
+        new_texts(&pagos.inbox().await, &id),
+        Some(vec!["refunds?".to_string()])
+    );
+    // Once pagos claims it, thread shows whose it is from either session.
+    pagos.ok(json!({ "thread": id, "text": "yes" })).await;
+    assert_eq!(pagos.thread(&id).await["claimed"], "this-session");
+    assert_eq!(front.thread(&id).await["claimed"], "other-session");
+    // Frontend writing takes it over.
+    front
+        .ok(json!({ "thread": id, "text": "actually me" }))
+        .await;
+    assert_eq!(pagos.thread(&id).await["claimed"], "other-session");
+}
+
+#[tokio::test]
+async fn closing_without_text_does_not_claim() {
+    let t = team(&["ana", "bob"]);
+    let pagos = t.agent("bob", "term-pagos", "pagos-api");
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
+    pagos.ok(json!({ "thread": id, "close": true })).await;
+    assert_eq!(pagos.thread(&id).await["claimed"], Value::Null);
+}
+
+#[tokio::test]
+async fn reading_in_one_session_does_not_deliver_to_another() {
+    let t = team(&["ana", "bob"]);
+    let first = t.agent("bob", "term-0001", "");
+    let second = t.agent("bob", "term-0002", "");
+    first.inbox().await;
+    second.inbox().await;
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "one" })).await;
+    t.app.clock.advance(60);
+    first.thread(&id).await;
+    assert_eq!(
+        new_texts(&second.inbox().await, &id),
+        Some(vec!["one".to_string()])
+    );
+    assert_eq!(new_texts(&second.inbox().await, &id), Some(vec![]));
+    t.ok("ana", json!({ "thread": id, "text": "two" })).await;
+    assert_eq!(
+        new_texts(&first.inbox().await, &id),
+        Some(vec!["two".to_string()])
+    );
+    assert_eq!(
+        new_texts(&second.inbox().await, &id),
+        Some(vec!["two".to_string()])
+    );
+    // A session first seen after the notes reached the person starts with what the person has:
+    // nothing new, only waiting.
+    let later = t.agent("bob", "term-0003", "");
+    assert_eq!(new_texts(&later.inbox().await, &id), Some(vec![]));
+    // But notes that reached no session of the person are new for it too.
+    t.ok("ana", json!({ "thread": id, "text": "three" })).await;
+    let fresh = t.agent("bob", "term-0004", "");
+    assert_eq!(
+        new_texts(&fresh.inbox().await, &id),
+        Some(vec!["three".to_string()])
+    );
+}
+
+#[tokio::test]
+async fn a_persons_own_notes_are_never_new_for_their_sessions() {
+    let t = team(&["ana", "bob"]);
+    let one = t.agent("ana", "term-0001", "");
+    let two = t.agent("ana", "term-0002", "");
+    two.inbox().await;
+    one.ok(json!({ "to": ["bob"], "text": "hello" })).await;
+    one.ok(json!({ "to": ["@team"], "text": "anyone?" })).await;
+    assert!(thread_ids(&two.inbox().await).is_empty());
+    assert!(thread_ids(&one.inbox().await).is_empty());
+    assert!(thread_ids(&t.inbox("ana").await).is_empty());
+}
+
+#[tokio::test]
+async fn delivery_names_the_session_that_picked_up_and_the_one_that_claimed() {
+    let t = team(&["ana", "bob"]);
+    let second = db::add_token(&t.app.db(), "bob", "Codex desktop", T0).unwrap();
+    let pagos = t.agent("bob", "term-pagos", "pagos-api");
+    let codex = Agent {
+        app: t.app.clone(),
+        token: second.secret,
+        headers: vec![("relevo-context".into(), "frontend".into())],
+    };
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
+    t.app.clock.advance(300);
+    pagos.inbox().await;
+    let d = &t.thread("ana", &id).await["delivery"][1];
+    assert_eq!(d["handle"], "bob");
+    assert_eq!(d["delivered_at"], "2026-11-08T10:46:00Z");
+    assert_eq!(
+        d["by"],
+        json!({ "label": "laptop", "context": "pagos-api" })
+    );
+    assert_eq!(d["claimed_by"], Value::Null);
+    // Another session writing claims it, and its note is now the latest that reached Bob.
+    t.app.clock.advance(60);
+    let note = {
+        let (_, v) = codex.send(json!({ "thread": id, "text": "mine" })).await;
+        v["note"].clone()
+    };
+    let d = &t.thread("ana", &id).await["delivery"][1];
+    let codex_out = json!({ "label": "Codex desktop", "context": "frontend" });
+    assert_eq!(d["note"], note);
+    assert_eq!(d["delivered_at"], "2026-11-08T10:47:00Z");
+    assert_eq!(d["by"], codex_out);
+    assert_eq!(d["claimed_by"], codex_out);
+    // A session reading what it already had moves nothing.
+    t.app.clock.advance(60);
+    pagos.thread(&id).await;
+    assert_eq!(t.thread("ana", &id).await["delivery"][1]["by"], codex_out);
+}
+
+#[tokio::test]
+async fn forgotten_sessions_release_their_claims() {
+    let t = team(&["ana", "bob"]);
+    let pagos = t.agent("bob", "term-pagos", "pagos-api");
+    let front = t.agent("bob", "term-front", "frontend");
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
+    front.inbox().await;
+    pagos.inbox().await;
+    pagos.ok(json!({ "thread": id, "text": "mine" })).await;
+    t.app.clock.advance(6 * 24 * 3600);
+    t.ok("ana", json!({ "thread": id, "text": "and?" })).await;
+    assert!(thread_ids(&front.inbox().await).is_empty());
+    // Pagos is not seen again; a week after it was last seen it is forgotten.
+    t.app.clock.advance(24 * 3600);
+    let v = front.inbox().await;
+    assert_eq!(
+        new_texts(&v, &id),
+        Some(vec!["mine".to_string(), "and?".to_string()])
+    );
+    assert_eq!(v["threads"][0]["claimed"], Value::Null);
+    assert_eq!(
+        t.thread("ana", &id).await["delivery"][1]["claimed_by"],
+        Value::Null
+    );
+    // Coming back, it is a new session: the thread is no longer its own.
+    assert_eq!(pagos.thread(&id).await["claimed"], Value::Null);
+}
+
+/// A thread as the model sees it, for the person `bob` and his three sessions.
+struct ModelThread {
+    id: String,
+    from: &'static str,
+    team: bool,
+    open: bool,
+    /// Order of the latest note, and of the latest one not bob's.
+    last: u64,
+    last_other: u64,
+    last_is_bobs: bool,
+    context: Option<&'static str>,
+    claimed: Option<usize>,
+    /// What reached each session.
+    delivered: [u64; 3],
+}
+
+/// Bob's sessions: general, pagos-api, frontend.
+const SESSIONS: [(&str, &str); 3] = [
+    ("model-general", ""),
+    ("model-pagos", "pagos-api"),
+    ("model-front", "frontend"),
+];
+
+/// Checks one inbox call of session `s` against the model, then applies its deliveries.
+async fn session_inbox_matches(t: &Team, s: usize, all: bool, model: &mut [ModelThread]) {
+    let (id, context) = SESSIONS[s];
+    let sees = |th: &ModelThread| {
+        all || th.claimed == Some(s)
+            || (th.claimed.is_none()
+                && (th.context.is_none() || context.is_empty() || th.context == Some(context)))
+    };
+    let mut expected: Vec<(bool, bool, u64, String)> = model
+        .iter()
+        .filter(|th| sees(th))
+        .map(|th| {
+            let new = th.last_other > th.delivered[s];
+            let waiting = !th.team && th.open && !th.last_is_bobs;
+            (new, waiting, th.last, th.id.clone())
+        })
+        .filter(|(new, waiting, _, _)| *new || *waiting)
+        .collect();
+    expected.sort_by_key(|e| std::cmp::Reverse((e.0, e.1, e.2)));
+    let uri = if all {
+        "/api/inbox?all=1"
+    } else {
+        "/api/inbox"
+    };
+    let inbox = t.agent("bob", id, context).inbox_at(uri).await;
+    let want: Vec<String> = expected.iter().take(20).map(|e| e.3.clone()).collect();
+    assert_eq!(thread_ids(&inbox), want, "session {id} all={all}");
+    assert_eq!(inbox["more"], expected.len().saturating_sub(20), "{id}");
+    for (shown, e) in inbox["threads"].as_array().unwrap().iter().zip(&expected) {
+        assert_eq!(shown["waiting_for_you"], e.1, "{}", e.3);
+        assert_eq!(
+            shown["new_notes"].as_array().unwrap().is_empty(),
+            !e.0,
+            "{}",
+            e.3
+        );
+    }
+    for th in model.iter_mut().filter(|th| want.contains(&th.id)) {
+        th.delivered[s] = th.last;
+    }
+}
+
+#[tokio::test]
+async fn session_inboxes_hold_order_and_more_over_hundreds_of_routed_threads() {
+    let t = team(&["ana", "bob", "carl"]);
+    for (id, context) in SESSIONS {
+        t.agent("bob", id, context).inbox().await;
+    }
+    // A fixed pseudo-random sequence, so that a failure replays.
+    let mut seed: u64 = 0x5eed;
+    let mut next = |n: u64| {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) % n
+    };
+    let mut order = 0;
+    let mut model: Vec<ModelThread> = Vec::new();
+    let contexts = [None, Some("pagos-api"), Some("frontend"), Some("billing")];
+    for i in 0..150 {
+        t.app.clock.advance(5);
+        let from = if i % 2 == 0 { "ana" } else { "carl" };
+        let context = contexts[next(4) as usize];
+        let team = i % 50 == 7;
+        let to = match (team, context) {
+            (true, _) => json!(["@team"]),
+            (false, None) => json!(["bob"]),
+            (false, Some(c)) => json!([format!("bob/{c}")]),
+        };
+        let id = t
+            .ok(from, json!({ "to": to, "text": format!("t{i}") }))
+            .await;
+        order += 1;
+        model.push(ModelThread {
+            id,
+            from,
+            team,
+            open: true,
+            last: order,
+            last_other: order,
+            last_is_bobs: false,
+            context: if team { None } else { context },
+            claimed: None,
+            delivered: [0; 3],
+        });
+    }
+    for step in 0..400 {
+        t.app.clock.advance(10);
+        let s = next(3) as usize;
+        match next(10) {
+            // A session reads its inbox (sometimes all of it).
+            0..=3 => session_inbox_matches(&t, s, next(4) == 0, &mut model).await,
+            // A session of bob's answers in one of his threads it can see or not.
+            4..=5 => {
+                let i = next(model.len() as u64) as usize;
+                let th = &mut model[i];
+                if !th.open {
+                    continue;
+                }
+                let (id, context) = SESSIONS[s];
+                t.agent("bob", id, context)
+                    .ok(json!({ "thread": th.id, "text": format!("bob {step}") }))
+                    .await;
+                order += 1;
+                if th.delivered[s] >= th.last_other {
+                    th.delivered[s] = order;
+                }
+                th.last = order;
+                th.last_is_bobs = true;
+                th.claimed = Some(s);
+            }
+            // Someone else writes again, or closes.
+            6..=8 => {
+                let i = next(model.len() as u64) as usize;
+                let th = &mut model[i];
+                if !th.open || th.team {
+                    continue;
+                }
+                let close = next(5) == 0;
+                t.ok(
+                    th.from,
+                    json!({ "thread": th.id, "text": format!("again {step}"), "close": close }),
+                )
+                .await;
+                order += 1;
+                th.last = order;
+                th.last_other = order;
+                th.last_is_bobs = false;
+                th.open = !close;
+            }
+            // A session reads one thread whole.
+            _ => {
+                let i = next(model.len() as u64) as usize;
+                let (id, context) = SESSIONS[s];
+                t.agent("bob", id, context).thread(&model[i].id).await;
+                model[i].delivered[s] = model[i].last;
+            }
+        }
+    }
+    // Every session, routed and not, until nothing is new.
+    for _ in 0..12 {
+        for s in 0..3 {
+            session_inbox_matches(&t, s, false, &mut model).await;
+            session_inbox_matches(&t, s, true, &mut model).await;
+        }
+    }
 }
