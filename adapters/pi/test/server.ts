@@ -9,11 +9,19 @@ import { join, resolve } from "node:path";
 
 const repo = resolve(import.meta.dirname, "..", "..", "..");
 
+/**
+ * The relevo binary to test against: RELEVO_BIN when set (it must exist), else
+ * this repository's build (CARGO_TARGET_DIR, then target/release, then
+ * target/debug). Never a binary from elsewhere, which may be stale.
+ */
 export function relevoBin(): string {
+  const bin = process.env.RELEVO_BIN;
+  if (bin) {
+    if (!existsSync(bin)) throw new Error(`RELEVO_BIN does not exist: ${bin}`);
+    return bin;
+  }
   const candidates = [
-    process.env.RELEVO_BIN,
     process.env.CARGO_TARGET_DIR && join(process.env.CARGO_TARGET_DIR, "release", "relevo"),
-    "/tmp/relevo-target-pi/release/relevo",
     join(repo, "target", "release", "relevo"),
     join(repo, "target", "debug", "relevo"),
   ];
