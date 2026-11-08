@@ -108,9 +108,9 @@ class RelevoAdapter(BasePlatformAdapter):
                                           retryable=False)
                     await self._notify_fatal_error()
                     return
-                logger.warning("[relevo] inbox failed: %s; retrying in %.0fs", client.describe_error(exc), delay)
+                logger.warning("[relevo] inbox failed: %s; retrying in %.1fs", client.describe_error(exc), delay)
             except Exception as exc:
-                logger.warning("[relevo] inbox failed: %s; retrying in %.0fs", client.describe_error(exc), delay)
+                logger.warning("[relevo] inbox failed: %s; retrying in %.1fs", client.describe_error(exc), delay)
             else:
                 delay = self.backoff_initial
                 team = {p.get("handle"): p for p in data.get("team") or []}

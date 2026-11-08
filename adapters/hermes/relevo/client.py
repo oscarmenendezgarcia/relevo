@@ -282,7 +282,8 @@ def render_thread_head(thread: dict) -> str:
     if thread.get("waiting_for_you"):
         facts.append("waiting for your person's reply")
     if facts:
-        lines.append("; ".join(facts).capitalize() + ".")
+        joined = "; ".join(facts)
+        lines.append(joined[0].upper() + joined[1:] + ".")
     return "\n".join(lines)
 
 
