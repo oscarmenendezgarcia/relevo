@@ -156,6 +156,19 @@ impl Agent {
         .await
     }
 
+    /// Ends this session: `DELETE /api/session`.
+    async fn end(&self) -> (StatusCode, Value) {
+        call(
+            &self.app,
+            "DELETE",
+            "/api/session",
+            Some(&self.token),
+            &self.headers,
+            Body::empty(),
+        )
+        .await
+    }
+
     async fn ok(&self, body: Value) -> String {
         let (status, v) = self.send(body).await;
         assert_eq!(status, StatusCode::OK, "{v}");
@@ -2643,6 +2656,122 @@ async fn a_revoked_tokens_sessions_are_forgotten_with_their_claims() {
     );
     assert_eq!(
         t.thread("ana", &id).await["delivery"][1]["claimed_by"],
+        Value::Null
+    );
+}
+
+#[tokio::test]
+async fn a_session_that_ends_releases_its_threads_to_the_persons_other_sessions_at_once() {
+    let t = team(&["ana", "bob"]);
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
+    let short = t.agent("bob", "term-short", "pagos-api");
+    let next = t.agent("bob", "term-next", "pagos-api");
+    short.inbox().await;
+    let (_, v) = short.send(json!({ "thread": id, "text": "answer" })).await;
+    assert_eq!(v["claimed"], "this-session");
+    t.ok("ana", json!({ "thread": id, "text": "and?" })).await;
+    // While the short session holds the thread, the next one does not see it...
+    assert!(thread_ids(&next.inbox().await).is_empty());
+    let started = std::time::Instant::now();
+    let waiter = tokio::spawn({
+        let next = next.clone();
+        async move { next.inbox_at("/api/inbox?wait=30").await }
+    });
+    until_waiting(&t.app, 1).await;
+    // ...until it ends: then at once, without waiting for the claim to lapse.
+    let (status, v) = short.end().await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v, json!({ "ok": true }));
+    let v = waiter.await.unwrap();
+    assert!(started.elapsed().as_secs() < 10);
+    assert_eq!(new_texts(&v, &id), Some(vec!["and?".to_string()]), "{v}");
+    assert_eq!(v["threads"][0]["claimed"], Value::Null);
+    assert_eq!(
+        t.thread("ana", &id).await["delivery"][1]["claimed_by"],
+        Value::Null
+    );
+    let (_, v) = next.send(json!({ "thread": id, "text": "on it" })).await;
+    assert_eq!(v["claimed"], "this-session");
+    let sessions = db::list_sessions(&t.app.db(), Some("bob"), T0).unwrap();
+    assert_eq!(sessions.len(), 1, "the ended session is forgotten");
+}
+
+#[tokio::test]
+async fn ending_a_session_twice_or_one_never_seen_is_fine() {
+    let t = team(&["ana", "bob"]);
+    let bob = t.agent("bob", "term-bob1", "");
+    bob.inbox().await;
+    for _ in 0..2 {
+        let (status, v) = bob.end().await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert_eq!(v, json!({ "ok": true }));
+    }
+    let (status, _) = t.agent("bob", "term-never", "").end().await;
+    assert_eq!(status, StatusCode::OK);
+    // Ending records nothing.
+    assert!(
+        db::list_sessions(&t.app.db(), Some("bob"), T0)
+            .unwrap()
+            .is_empty()
+    );
+    // Without the header it ends the token's default session.
+    t.inbox("bob").await;
+    assert_eq!(
+        db::list_sessions(&t.app.db(), Some("bob"), T0)
+            .unwrap()
+            .len(),
+        1
+    );
+    let (status, _) = t.agent("bob", "", "").end().await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        db::list_sessions(&t.app.db(), Some("bob"), T0)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn a_session_ends_only_itself() {
+    let t = team(&["ana", "bob"]);
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
+    let bob = t.agent("bob", "same-id-1", "");
+    bob.inbox().await;
+    bob.ok(json!({ "thread": id, "text": "mine" })).await;
+    let mut ids = vec![t.ok("bob", json!({ "to": ["ana"], "text": "q2" })).await];
+    let ana = t.agent("ana", "same-id-1", "");
+    ana.inbox().await;
+    ana.ok(json!({ "thread": ids[0], "text": "mine too" }))
+        .await;
+    ids.push(id.clone());
+    // Another person's session with the same id, another token of Bob's with the same id, the
+    // default session, a malformed id and no token at all leave Bob's session alone.
+    let second = db::add_token(&t.app.db(), "bob", "desktop", T0).unwrap();
+    let other_token = Agent {
+        app: t.app.clone(),
+        token: second.secret,
+        headers: vec![("relevo-session".into(), "same-id-1".into())],
+    };
+    assert_eq!(ana.end().await.0, StatusCode::OK);
+    assert_eq!(other_token.end().await.0, StatusCode::OK);
+    assert_eq!(t.agent("bob", "", "").end().await.0, StatusCode::OK);
+    let (status, v) = t.agent("bob", "bad", "").end().await;
+    assert_eq!((status, code(&v)), (StatusCode::BAD_REQUEST, "BAD_REQUEST"));
+    let (status, v) = t.raw("DELETE", "/api/session", None, Body::empty()).await;
+    assert_eq!(
+        (status, code(&v)),
+        (StatusCode::UNAUTHORIZED, "UNAUTHORIZED")
+    );
+    let sessions = db::list_sessions(&t.app.db(), Some("bob"), T0).unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].label, "laptop");
+    assert_eq!(
+        t.thread("ana", &id).await["delivery"][1]["claimed_by"]["label"],
+        "laptop"
+    );
+    // Ana's ended session let go of her claim.
+    assert_eq!(
+        t.thread("bob", &ids[0]).await["delivery"][1]["claimed_by"],
         Value::Null
     );
 }

@@ -123,6 +123,26 @@ pub fn find(conn: &Connection, caller: &Caller) -> Result<Option<Session>, ApiEr
         .optional()?)
 }
 
+/// Forgets the caller's session, with its claims, when its client ends it (`DELETE
+/// /api/session`). Its threads go back to every session of the person that sees them, so those
+/// sessions' waiting requests look again. A session already forgotten (or never seen) is fine.
+pub fn end(conn: &Connection, app: &App, caller: &Caller, now: i64) -> Result<bool, ApiError> {
+    check_token(conn, caller)?;
+    lapse(conn, app, now)?;
+    let id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM sessions WHERE token_id = ?1 AND client_id = ?2",
+            params![caller.token_id, caller.session],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(id) = id {
+        app.announce([caller.person_id]);
+        forget_sessions(conn, &[id])?;
+    }
+    Ok(id.is_some())
+}
+
 /// The sessions whose claims have lapsed (`?1`: 15 minutes ago), read from an index that holds
 /// only sessions that may hold claims, so a request that finds none reads one index entry at most.
 const LAPSED_SQL: &str = "SELECT id, person_id FROM sessions INDEXED BY sessions_claiming

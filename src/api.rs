@@ -1,4 +1,4 @@
-//! The HTTP API: `send`, `inbox`, `thread`, `people` and `health`.
+//! The HTTP API: `send`, `inbox`, `thread`, `people`, ending a session and `health`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -8,7 +8,7 @@ use axum::body::Bytes;
 use axum::extract::rejection::{BytesRejection, PathRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
@@ -20,7 +20,7 @@ use crate::db::{
     CONTEXT_FORMAT, RESERVED_HANDLES, context_repo, random_id, rfc3339, valid_context,
 };
 use crate::error::ApiError;
-use crate::session::{Session, SessionOut, find, lapse, next_lapse, touch};
+use crate::session::{Session, SessionOut, end, find, lapse, next_lapse, touch};
 use crate::{App, MAX_WAITS_PER_TOKEN};
 
 const MAX_TEXT: usize = 64 * 1024;
@@ -49,6 +49,7 @@ pub fn router(app: Arc<App>) -> Router {
             post(send).layer(DefaultBodyLimit::max(MAX_BODY)),
         )
         .route("/api/people", get(people))
+        .route("/api/session", delete(end_session))
         .fallback(|| async { ApiError::not_found("no such route") })
         .method_not_allowed_fallback(|| async { ApiError::not_found("no such route") })
         .with_state(app)
@@ -657,6 +658,20 @@ fn as_session<T>(
 async fn people(State(app): State<Arc<App>>, caller: Caller) -> Result<Json<Value>, ApiError> {
     let team = as_session(&app, &caller, true, |tx, _, now| team(tx, now))?;
     Ok(Json(json!({ "team": team, "you": caller.handle })))
+}
+
+/// `DELETE /api/session`: the client ends its session. It is forgotten at once, with its claims.
+async fn end_session(State(app): State<Arc<App>>, caller: Caller) -> Result<Json<Value>, ApiError> {
+    let ended = {
+        let mut conn = app.db();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = app.clock.now();
+        let ended = end(&tx, &app, &caller, now)?;
+        tx.commit()?;
+        ended
+    };
+    tracing::info!(person = %caller.handle, ended, "session ended");
+    Ok(Json(json!({ "ok": true })))
 }
 
 async fn inbox(
