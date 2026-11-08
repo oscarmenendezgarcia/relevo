@@ -2164,6 +2164,30 @@ async fn a_note_this_session_does_not_see_wakes_it_but_it_keeps_waiting() {
 }
 
 #[tokio::test]
+async fn a_waiting_request_does_not_undo_a_newer_context_of_its_session() {
+    let t = team(&["ana", "bob"]);
+    let pagos = t.agent("bob", "term-0001", "pagos-api");
+    let front = t.agent("bob", "term-0001", "frontend");
+    let waiter = tokio::spawn({
+        let pagos = pagos.clone();
+        async move { pagos.inbox_at("/api/inbox?wait=30").await }
+    });
+    until_waiting(&t.app, 1).await;
+    // The same session moves on to frontend while its old request waits.
+    let (status, _) = front.get("/api/people").await;
+    assert_eq!(status, StatusCode::OK);
+    // A note it does not see wakes it to look again; one it sees answers it.
+    t.ok("ana", json!({ "to": ["bob/billing"], "text": "x" }))
+        .await;
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
+    let v = waiter.await.unwrap();
+    assert_eq!(thread_ids(&v), vec![id]);
+    assert_eq!(v["session"]["context"], "frontend");
+    let (_, people) = t.get("ana", "/api/people").await;
+    assert_eq!(people["team"][1]["contexts"], json!(["frontend"]));
+}
+
+#[tokio::test]
 async fn the_eleventh_wait_of_a_token_is_rate_limited() {
     let t = team(&["ana", "bob"]);
     let mut waiters = Vec::new();

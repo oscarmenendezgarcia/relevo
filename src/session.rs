@@ -1,7 +1,7 @@
 //! Sessions: one running agent of a person. Every request counts as one, named by its token and
 //! the `Relevo-Session` header (none: the token's default session).
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
 use crate::App;
@@ -38,13 +38,10 @@ impl Session {
     }
 }
 
-/// Records that the caller's session was seen now, with the context it sent (the latest one
-/// wins), and returns it. First forgets sessions not seen for 7 days, then those of the token
-/// beyond `MAX_SESSIONS_PER_TOKEN`.
-///
-/// The token is checked again here: a waiting `inbox` request looks and answers long after it
-/// was authenticated, and must not answer for a token revoked (or a person deactivated) since.
-pub fn touch(conn: &Connection, app: &App, caller: &Caller, now: i64) -> Result<Session, ApiError> {
+/// The token is checked again whenever a request looks: a waiting `inbox` request looks and
+/// answers long after it was authenticated, and must not answer for a token revoked (or a person
+/// deactivated) since.
+fn check_token(conn: &Connection, caller: &Caller) -> Result<(), ApiError> {
     let valid: bool = conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM tokens t JOIN people p ON p.id = t.person_id
                         WHERE t.id = ?1 AND t.revoked_at IS NULL AND p.active = 1)",
@@ -54,21 +51,40 @@ pub fn touch(conn: &Connection, app: &App, caller: &Caller, now: i64) -> Result<
     if !valid {
         return Err(ApiError::unauthorized());
     }
+    Ok(())
+}
+
+/// Records that the caller's session was seen now and returns it. First forgets sessions not
+/// seen for 7 days, then those of the token beyond `MAX_SESSIONS_PER_TOKEN`.
+///
+/// With `arrived`, the request has just arrived and records the context it sent (the latest one
+/// wins). Otherwise it is a waiting request answering, whose context may be older than one the
+/// session sent since: it keeps the session's context.
+pub fn touch(
+    conn: &Connection,
+    app: &App,
+    caller: &Caller,
+    now: i64,
+    arrived: bool,
+) -> Result<Session, ApiError> {
+    check_token(conn, caller)?;
     forget(conn, app, now)?;
-    let id = conn.query_row(
+    let (id, context): (i64, Option<String>) = conn.query_row(
         "INSERT INTO sessions (token_id, client_id, person_id, context, last_seen)
          VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT (token_id, client_id)
-         DO UPDATE SET context = excluded.context, last_seen = excluded.last_seen
-         RETURNING id",
+         DO UPDATE SET context = CASE WHEN ?6 THEN excluded.context ELSE context END,
+                       last_seen = excluded.last_seen
+         RETURNING id, context",
         params![
             caller.token_id,
             caller.session,
             caller.person_id,
             caller.context,
-            now
+            now,
+            arrived
         ],
-        |r| r.get(0),
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     // Beyond the cap, the token's sessions seen least recently are forgotten. This one is now
     // the most recent, so it stays.
@@ -90,8 +106,28 @@ pub fn touch(conn: &Connection, app: &App, caller: &Caller, now: i64) -> Result<
         id,
         person_id: caller.person_id,
         label: caller.label.clone(),
-        context: caller.context.clone(),
+        context,
     })
+}
+
+/// The caller's session as it is recorded, without recording anything: for a waiting request
+/// looking again. `None` when it was forgotten meanwhile.
+pub fn find(conn: &Connection, caller: &Caller) -> Result<Option<Session>, ApiError> {
+    check_token(conn, caller)?;
+    Ok(conn
+        .query_row(
+            "SELECT id, context FROM sessions WHERE token_id = ?1 AND client_id = ?2",
+            params![caller.token_id, caller.session],
+            |r| {
+                Ok(Session {
+                    id: r.get(0)?,
+                    person_id: caller.person_id,
+                    label: caller.label.clone(),
+                    context: r.get(1)?,
+                })
+            },
+        )
+        .optional()?)
 }
 
 /// Forgets every session not seen for 7 days, and its claims: the threads it claimed go back to

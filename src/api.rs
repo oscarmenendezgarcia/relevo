@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use crate::auth::Caller;
 use crate::db::{RESERVED_HANDLES, random_id, rfc3339, valid_context};
 use crate::error::ApiError;
-use crate::session::{Session, SessionOut, touch};
+use crate::session::{Session, SessionOut, find, touch};
 use crate::{App, MAX_WAITS_PER_TOKEN};
 
 const MAX_TEXT: usize = 64 * 1024;
@@ -549,16 +549,18 @@ fn inbox_params(
 /// Runs `op` as the caller's session, in one transaction, after recording that the session was
 /// seen. `op` runs in a savepoint, so when it fails only its own writes are undone: a failed
 /// request still counts as seen.
+/// `arrived` as in `touch`.
 fn as_session<T>(
     app: &App,
     caller: &Caller,
+    arrived: bool,
     op: impl FnOnce(&Connection, &Session, i64) -> Result<T, ApiError>,
 ) -> Result<T, ApiError> {
     let mut conn = app.db();
     let mut tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     // Read under the lock, so that times follow the order of `seq`.
     let now = app.clock.now();
-    let session = touch(&tx, app, caller, now)?;
+    let session = touch(&tx, app, caller, now, arrived)?;
     let out = {
         let op_tx = tx.savepoint()?;
         let out = op(&op_tx, &session, now);
@@ -574,7 +576,7 @@ fn as_session<T>(
 // ---------- handlers ----------
 
 async fn people(State(app): State<Arc<App>>, caller: Caller) -> Result<Json<Value>, ApiError> {
-    let team = as_session(&app, &caller, |tx, _, now| team(tx, now))?;
+    let team = as_session(&app, &caller, true, |tx, _, now| team(tx, now))?;
     Ok(Json(json!({ "team": team })))
 }
 
@@ -593,11 +595,13 @@ async fn inbox(
         // Subscribed before the first look, so a note landing in between still wakes us.
         let mut news = app.news(caller.person_id);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(wait);
+        let mut first = true;
         loop {
             news.borrow_and_update();
-            if anything_new(&app, &caller, all)? {
+            if anything_new(&app, &caller, all, first)? {
                 break;
             }
+            first = false;
             // The database lock is not held here: `anything_new` let it go.
             match tokio::time::timeout_at(deadline, news.changed()).await {
                 Ok(Ok(())) => continue,
@@ -605,23 +609,35 @@ async fn inbox(
             }
         }
     }
-    Ok(Json(answer_inbox(&app, &caller, all)?))
+    // A request that waited answers with its session's context as it is now, which another
+    // request of the session may have changed meanwhile.
+    Ok(Json(answer_inbox(&app, &caller, all, wait == 0)?))
 }
 
-/// Whether the caller's session has a thread with new notes, without delivering anything.
-fn anything_new(app: &App, caller: &Caller, all: bool) -> Result<bool, ApiError> {
+/// Whether the caller's session has a thread with new notes, without delivering anything. The
+/// `first` look records the session, with the context the request sent; later ones only read,
+/// with the session's context as it is now.
+fn anything_new(app: &App, caller: &Caller, all: bool, first: bool) -> Result<bool, ApiError> {
+    let new = |tx: &Connection, session: &Session| {
+        Ok(page(tx, session, all)?.first().is_some_and(|c| c.new))
+    };
+    if first {
+        return as_session(app, caller, true, |tx, session, _| new(tx, session));
+    }
     let mut conn = app.db();
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let now = app.clock.now();
-    let session = touch(&tx, app, caller, now)?;
-    let new = page(&tx, &session, all)?.first().is_some_and(|c| c.new);
+    let tx = conn.transaction()?;
+    let found = match find(&tx, caller)? {
+        Some(session) => new(&tx, &session)?,
+        // Forgotten while waiting (its token started too many others): answer, which records it.
+        None => true,
+    };
     tx.commit()?;
-    Ok(new)
+    Ok(found)
 }
 
-/// The inbox as it is now, delivering the threads it returns.
-fn answer_inbox(app: &App, caller: &Caller, all: bool) -> Result<Value, ApiError> {
-    as_session(app, caller, |tx, session, now| {
+/// The inbox as it is now, delivering the threads it returns. `arrived` as in `touch`.
+fn answer_inbox(app: &App, caller: &Caller, all: bool, arrived: bool) -> Result<Value, ApiError> {
+    as_session(app, caller, arrived, |tx, session, now| {
         let page = page(tx, session, all)?;
         let more = inbox_count(tx, session, all)?.saturating_sub(page.len());
         let mut threads = Vec::new();
@@ -662,7 +678,7 @@ async fn thread(
     id: Result<Path<String>, PathRejection>,
 ) -> Result<Json<ThreadOut>, ApiError> {
     let Path(id) = id.map_err(|_| ApiError::not_found("no such thread"))?;
-    let out = as_session(&app, &caller, |tx, session, now| {
+    let out = as_session(&app, &caller, true, |tx, session, now| {
         let row = find_thread(tx, session, &id)?;
         deliver(tx, session, &row.id, row.last_seq, now)?;
         refresh(tx, &row.id)?;
@@ -735,7 +751,7 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<(SendResult, Ve
         ));
     }
 
-    as_session(app, caller, |tx, session, now| {
+    as_session(app, caller, true, |tx, session, now| {
         write_as(tx, app, caller, session, &req, now)
     })
 }
