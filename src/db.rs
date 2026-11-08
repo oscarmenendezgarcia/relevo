@@ -165,19 +165,28 @@ pub fn invite(
     if let Some(about) = about {
         one_line("about", about)?;
     }
-    conn.execute(
+    check_label(label)?;
+    // A failed invite must not leave the person created or reactivated.
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "INSERT INTO people (handle, name, about, created_at) VALUES (?1, ?2, coalesce(?3, ''), ?4)
          ON CONFLICT (handle) DO UPDATE SET name = ?2, about = coalesce(?3, about), active = 1",
         params![handle, name, about, now],
     )?;
-    add_token(conn, handle, label, now)
+    let token = add_token(&tx, handle, label, now)?;
+    tx.commit()?;
+    Ok(token)
 }
 
-pub fn add_token(conn: &Connection, handle: &str, label: &str, now: i64) -> Result<NewToken> {
+fn check_label(label: &str) -> Result<()> {
     if label.trim().is_empty() {
         bail!("label must not be empty");
     }
-    one_line("label", label)?;
+    one_line("label", label)
+}
+
+pub fn add_token(conn: &Connection, handle: &str, label: &str, now: i64) -> Result<NewToken> {
+    check_label(label)?;
     let person = person_id(conn, handle)?;
     let token = NewToken {
         id: random_id("t_"),
@@ -309,5 +318,19 @@ mod tests {
         assert_eq!(people[0].name, "Ana B");
         assert_eq!(list_tokens(&conn, Some("ana")).unwrap().len(), 2);
         assert!(invite(&conn, "team", "T", None, "x", 0).is_err());
+    }
+
+    #[test]
+    fn failed_invite_changes_nothing() {
+        let conn = open(":memory:").unwrap();
+        invite(&conn, "ana", "Ana", None, "laptop", 0).unwrap();
+        deactivate(&conn, "ana").unwrap();
+        assert!(invite(&conn, "ana", "Ana B", None, "  ", 0).is_err());
+        assert!(invite(&conn, "zoe", "Zoe", None, "a\nb", 0).is_err());
+        let people = list_people(&conn).unwrap();
+        assert_eq!(people.len(), 1);
+        assert!(!people[0].active);
+        assert_eq!(people[0].name, "Ana");
+        assert_eq!(list_tokens(&conn, None).unwrap().len(), 1);
     }
 }
