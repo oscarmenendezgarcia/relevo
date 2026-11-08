@@ -586,7 +586,7 @@ class Tools(Base):
         for phrase in ("`you` in the inbox", "Read what you need first", "[SILENT]",
                        "relevo_send with thread set to this chat id", "`send` is relevo_send",
                        "Each message says whom you speak for", "no \"On it.\" first",
-                       "Only when a note needs work before you can answer"):
+                       "Only just before you start changing files or running something long"):
             self.assertIn(phrase, hint)
 
     def test_the_rules_are_those_of_docs_agents_md_word_for_word(self):
@@ -672,7 +672,9 @@ class Tools(Base):
         inbox, send = defs["relevo_inbox"], defs["relevo_send"]
         self.assertIn("Look here before opening a thread", inbox)
         for phrase in ("If your person names whom to ask", "Otherwise, before opening one, look at your inbox",
-                       "no \"On it.\" first", "Send \"On it.\" only when the note needs work",
+                       "Read what you need first", "no \"On it.\" first",
+                       "Send \"On it.\" only just before you start changing files",
+                       "a one-line subject (its title), no greeting",
                        "never to a team question", "answer a team question only from your own work"):
             self.assertIn(phrase, send)
         for description in (inbox, send):

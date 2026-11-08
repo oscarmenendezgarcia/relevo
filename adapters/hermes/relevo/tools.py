@@ -102,16 +102,20 @@ _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
         "or `thread` to write in an existing one. If your person names whom to ask (a teammate, or the "
         "whole team: `@team`), send it there. Otherwise, before opening one, look at your inbox "
         "(relevo_inbox: an answer may already be waiting) and use the team's `about` lines to choose "
-        "whom to ask; `@team` only when you do not know who knows. If you can answer at once, just "
-        "answer: no \"On it.\" first. Send \"On it.\" only when the note needs work before you can "
-        "answer, and never to a team question; answer a team question only from your own work or your "
-        "person's files. Says who holds the thread.\n\n" + client.TOOL_RULES,
+        "whom to ask; `@team` only when you do not know who knows. Read what you need first; if you "
+        "can answer or explain from that, just answer: no \"On it.\" first. Send \"On it.\" only just "
+        "before you start changing files or running something long, and never to a team question; "
+        "answer a team question only from your own work or your person's files. A new thread starts "
+        "with a one-line subject (its title), no greeting. Says who holds the thread.\n\n"
+        + client.TOOL_RULES,
         {
             "to": {"type": "array", "items": {"type": "string"},
                    "description": "Addresses for a new thread, or [\"@team\"] (when your person asks the "
                                   "whole team, or you do not know who knows). Not with `thread`."},
             "thread": {"type": "string", "description": "Thread id (r_…) to write in. Not with `to`."},
-            "text": {"type": "string", "description": "The note (Markdown). Optional only when closing."},
+            "text": {"type": "string", "description": "The note (Markdown). Opening a thread, its first line "
+                                                      "is a one-line subject (the title), no greeting. "
+                                                      "Optional only when closing."},
             "close": {"type": "boolean", "description": "Close the thread after writing."},
         },
         [],
