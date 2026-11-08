@@ -27,6 +27,9 @@ pub struct Client {
 pub enum Error {
     /// No answer from the server (could not connect, timed out, cut off).
     Network(String),
+    /// A 2xx answer that is not what a Relevo server sends (not JSON, or the wrong shape): the
+    /// URL most likely points at something else.
+    BadResponse(String),
     /// The server answered with an error.
     Api {
         status: u16,
@@ -40,6 +43,10 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Network(e) => write!(f, "could not reach the Relevo server: {e}"),
+            Error::BadResponse(e) => write!(
+                f,
+                "the server did not answer as a Relevo server does ({e}); is the URL right?"
+            ),
             Error::Api { code, message, .. } => write!(f, "{code}: {message}"),
         }
     }
@@ -101,6 +108,9 @@ impl Client {
         let bytes = res.bytes().await.map_err(network)?;
         let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         if status.is_success() {
+            if !body.is_object() {
+                return Err(Error::BadResponse(format!("{status}, not a JSON object")));
+            }
             return Ok(body);
         }
         let err = &body["error"];
@@ -117,7 +127,7 @@ impl Client {
 
     pub async fn people(&self) -> Result<Value, Error> {
         let req = self.http.get(format!("{}/api/people", self.url));
-        self.call(req, TIMEOUT).await
+        shaped(self.call(req, TIMEOUT).await, &[("team", Value::is_array)])
     }
 
     /// `GET /api/inbox`; `wait` in seconds, 0 for none.
@@ -134,7 +144,11 @@ impl Client {
             url = format!("{url}?{}", query.join("&"));
         }
         let req = self.http.get(url);
-        self.call(req, TIMEOUT + Duration::from_secs(wait)).await
+        let v = self.call(req, TIMEOUT + Duration::from_secs(wait)).await;
+        shaped(
+            v,
+            &[("threads", Value::is_array), ("team", Value::is_array)],
+        )
     }
 
     pub async fn thread(&self, id: &str) -> Result<Value, Error> {
@@ -143,7 +157,10 @@ impl Client {
         let req = self
             .http
             .get(format!("{}/api/threads/{}", self.url, encode_segment(id)));
-        self.call(req, TIMEOUT).await
+        shaped(
+            self.call(req, TIMEOUT).await,
+            &[("id", Value::is_string), ("notes", Value::is_array)],
+        )
     }
 
     /// `POST /api/send` with a fresh idempotency key, sent again once with the same key when the
@@ -152,10 +169,20 @@ impl Client {
         body.insert("key".into(), crate::db::random_id("k_").into());
         let body = Value::Object(body);
         let post = || self.http.post(format!("{}/api/send", self.url)).json(&body);
-        match self.call(post(), TIMEOUT).await {
+        let v = match self.call(post(), TIMEOUT).await {
             Err(Error::Network(_)) => self.call(post(), TIMEOUT).await,
             other => other,
-        }
+        };
+        shaped(v, &[("thread", Value::is_string)])
+    }
+}
+
+/// `v`, unless it is an answer that lacks one of `fields` (with the right type).
+fn shaped(v: Result<Value, Error>, fields: &[(&str, fn(&Value) -> bool)]) -> Result<Value, Error> {
+    let v = v?;
+    match fields.iter().find(|(name, ok)| !ok(&v[*name])) {
+        Some((name, _)) => Err(Error::BadResponse(format!("no `{name}` in the answer"))),
+        None => Ok(v),
     }
 }
 

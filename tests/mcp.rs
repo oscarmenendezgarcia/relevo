@@ -517,3 +517,118 @@ async fn without_ca_roots_http_works_and_https_says_why() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("TLS roots could not be loaded"), "{err}");
 }
+
+/// A server that answers every request at once with 200, `content_type` and `body`, and
+/// counts the requests.
+async fn fake(
+    content_type: &'static str,
+    body: &'static str,
+) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::Ordering;
+    use tokio::io::AsyncReadExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = count.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let count = counted.clone();
+            tokio::spawn(async move {
+                // Reads the head (and a body if it says how long), then answers and closes.
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let Ok(n) = sock.read(&mut chunk).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    let Some(end) = text.find("\r\n\r\n") else {
+                        continue;
+                    };
+                    let len: usize = text[..end]
+                        .lines()
+                        .find_map(|l| {
+                            let (k, v) = l.split_once(':')?;
+                            k.eq_ignore_ascii_case("content-length")
+                                .then(|| v.trim().parse().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if buf.len() >= end + 4 + len {
+                        break;
+                    }
+                }
+                count.fetch_add(1, Ordering::SeqCst);
+                let res = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(res.as_bytes()).await;
+            });
+        }
+    });
+    (url, count)
+}
+
+const HTML: &str = "<!doctype html><html><body>Welcome</body></html>";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_that_is_not_relevo_is_an_error() {
+    let (url, _) = fake("text/html", HTML).await;
+    let dir = std::env::temp_dir().join(db::random_id("relevo-mcp-"));
+    std::fs::create_dir(&dir).unwrap();
+    let home = dir.join("home");
+
+    let out = relevo(&home)
+        .args(["connect", &url, "rlv_secret_abc"])
+        .output()
+        .await
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("is the URL right?"), "{err}");
+    assert!(!home.join("config.json").exists());
+
+    // JSON of the wrong shape is no better.
+    let (json_url, _) = fake("application/json", "{\"ok\":true}").await;
+    let out = relevo(&home)
+        .args(["connect", &json_url, "rlv_secret_abc"])
+        .output()
+        .await
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(!home.join("config.json").exists());
+
+    let mut cmd = relevo(&home);
+    cmd.arg("mcp")
+        .env("RELEVO_URL", &url)
+        .env("RELEVO_TOKEN", "rlv_x")
+        .env("RELEVO_CONTEXT", "");
+    let mut mcp = Mcp::spawn(cmd).await;
+    for (tool, args) in [
+        ("send", json!({ "to": ["ana"], "text": "hi" })),
+        ("inbox", json!({})),
+        ("thread", json!({ "id": "r_aaaaaaaaaaaa" })),
+    ] {
+        let (failed, err) = mcp.call(tool, args).await;
+        assert!(failed, "{tool}: {err}");
+        assert!(err.contains("is the URL right?"), "{tool}: {err}");
+    }
+    let mut cmd = relevo(&home);
+    cmd.arg("mcp")
+        .env("RELEVO_URL", &json_url)
+        .env("RELEVO_TOKEN", "rlv_x")
+        .env("RELEVO_CONTEXT", "");
+    let mut mcp = Mcp::spawn(cmd).await;
+    let (failed, err) = mcp
+        .call("send", json!({ "thread": "r_aaaaaaaaaaaa", "close": true }))
+        .await;
+    assert!(failed, "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
