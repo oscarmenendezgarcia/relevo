@@ -1438,6 +1438,33 @@ async fn sessions_not_seen_for_7_days_are_forgotten() {
     assert_eq!(left, 1, "only bob's default session is left");
 }
 
+#[tokio::test]
+async fn failed_requests_and_replays_still_count_as_seen() {
+    let t = team(&["ana", "bob"]);
+    let seen = |at: i64| -> Vec<(Option<String>, i64)> {
+        db::list_sessions(&t.app.db(), Some("bob"), at)
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.context, s.last_seen))
+            .collect()
+    };
+    let pagos = t.agent("bob", "term-0001", "pagos-api");
+    let (status, _) = pagos.send(json!({ "to": ["nobody"], "text": "q" })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(seen(T0), vec![(Some("pagos-api".to_string()), T0)]);
+    let (status, _) = pagos.get("/api/threads/r_aaaaaaaaaaaa").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // A keyed send replayed later moves its session's last_seen too.
+    pagos
+        .ok(json!({ "to": ["ana"], "text": "q", "key": "k1" }))
+        .await;
+    t.app.clock.advance(3600);
+    pagos
+        .ok(json!({ "to": ["ana"], "text": "q", "key": "k1" }))
+        .await;
+    assert_eq!(seen(T0), vec![(Some("pagos-api".to_string()), T0 + 3600)]);
+}
+
 // ---------- routing, claims and delivery per session ----------
 
 /// The texts of the new notes of `id` in an inbox, or `None` when it does not show `id`.

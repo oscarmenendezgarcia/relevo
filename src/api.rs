@@ -546,15 +546,35 @@ fn inbox_params(
     Ok((all.unwrap_or(false), wait.unwrap_or(0)))
 }
 
+/// Runs `op` as the caller's session, in one transaction, after recording that the session was
+/// seen. `op` runs in a savepoint, so when it fails only its own writes are undone: a failed
+/// request still counts as seen.
+fn as_session<T>(
+    app: &App,
+    caller: &Caller,
+    op: impl FnOnce(&Connection, &Session, i64) -> Result<T, ApiError>,
+) -> Result<T, ApiError> {
+    let mut conn = app.db();
+    let mut tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // Read under the lock, so that times follow the order of `seq`.
+    let now = app.clock.now();
+    let session = touch(&tx, app, caller, now)?;
+    let out = {
+        let op_tx = tx.savepoint()?;
+        let out = op(&op_tx, &session, now);
+        if out.is_ok() {
+            op_tx.commit()?;
+        }
+        out
+    };
+    tx.commit()?;
+    out
+}
+
 // ---------- handlers ----------
 
 async fn people(State(app): State<Arc<App>>, caller: Caller) -> Result<Json<Value>, ApiError> {
-    let mut conn = app.db();
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let now = app.clock.now();
-    touch(&tx, &app, &caller, now)?;
-    let team = team(&tx, now)?;
-    tx.commit()?;
+    let team = as_session(&app, &caller, |tx, _, now| team(tx, now))?;
     Ok(Json(json!({ "team": team })))
 }
 
@@ -601,43 +621,39 @@ fn anything_new(app: &App, caller: &Caller, all: bool) -> Result<bool, ApiError>
 
 /// The inbox as it is now, delivering the threads it returns.
 fn answer_inbox(app: &App, caller: &Caller, all: bool) -> Result<Value, ApiError> {
-    let mut conn = app.db();
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    // Read under the lock, so that times follow the order of `seq`.
-    let now = app.clock.now();
-    let session = touch(&tx, app, caller, now)?;
-    let page = page(&tx, &session, all)?;
-    let more = inbox_count(&tx, &session, all)?.saturating_sub(page.len());
-    let mut threads = Vec::new();
-    for candidate in &page {
-        let row = find_thread(&tx, &session, &candidate.thread)?;
-        let mut out = thread_out(&tx, &session, &row)?;
-        out.new_notes = Some(notes_after(
-            &tx,
-            &row.id,
-            row.delivered_seq,
-            Some(INBOX_TEXT_CHARS),
-        )?);
-        deliver(&tx, &session, &row.id, row.last_seq, now)?;
-        refresh(&tx, &row.id)?;
-        threads.push(out);
-    }
-    let team = team(&tx, now)?;
-    tx.commit()?;
-    tracing::info!(
-        person = %caller.handle,
-        session = session.id,
-        all,
-        threads = threads.len(),
-        more,
-        "inbox"
-    );
-    Ok(json!({
-        "team": team,
-        "session": session.out(),
-        "threads": threads,
-        "more": more,
-    }))
+    as_session(app, caller, |tx, session, now| {
+        let page = page(tx, session, all)?;
+        let more = inbox_count(tx, session, all)?.saturating_sub(page.len());
+        let mut threads = Vec::new();
+        for candidate in &page {
+            let row = find_thread(tx, session, &candidate.thread)?;
+            let mut out = thread_out(tx, session, &row)?;
+            out.new_notes = Some(notes_after(
+                tx,
+                &row.id,
+                row.delivered_seq,
+                Some(INBOX_TEXT_CHARS),
+            )?);
+            deliver(tx, session, &row.id, row.last_seq, now)?;
+            refresh(tx, &row.id)?;
+            threads.push(out);
+        }
+        let team = team(tx, now)?;
+        tracing::info!(
+            person = %caller.handle,
+            session = session.id,
+            all,
+            threads = threads.len(),
+            more,
+            "inbox"
+        );
+        Ok(json!({
+            "team": team,
+            "session": session.out(),
+            "threads": threads,
+            "more": more,
+        }))
+    })
 }
 
 async fn thread(
@@ -646,19 +662,16 @@ async fn thread(
     id: Result<Path<String>, PathRejection>,
 ) -> Result<Json<ThreadOut>, ApiError> {
     let Path(id) = id.map_err(|_| ApiError::not_found("no such thread"))?;
-    let mut conn = app.db();
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    // Read under the lock, so that times follow the order of `seq`.
-    let now = app.clock.now();
-    let session = touch(&tx, &app, &caller, now)?;
-    let row = find_thread(&tx, &session, &id)?;
-    deliver(&tx, &session, &row.id, row.last_seq, now)?;
-    refresh(&tx, &row.id)?;
-    let mut out = thread_out(&tx, &session, &row)?;
-    out.notes = Some(notes_after(&tx, &row.id, 0, None)?);
-    out.delivery = Some(delivery(&tx, &row.id)?);
-    tx.commit()?;
-    tracing::info!(person = %caller.handle, session = session.id, thread = %row.id, "thread");
+    let out = as_session(&app, &caller, |tx, session, now| {
+        let row = find_thread(tx, session, &id)?;
+        deliver(tx, session, &row.id, row.last_seq, now)?;
+        refresh(tx, &row.id)?;
+        let mut out = thread_out(tx, session, &row)?;
+        out.notes = Some(notes_after(tx, &row.id, 0, None)?);
+        out.delivery = Some(delivery(tx, &row.id)?);
+        tracing::info!(person = %caller.handle, session = session.id, thread = %row.id, "thread");
+        Ok(out)
+    })?;
     Ok(Json(out))
 }
 
@@ -722,12 +735,20 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<(SendResult, Ve
         ));
     }
 
-    let mut conn = app.db();
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    // Read under the lock, so that times follow the order of `seq`.
-    let now = app.clock.now();
-    let session = touch(&tx, app, caller, now)?;
+    as_session(app, caller, |tx, session, now| {
+        write_as(tx, app, caller, session, &req, now)
+    })
+}
 
+/// `send`'s writes, as `session`.
+fn write_as(
+    tx: &Connection,
+    app: &App,
+    caller: &Caller,
+    session: &Session,
+    req: &SendRequest,
+    now: i64,
+) -> Result<(SendResult, Vec<i64>), ApiError> {
     // Keys expire 24 hours after the send that used them. Forgetting them here keeps the table
     // small, and lets an expired key be used again as a fresh send.
     tx.execute(
@@ -758,10 +779,10 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<(SendResult, Ve
     let (thread_id, caught_up) = match (&req.to, &req.thread) {
         (Some(to), _) => {
             let text = req.text.as_deref().unwrap_or_default();
-            (open_thread(&tx, app, caller, to, text, now)?, true)
+            (open_thread(tx, app, caller, to, text, now)?, true)
         }
         (None, Some(id)) => {
-            let row = find_thread(&tx, &session, id)?;
+            let row = find_thread(tx, session, id)?;
             if row.status == "closed" {
                 return Err(ApiError::thread_closed());
             }
@@ -818,7 +839,7 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<(SendResult, Ve
             // The writing session has the thread up to its note, unless earlier notes never
             // reached it: then nothing moves, so those notes are not skipped.
             if caught_up {
-                deliver(&tx, &session, &thread_id, seq, now)?;
+                deliver(tx, session, &thread_id, seq, now)?;
             }
             // Writing claims the thread for the person, for this session.
             tx.execute(
@@ -836,7 +857,7 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<(SendResult, Ve
             [&thread_id],
         )?;
     }
-    refresh(&tx, &thread_id)?;
+    refresh(tx, &thread_id)?;
     let result = SendResult {
         thread: thread_id,
         note: note_id,
@@ -863,7 +884,6 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<(SendResult, Ve
             .collect::<rusqlite::Result<_>>()?,
         None => Vec::new(),
     };
-    tx.commit()?;
     Ok((result, woken))
 }
 
