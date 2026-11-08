@@ -194,33 +194,34 @@ fn find_thread(conn: &Connection, session: &Session, id: &str) -> Result<ThreadR
 /// index on `session_threads`, condition on `x`, the row read through either). `?2` is the
 /// session, `?3` its context and `?4` that context's repository when it names a branch: a thread
 /// addressed to the repository alone reaches the session on any branch. With `all`, every thread
-/// of the person. The routes do not overlap.
+/// of the person; without it, a resolved (closed `team`) thread is in none. The routes do not
+/// overlap.
 fn routes(context: Option<&str>, all: bool) -> Vec<(&'static str, &'static str, &'static str)> {
     const CLAIM: (&str, &str) = ("participants_inbox_claim", "session_new_claim");
     const CONTEXT: (&str, &str) = ("participants_inbox_context", "session_new_context");
     if all {
         return vec![("participants_inbox", "session_new", "1")];
     }
-    let mut routes = vec![(CLAIM.0, CLAIM.1, "x.claimed_by = ?2")];
+    let mut routes = vec![(CLAIM.0, CLAIM.1, "x.resolved = 0 AND x.claimed_by = ?2")];
     let Some(context) = context else {
-        routes.push((CLAIM.0, CLAIM.1, "x.claimed_by IS NULL"));
+        routes.push((CLAIM.0, CLAIM.1, "x.resolved = 0 AND x.claimed_by IS NULL"));
         return routes;
     };
     routes.push((
         CONTEXT.0,
         CONTEXT.1,
-        "x.claimed_by IS NULL AND x.context IS NULL",
+        "x.resolved = 0 AND x.claimed_by IS NULL AND x.context IS NULL",
     ));
     routes.push((
         CONTEXT.0,
         CONTEXT.1,
-        "x.claimed_by IS NULL AND x.context = ?3",
+        "x.resolved = 0 AND x.claimed_by IS NULL AND x.context = ?3",
     ));
     if context_repo(context).is_some() {
         routes.push((
             CONTEXT.0,
             CONTEXT.1,
-            "x.claimed_by IS NULL AND x.context = ?4",
+            "x.resolved = 0 AND x.claimed_by IS NULL AND x.context = ?4",
         ));
     }
     routes
@@ -336,26 +337,28 @@ fn inbox_count(conn: &Connection, session: &Session, all: bool) -> Result<usize,
     Ok(counts.first().copied().unwrap_or(0) as usize)
 }
 
-/// Recomputes what the rows of a thread know about it (latest note, new, waiting, inbox, and the
-/// copies on the sessions' rows). Runs after every change to the thread: a note, a close, a
-/// delivery, a claim.
+/// Recomputes what the rows of a thread know about it (latest note, new, waiting, inbox,
+/// resolved, and the copies on the sessions' rows). Runs after every change to the thread: a
+/// note, a close, a delivery, a claim.
 fn refresh(conn: &Connection, thread: &str) -> Result<(), ApiError> {
     // A thread is opened by its first note, so it always has a latest one.
-    let (last_seq, last_author, open_direct): (i64, i64, bool) = conn.query_row(
-        "SELECT n.seq, n.author_id, t.kind = 'direct' AND t.status = 'open'
+    let (last_seq, last_author, open_direct, resolved): (i64, i64, bool, bool) = conn.query_row(
+        "SELECT n.seq, n.author_id, t.kind = 'direct' AND t.status = 'open',
+                t.kind = 'team' AND t.status = 'closed'
          FROM threads t JOIN notes n ON n.thread_id = t.id
          WHERE t.id = ?1 ORDER BY n.seq DESC LIMIT 1",
         [thread],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
     conn.execute(
         "UPDATE participants SET
              last_seq = ?2,
              has_new = coalesce(delivered_seq, 0) < last_other_seq,
              waiting = ?3 AND person_id != ?4,
-             inbox = coalesce(delivered_seq, 0) < last_other_seq OR (?3 AND person_id != ?4)
+             inbox = coalesce(delivered_seq, 0) < last_other_seq OR (?3 AND person_id != ?4),
+             resolved = ?5
          WHERE thread_id = ?1",
-        params![thread, last_seq, open_direct, last_author],
+        params![thread, last_seq, open_direct, last_author, resolved],
     )?;
     conn.execute(
         "UPDATE session_threads AS s SET
@@ -364,7 +367,8 @@ fn refresh(conn: &Connection, thread: &str) -> Result<(), ApiError> {
              last_seq = p.last_seq,
              claimed_by = p.claimed_by,
              context = p.context,
-             person_inbox = p.inbox
+             person_inbox = p.inbox,
+             resolved = p.resolved
          FROM participants p
          WHERE s.thread_id = ?1 AND p.thread_id = s.thread_id AND p.person_id = s.person_id",
         [thread],

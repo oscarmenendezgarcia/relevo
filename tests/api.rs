@@ -747,6 +747,80 @@ async fn only_the_asker_closes_a_team_thread() {
 }
 
 #[tokio::test]
+async fn a_closed_team_thread_leaves_every_inbox_even_with_notes_not_fetched() {
+    let t = team(&["ana", "luis", "oscar"]);
+    let front = t.agent("ana", "term-front", "frontend");
+    front.inbox().await;
+    let id = t
+        .ok(
+            "oscar",
+            json!({ "to": ["@team"], "text": "Who owns billing?" }),
+        )
+        .await;
+    // Another session of Ana's fetches the question, so it is new for `front` alone too.
+    t.inbox("ana").await;
+    t.ok("luis", json!({ "thread": id, "text": "I do." })).await;
+    t.ok(
+        "oscar",
+        json!({ "thread": id, "text": "Thanks, solved.", "close": true }),
+    )
+    .await;
+    for inbox in [
+        front.inbox().await,
+        t.inbox("ana").await,
+        t.inbox("oscar").await,
+    ] {
+        assert!(thread_ids(&inbox).is_empty(), "{inbox}");
+        assert_eq!(inbox["more"], 0, "{inbox}");
+    }
+    // `all` and `thread` still show it, with what was not fetched.
+    let all = front.inbox_at("/api/inbox?all=1").await;
+    assert_eq!(
+        new_texts(&all, &id),
+        Some(vec![
+            "Who owns billing?".to_string(),
+            "I do.".to_string(),
+            "Thanks, solved.".to_string()
+        ])
+    );
+    assert_eq!(all["threads"][0]["status"], "closed");
+    let th = t.thread("luis", &id).await;
+    assert_eq!(th["status"], "closed");
+    assert_eq!(th["notes"].as_array().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn a_closed_team_thread_does_not_answer_a_waiting_inbox() {
+    let t = team(&["ana", "luis", "oscar"]);
+    let front = t.agent("ana", "term-front", "frontend");
+    front.inbox().await;
+    let id = t
+        .ok(
+            "oscar",
+            json!({ "to": ["@team"], "text": "Who owns billing?" }),
+        )
+        .await;
+    t.ok("luis", json!({ "thread": id, "text": "I do." })).await;
+    t.ok("oscar", json!({ "thread": id, "close": true })).await;
+    // Already closed: nothing is new, so the request waits.
+    let started = std::time::Instant::now();
+    let waiter = tokio::spawn({
+        let front = front.clone();
+        async move { front.inbox_at("/api/inbox?wait=1").await }
+    });
+    until_waiting(&t.app, 1).await;
+    // Closed as it is asked: it wakes the request, which finds nothing and waits on.
+    t.ok(
+        "oscar",
+        json!({ "to": ["@team"], "text": "Never mind", "close": true }),
+    )
+    .await;
+    let v = waiter.await.unwrap();
+    assert!(started.elapsed().as_millis() >= 1000);
+    assert!(thread_ids(&v).is_empty(), "{v}");
+}
+
+#[tokio::test]
 async fn team_of_one_has_no_recipients() {
     let t = team(&["ana"]);
     let (status, v) = t
@@ -2331,10 +2405,13 @@ fn context_matches(to: &str, context: &str) -> bool {
 /// Checks one inbox call of session `s` against the model, then applies its deliveries.
 async fn session_inbox_matches(t: &Team, s: usize, all: bool, model: &mut [ModelThread]) {
     let (id, context) = SESSIONS[s];
+    // A closed team thread shows only with `all`.
     let sees = |th: &ModelThread| {
-        all || th.claimed == Some(s)
-            || (th.claimed.is_none()
-                && (context.is_empty() || th.context.is_none_or(|to| context_matches(to, context))))
+        all || (th.open || !th.team)
+            && (th.claimed == Some(s)
+                || (th.claimed.is_none()
+                    && (context.is_empty()
+                        || th.context.is_none_or(|to| context_matches(to, context)))))
     };
     let mut expected: Vec<(bool, bool, u64, String)> = model
         .iter()
@@ -2398,7 +2475,7 @@ async fn session_inboxes_hold_order_and_more_over_hundreds_of_routed_threads() {
         t.app.clock.advance(5);
         let from = if i % 2 == 0 { "ana" } else { "carl" };
         let context = contexts[next(contexts.len() as u64) as usize];
-        let team = i % 50 == 7;
+        let team = i % 25 == 7;
         let to = match (team, context) {
             (true, _) => json!(["@team"]),
             (false, None) => json!(["bob"]),
@@ -2463,14 +2540,15 @@ async fn session_inboxes_hold_order_and_more_over_hundreds_of_routed_threads() {
                 th.claimed.get_or_insert(s);
                 seen[s] = now;
             }
-            // Someone else writes again, or closes.
+            // Someone else writes again, or closes (only the asker writes in a team thread, to
+            // close it).
             6..=8 => {
                 let i = next(model.len() as u64) as usize;
                 let th = &mut model[i];
-                if !th.open || th.team {
+                if !th.open {
                     continue;
                 }
-                let close = next(5) == 0;
+                let close = th.team || next(5) == 0;
                 t.ok(
                     th.from,
                     json!({ "thread": th.id, "text": format!("again {step}"), "close": close }),
