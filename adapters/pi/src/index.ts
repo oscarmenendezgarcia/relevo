@@ -157,6 +157,10 @@ export function relevoExtension(options: Options = {}) {
     /** The thread whose turn was started, until pi shows it. */
     let handed: Thread | null = null;
     let sessionCtx: any = null;
+    /** Between agent_start and agent_settled; agent_settled hands over what waits. */
+    let turn = false;
+    /** Not idle without a turn (compacting, summarizing a branch): look again soon. */
+    let retry: ReturnType<typeof setTimeout> | null = null;
 
     function idle(): boolean {
       try {
@@ -191,7 +195,11 @@ export function relevoExtension(options: Options = {}) {
      * a turn instead: the agent sees them on its next one.
      */
     function flush(quiet = false): void {
-      if (handed || !pending.size || !idle()) return;
+      if (handed || !pending.size) return;
+      if (!idle()) {
+        if (!turn && !retry && loop) retry = setTimeout(() => ((retry = null), flush()), 500);
+        return;
+      }
       if (quiet) {
         for (const thread of pending.values()) pi.sendMessage(arrival(thread), { triggerTurn: false });
         pending.clear();
@@ -210,12 +218,14 @@ export function relevoExtension(options: Options = {}) {
     });
 
     pi.on("agent_start", () => {
+      turn = true;
       // Busy: nothing is fetched until the agent settles, so notes that land now
       // stay new on the server (relevo_inbox shows them) instead of in a queue.
       loop?.pause();
     });
 
     pi.on("agent_settled", (event: any) => {
+      turn = false;
       const missed = handed;
       handed = null;
       if (missed) {
@@ -254,13 +264,14 @@ export function relevoExtension(options: Options = {}) {
           }
         },
       });
-      if (!idle()) loop.pause();
       loop.start();
     });
 
     pi.on("session_shutdown", async () => {
       const current = loop;
       loop = null;
+      if (retry) clearTimeout(retry);
+      retry = null;
       await current?.stop();
     });
   };

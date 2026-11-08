@@ -21,6 +21,8 @@ export function loadExtension(options: Options) {
   const seen: any[] = [];
   const followUps: any[] = [];
   let streaming = false;
+  /** Compacting or summarizing a branch: not idle, though no turn runs. */
+  let compacting = false;
   /** Turns started by a message settle on their own unless a test holds them. */
   let holdTurns = false;
   /** The next turn a message starts ends before showing it (as Esc during its start would). */
@@ -56,6 +58,9 @@ export function loadExtension(options: Options) {
       return streaming;
     },
     followUps,
+    compacting(on = true) {
+      compacting = on;
+    },
     holdTurns(on = true) {
       holdTurns = on;
     },
@@ -103,7 +108,7 @@ export function loadExtension(options: Options) {
       mode,
       hasUI: mode !== "print",
       ui: { notify: (text: string) => notified.push(text) },
-      isIdle: () => !streaming,
+      isIdle: () => !streaming && !compacting,
     };
   }
 

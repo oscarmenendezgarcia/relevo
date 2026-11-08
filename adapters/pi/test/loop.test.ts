@@ -125,6 +125,22 @@ test("a turn that ends before pi shows the note keeps it: it is added to the ses
   }
 });
 
+test("a note fetched while pi compacts reaches the agent once pi is idle again", async () => {
+  const ext = extension();
+  await ext.emit("session_start", { reason: "startup" }, ext.ctx(home, "tui"));
+  try {
+    await sleep(300);
+    ext.session.compacting(); // A manual /compact: not idle, but no turn and no agent_settled.
+    await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "During compaction: ping" });
+    await sleep(1500);
+    assert.equal(ext.sent.length, 0, "nothing handed to pi while it is not idle");
+    ext.session.compacting(false);
+    await until(() => ext.seen.some((m) => m.content.includes("During compaction: ping")));
+  } finally {
+    await ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, "tui"));
+  }
+});
+
 test("a note arriving during the wait wakes the loop at once", async () => {
   const ext = extension({ wait: 30 });
   await ext.emit("session_start", { reason: "startup" }, ext.ctx(home, "tui"));
