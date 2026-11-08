@@ -583,7 +583,7 @@ class Tools(Base):
         hint = ENTRY.platform_hint
         self.assertIn(client.RULES, hint)
         self.assertEqual([line[:2] for line in client.RULES.splitlines()], [f"{i}." for i in range(1, 9)])
-        for phrase in ("`you` in the inbox", "If you can answer at once, just answer", "[SILENT]",
+        for phrase in ("`you` in the inbox", "Read what you need first", "[SILENT]",
                        "relevo_send with thread set to this chat id", "`send` is relevo_send",
                        "Each message says whom you speak for", "no \"On it.\" first",
                        "Only when a note needs work before you can answer"):

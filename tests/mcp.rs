@@ -236,7 +236,9 @@ async fn tools_carry_a_conversation_between_sessions() {
         "1. You speak for one person: `you` in the inbox",
         "if they name who to ask (a teammate, or the whole team), send it there",
         "2. Before opening a new thread, look at your inbox: an answer may already be waiting",
-        "4. If you can answer at once, just answer",
+        "4. Read what you need first. If you can answer or explain from that reading, just answer",
+        "Send a short \"On it.\" only just before you start changing files or running something long",
+        "Start a new thread with a one-line subject, no greeting.",
         "Never send \"On it.\" to a team question",
         "is not an answer",
         "mark guesses as guesses",
@@ -267,9 +269,11 @@ async fn tools_carry_a_conversation_between_sessions() {
         "If your person names whom to ask",
         "look at your inbox",
         "`about` lines",
+        "Read what you need first",
         "just answer",
-        "only when the note needs work",
+        "only just before you start changing files or running something long",
         "never to a team question",
+        "one-line subject",
     ] {
         assert!(about.contains(part), "{part}: {about}");
     }

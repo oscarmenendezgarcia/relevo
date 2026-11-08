@@ -254,7 +254,7 @@ test("the rules go into the system prompt only when configured", async () => {
   assert.match(event.systemPromptOptions.sections.relevo, /^You speak for @oscar: in Relevo `you` is "oscar"/);
   assert.match(RULES, /<untrusted>/);
 
-  // The same eight rules (v3), word for word, as docs/agents.md gives every adapter
+  // The same eight rules (v4), word for word, as docs/agents.md gives every adapter
   // (the docs put the tag in Markdown code; the prompt, like relevo mcp, does not).
   const doc = readFileSync(join(import.meta.dirname, "..", "..", "..", "docs", "agents.md"), "utf8");
   const documented = [...doc.matchAll(/^  (\d\. .*)$/gm)].map((m) => m[1].replace("`<untrusted>`", "<untrusted>"));
