@@ -7,8 +7,7 @@ use tokio::process::Command;
 /// The context for a client running in `dir`: `repo` or `repo@branch` inside a git repository,
 /// `None` (general) outside one or when git is missing.
 pub async fn detect(dir: &Path) -> Option<String> {
-    let top = git(dir, &["rev-parse", "--show-toplevel"]).await?;
-    let repo = repo_part(Path::new(&top).file_name()?.to_str()?)?;
+    let repo = repo_part(&repo_name(dir).await?)?;
     match git(dir, &["symbolic-ref", "-q", "HEAD"]).await {
         Some(head) => match head.strip_prefix("refs/heads/").and_then(branch_part) {
             Some(branch) => Some(format!("{repo}@{branch}")),
@@ -17,6 +16,23 @@ pub async fn detect(dir: &Path) -> Option<String> {
         // A detached HEAD is on no branch.
         None => Some(repo),
     }
+}
+
+/// The repository's name, the same in all its worktrees: from the common git directory
+/// (`…/name/.git`, or `…/name.git` when bare), else the top-level directory.
+async fn repo_name(dir: &Path) -> Option<String> {
+    let args = ["rev-parse", "--path-format=absolute", "--git-common-dir"];
+    if let Some(common) = git(dir, &args).await {
+        let common = Path::new(&common);
+        let name = match common.file_name()?.to_str()? {
+            ".git" => common.parent()?.file_name()?.to_str()?,
+            name => name.strip_suffix(".git").unwrap_or(name),
+        };
+        return Some(name.to_string());
+    }
+    // Older git, without --path-format.
+    let top = git(dir, &["rev-parse", "--show-toplevel"]).await?;
+    Some(Path::new(&top).file_name()?.to_str()?.to_string())
 }
 
 /// The context to send: `RELEVO_CONTEXT` when set (empty means general), else what git says.
@@ -150,6 +166,53 @@ mod tests {
         run(&dir, &commit);
         run(&dir, &["checkout", "-q", "--detach"]);
         assert_eq!(detect(&dir).await.as_deref(), Some("app"));
+        std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_worktree_is_named_after_its_repository() {
+        let dir = repo("app", "main");
+        let commit = [
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "x",
+        ];
+        run(&dir, &commit);
+        // Beside the repository, as `git worktree add` is usually run, and inside it, as Claude
+        // Code makes its own under `.claude/worktrees/<name>`.
+        run(
+            &dir,
+            &["worktree", "add", "-q", "-b", "feat/x", "../app-feat-x"],
+        );
+        let beside = dir.parent().unwrap().join("app-feat-x");
+        assert_eq!(detect(&beside).await.as_deref(), Some("app@feat/x"));
+        run(
+            &dir,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                ".claude/worktrees/silly-name",
+            ],
+        );
+        let inside = dir.join(".claude/worktrees/silly-name");
+        assert_eq!(detect(&inside).await.as_deref(), Some("app"));
+        // A bare repository, `app.git`, with a worktree.
+        let bare = dir.parent().unwrap().join("srv.git");
+        run(
+            dir.parent().unwrap(),
+            &["clone", "-q", "--bare", dir.to_str().unwrap(), "srv.git"],
+        );
+        run(&bare, &["worktree", "add", "-q", "../srv-main", "main"]);
+        let wt = dir.parent().unwrap().join("srv-main");
+        assert_eq!(detect(&wt).await.as_deref(), Some("srv@main"));
         std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
     }
 
