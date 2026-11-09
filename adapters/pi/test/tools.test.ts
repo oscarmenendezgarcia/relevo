@@ -119,6 +119,26 @@ test("thread shows every note and the delivery", async () => {
   assert.match(other, /^@oscar's pi laptop in pagos-api@main has it since [^:\n]+:\d\d UTC on [\d-]+: another of your person's sessions, so leave it to that session\.$/m);
 });
 
+test("send with done marks the thread handled, writing and claiming nothing", async () => {
+  const ext = extension();
+  const opened = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Thanks, the fix works." });
+  assert.equal((await api(server, oscar, "GET", "/api/inbox", undefined, "done-checker")).threads.find((t: any) => t.id === opened.thread)?.pending, true);
+  const out = await ext.tool("relevo_send", { thread: opened.thread, done: true }, work);
+  assert.equal(
+    out,
+    `Marked thread ${opened.thread} handled: it is no longer pending for your person (a new note by someone else makes it pending again). Nothing was written, and nothing claimed.`,
+  );
+  const seen = await api(server, ana, "GET", `/api/threads/${opened.thread}`);
+  assert.equal(seen.notes.length, 1, "nothing written");
+  const mine = seen.delivery.find((d: any) => d.handle === "oscar");
+  assert.equal(mine.claimed_by, null, "nothing claimed");
+  assert.ok(mine.handled_at);
+  assert.equal(mine.handled_by.label, "pi laptop");
+  // No longer pending for any session of the person, a new one included.
+  const later = await api(server, oscar, "GET", "/api/inbox", undefined, "done-checker-2");
+  assert.equal(later.threads.find((t: any) => t.id === opened.thread), undefined);
+});
+
 test("thread says when nothing has reached a participant", async () => {
   server.invite("bob", "mobile app");
   const ext = extension();
@@ -186,7 +206,11 @@ test("send tells the agent to look at its inbox before opening a thread", () => 
   assert.match(send.description, /If the note needs work, claim the thread with `thread`, `claim: true` and no text just before you start changing files or running something long: a state the others see, not a note\./);
   assert.match(send.description, /Never write a note that only says you are on it\. Do not claim team questions;/);
   assert.match(send.parameters.properties.claim.description, /^With `thread` \(not `to`\): marks the thread as this session's, a state/);
-  assert.match(send.parameters.properties.text.description, /Required unless only closing or claiming a thread\./);
+  assert.match(send.parameters.properties.text.description, /Required unless only closing, claiming or marking done a thread\./);
+  assert.match(send.description, /`done: true` with `thread` and no text marks the thread handled when it needs nothing \(an answer you have now read, a thank-you\)/);
+  assert.match(send.description, /if it is not for you, write nothing and leave it pending\./);
+  assert.match(send.parameters.properties.done.description, /^With `thread` and no `text` \(and no `claim`\): your person has handled the thread/);
+  assert.match(send.parameters.properties.done.description, /Not for a note that is not for you: leave that one pending\.$/);
   assert.doesNotMatch(JSON.stringify(send), /On it/);
   assert.match(send.description, /A new thread starts with a one-line subject \(its title\), no greeting and no "Re:"\./);
   assert.match(send.description, /Write in the first person, as your person would \("I changed…"\)\./);

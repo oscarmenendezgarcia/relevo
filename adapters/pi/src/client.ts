@@ -32,7 +32,11 @@ export interface Delivery {
   by: SessionRef | null;
   /** `since`: when that session claimed the thread (servers before it leave it out). */
   claimed_by: (SessionRef & { since?: string }) | null;
+  /** How many of their live sessions have that note. */
   seen_by: number;
+  /** When the person handled that note, and from which session; `null` while not handled (servers before 0.3.0 leave both out). */
+  handled_at?: string | null;
+  handled_by?: SessionRef | null;
 }
 
 export interface Thread {
@@ -43,6 +47,8 @@ export interface Thread {
   participants: string[];
   status: "open" | "closed";
   waiting_for_you: boolean;
+  /** Pending for the person: not handled yet (servers before 0.3.0 leave it out; `waiting_for_you` says the same). */
+  pending?: boolean;
   context: string | null;
   claimed: "this-session" | "other-session" | null;
   new_notes?: Note[];
@@ -69,6 +75,8 @@ export interface SendFields {
   close?: boolean;
   /** With `thread`: claims it for this session, as a state, without a note when there is no `text`. */
   claim?: boolean;
+  /** With `thread` and no `text`: the person has handled the thread up to its latest note, writing nothing. */
+  done?: boolean;
 }
 
 export interface SendResult {

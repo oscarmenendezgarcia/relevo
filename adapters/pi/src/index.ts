@@ -51,6 +51,15 @@ function describe(err: unknown): Error {
   return new Error(text);
 }
 
+/** What `send` with `done` did, as relevo mcp says it (src/render.rs). */
+export function markedDone(res: SendResult): string {
+  let text =
+    `Marked thread ${res.thread} handled: it is no longer pending for your person (a new note by ` +
+    "someone else makes it pending again). Nothing was written, and nothing claimed.";
+  if (res.claimed === "other-session") text += " Another of your person's sessions still holds it.";
+  return text;
+}
+
 /** What `send` did, as relevo mcp says it (src/render.rs). */
 export function sent(res: SendResult): string {
   const id = res.thread;
@@ -145,6 +154,9 @@ export function relevoExtension(options: Options = {}) {
         "If the note needs work, claim the thread with `thread`, `claim: true` and no text just before you start changing files or running something long: " +
         "a state the others see, not a note. Never write a note that only says you are on it. " +
         "Do not claim team questions; answer a team question only from your own work or your person's files. " +
+        "`done: true` with `thread` and no text marks the thread handled when it needs nothing (an answer you have now read, a thank-you): " +
+        "nothing is written or claimed. A note stays pending for your person until they answer, close it or mark it done; " +
+        "if it is not for you, write nothing and leave it pending. " +
         "The note must be self-contained: the reader does not share your context. Write in the first person, as your person would (\"I changed…\"). " +
         'A new thread starts with a one-line subject (its title), no greeting and no "Re:". ' +
         "Returns the thread id and who holds it.",
@@ -164,7 +176,7 @@ export function relevoExtension(options: Options = {}) {
             description:
               'The note, in Markdown. In the first person, as your person would write it ("I changed…", not "Ana changed…"). ' +
               'Opening a thread, its first line is a one-line subject (the title), no greeting and no "Re:". ' +
-              "Required unless only closing or claiming a thread. Never a note that only says you are on it.",
+              "Required unless only closing, claiming or marking done a thread. Never a note that only says you are on it.",
           },
           close: {
             type: "boolean",
@@ -176,6 +188,13 @@ export function relevoExtension(options: Options = {}) {
               'With `thread` (not `to`): marks the thread as this session\'s, a state the others in it see ("has it since 10:47"), ' +
               "without writing a note when there is no `text`. Use it just before you start changing files or running something long. Not for team questions.",
           },
+          done: {
+            type: "boolean",
+            description:
+              'With `thread` and no `text` (and no `claim`): your person has handled the thread up to its latest note, with nothing to write ("seen, nothing to do": ' +
+              "an answer you have now read, a thank-you). It stops being pending for them; nothing is written and nothing claimed. " +
+              "Not for a note that is not for you: leave that one pending.",
+          },
         },
         additionalProperties: false,
       } as any,
@@ -183,7 +202,9 @@ export function relevoExtension(options: Options = {}) {
         // `to` may be one address; the server takes a list.
         const fields = typeof params?.to === "string" ? { ...params, to: [params.to] } : params;
         const res = await call(ctx?.cwd, (c) => c.send(fields, signal));
-        return result(sent(res), { ...res });
+        // Written in, closed or marked done: nothing of it is left to hand over.
+        forget(res.thread);
+        return result(params?.done === true ? markedDone(res) : sent(res), { ...res });
       },
     } as any);
 
@@ -235,6 +256,8 @@ export function relevoExtension(options: Options = {}) {
       } as any,
       async execute(_id: string, params: any, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: any) {
         const [thread, me] = await call(ctx?.cwd, (c) => Promise.all([c.thread(params.id, signal), whoami(c)]));
+        // Read whole: the agent has what the background fetched of it.
+        forget(thread.id);
         const before = typeof params.before === "string" && params.before ? params.before : undefined;
         return result(renderThread(thread, { before, me }), { thread: thread.id });
       },
@@ -255,12 +278,13 @@ export function relevoExtension(options: Options = {}) {
       event.systemPromptOptions.sections.relevo = systemSection(me);
     });
 
-    // Threads fetched in the background that the agent has not seen yet. They are
-    // delivered on the server already, so they must not go into pi's follow-up
-    // queue, which Esc, dequeue and moving in the tree empty without a word: they
-    // wait here and are handed over one at a time while the agent is idle, and
-    // leave only when pi shows the message to the agent (message_start).
-    const pending = new Map<string, Thread>();
+    // Threads fetched in the background that the agent has not seen yet. They have
+    // reached this session on the server already, so they must not go into pi's
+    // follow-up queue, which Esc, dequeue and moving in the tree empty without a
+    // word: they wait here and are handed over one at a time while the agent is
+    // idle, and leave when pi shows the message to the agent (message_start), or
+    // when the agent writes in the thread, marks it done or reads it whole.
+    const queue = new Map<string, Thread>();
     /** The thread whose turn was started, until pi shows it. */
     let handed: Thread | null = null;
     let sessionCtx: any = null;
@@ -277,13 +301,18 @@ export function relevoExtension(options: Options = {}) {
       }
     }
 
-    /** Adds a thread to the pending list, merging it with what is already there. */
+    /** The agent has written in thread `id`, marked it done or read it whole: it leaves the queue. */
+    function forget(id: string): void {
+      queue.delete(id);
+    }
+
+    /** Adds a thread to the queue, merging it with what is already there. */
     function hold(thread: Thread): void {
-      const before = pending.get(thread.id);
-      if (!before) return void pending.set(thread.id, thread);
+      const before = queue.get(thread.id);
+      if (!before) return void queue.set(thread.id, thread);
       const seen = new Set((before.new_notes ?? []).map((n) => n.id));
       const notes = [...(before.new_notes ?? []), ...(thread.new_notes ?? []).filter((n) => !seen.has(n.id))];
-      pending.set(thread.id, { ...thread, new_notes: notes });
+      queue.set(thread.id, { ...thread, new_notes: notes });
     }
 
     function arrival(thread: Thread) {
@@ -297,23 +326,23 @@ export function relevoExtension(options: Options = {}) {
     }
 
     /**
-     * Hands the next pending thread to pi if the agent is idle: it starts a turn
-     * at once. `quiet` adds every pending thread to the session without starting
+     * Hands the next queued thread to pi if the agent is idle: it starts a turn
+     * at once. `quiet` adds every queued thread to the session without starting
      * a turn instead: the agent sees them on its next one.
      */
     function flush(quiet = false): void {
-      if (handed || !pending.size) return;
+      if (handed || !queue.size) return;
       if (!idle()) {
         if (!turn && !retry && loop) retry = setTimeout(() => ((retry = null), flush()), 500);
         return;
       }
       if (quiet) {
-        for (const thread of pending.values()) pi.sendMessage(arrival(thread), { triggerTurn: false });
-        pending.clear();
+        for (const thread of queue.values()) pi.sendMessage(arrival(thread), { triggerTurn: false });
+        queue.clear();
         return;
       }
-      const thread = pending.values().next().value as Thread;
-      pending.delete(thread.id);
+      const thread = queue.values().next().value as Thread;
+      queue.delete(thread.id);
       handed = thread;
       pi.sendMessage(arrival(thread), { triggerTurn: true });
     }
@@ -337,8 +366,8 @@ export function relevoExtension(options: Options = {}) {
       handed = null;
       if (missed) {
         // The turn ended (Esc, an error) before pi showed the thread: keep it, first.
-        const rest = [...pending.values()];
-        pending.clear();
+        const rest = [...queue.values()];
+        queue.clear();
         [missed, ...rest].forEach(hold);
       }
       // After Esc, or a turn that never showed its thread, starting another turn
