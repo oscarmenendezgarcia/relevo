@@ -1324,6 +1324,28 @@ class Tls(Base):
         self.assertIn("Yes, by key.", inbox)
         self.assertIn("Over TLS: is /refunds idempotent?", tools.relevo_thread({"id": thread_id}))
 
+    def test_the_pinned_certificate_is_trusted_alone_with_truststore_injected(self):
+        # Hermes injects truststore into the whole process (agent/ssl_verify.py): ssl.SSLContext is then
+        # truststore's, which also asks the platform verifier (macOS refuses a 10-year certificate).
+        # The pinned context must be the stdlib's, so the pinned certificate alone decides.
+        truststore = __import__("truststore")
+        truststore.inject_into_ssl()
+        client.pinned_context.cache_clear()
+        try:
+            self.assertNotEqual(ssl.SSLContext.__module__, "ssl")
+            self.assertEqual(type(client.pinned_context(self.TLS.cert)).__module__, "ssl")
+            self.use(self.TLS)
+            out = tools.relevo_send({"to": "ana", "text": "With truststore: still pinned?"})
+            thread_id = re.search(r"thread (r_\w+)", out).group(1)
+            self.assertEqual(self.ana.thread(thread_id)["notes"][0]["text"], "With truststore: still pinned?")
+            self.assertIn("You speak for @oscar", tools.relevo_inbox({}))
+            # Another server's certificate is still refused, before the token is sent.
+            self.use(self.TLS, cert=self.OTHER.cert)
+            self.assertIn("relevo connect", tools.relevo_inbox({}))
+        finally:
+            truststore.extract_from_ssl()
+            client.pinned_context.cache_clear()
+
     def test_relevo_cert_names_the_certificate_whatever_the_server(self):
         # The env's pair for the TLS server; the saved file is another server's, with its certificate.
         self.use(self.OTHER)
