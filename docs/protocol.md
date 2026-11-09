@@ -39,15 +39,21 @@ The server keeps each session with its token's label, its context and when it wa
 
 ## Delivery state
 
-Delivery is kept per session. For each session the server knows the last note of each thread that reached it. A note reaches a session when that session fetches it through `inbox` or `thread`. A session starts with what its person already has: a note that had reached one of their sessions before this one was first seen counts as having reached it, so a new terminal does not replay the person's whole history; notes that reached none of them are new for it too.
+Two things are kept apart: whether a note has **reached** a session (it was fetched), and whether a person has **handled** it (they did something about it). A note can reach a session that then dies, or decides it is not for it; it stays pending for the person until one of their sessions handles it.
+
+**Handled.** For each participant of a `direct` thread, the server keeps how far the person has handled it. A person handles the thread up to its latest note when one of their sessions writes a note in it, closes it, or sends `done: true` (see `send`). Claiming does not handle: a claim says "I am on it", and if the claiming session dies, the note is still pending when the claim ends. A note by someone else that the person has not handled is **pending** for them. `team` threads and closed threads are never pending: answering a team question is optional, and a closed thread asks nothing more.
+
+**Reached.** Delivery is kept per session. For each session the server knows the last note of each thread that reached it. A note reaches a session when that session fetches it through `inbox` or `thread`. Each session gets each note once: a note that reached it is not new for it again, pending or not.
+
+**Where a new session starts.** A session starts, for each `direct` thread, with what its person has *handled*: notes still pending for the person are new for it, so an agent that starts after another one died with a note half done gets that note at once. For `team` threads it starts with what any of the person's sessions has reached, so a new terminal does not replay old team questions.
 
 A thread is **new for a session** when it holds notes, not written by the session's person, that have not reached that session. A person's own notes are never new for any of their sessions. When a session writes a note, everything in the thread up to that note has reached it, unless earlier notes had not: then nothing moves, so a reply written without reading never hides a note.
 
-A thread is **waiting** for a person when it is `direct`, `open`, and its latest note is not theirs. It stays in the inbox of the sessions that see it until the person replies or someone closes it, even after it was delivered.
+A thread is **waiting** for a person when it is pending for them: `direct`, `open`, with a note by someone else they have not handled. It stays in the inbox of the sessions that see it until the person handles it (replies, closes it, or marks it `done`), even after it reached a session.
 
 A `team` thread is never "waiting": it shows only while it is `open` and has notes new for the session. So a teammate's agent with nothing to add does not keep seeing it, and once the asker closes it (resolved), it leaves every inbox, even with notes the session has not fetched; `inbox` with `all` and `thread` still show it. A closed `direct` thread with new notes still shows until they are fetched, since a closing note is often meant to be read.
 
-For others, a participant's delivery is about the latest note *written by someone else* that reached any of their sessions (their own notes say nothing about whether they read the others'): which session (its label, and its context at that moment), and how many of their sessions that note has reached (`seen_by`, counting a session first seen after it reached the person, which starts with it, and not counting forgotten sessions): "picked up by Claude Code in pagos-api, 5 minutes ago", or "seen by 2 of Ana's sessions, none has taken it" when `seen_by` > 0 and there is no live claim.
+For others, a participant's delivery is about the latest note *written by someone else*: whether it reached any of their sessions and which one first (its label, and its context at that moment), how many of their live sessions have it (`seen_by`), and whether the person has handled it, when, and from which session (`handled_at`, `handled_by`): "seen by pi in embeddings, not handled yet", or "handled by Claude Code in producto at 19:30". A session that has ended still counts as having seen it (the `by`), even though `seen_by` counts live sessions only.
 
 ## Operations
 
@@ -61,9 +67,10 @@ Opens a thread, or writes in one.
 |---|---|---|
 | `to` | array of addresses (`handle` or `handle/context`, the context with or without a branch), or `["@team"]` | Opens a new thread. Exactly one of `to` and `thread`. |
 | `thread` | thread id | Writes in an existing thread. |
-| `text` | string | The note. Required unless only closing or only claiming (`thread` + `close: true` or `claim: true`, no `text`). |
+| `text` | string | The note. Required unless only closing, claiming or marking done (`thread` + `close: true`, `claim: true` or `done: true`, no `text`). |
 | `close` | bool, optional | Marks the thread closed after writing. |
 | `claim` | bool, optional | With `thread`: claims the thread for this session, as a state, without a note when there is no `text`. Not with `to`. |
+| `done` | bool, optional | With `thread` and no `text`: the person has handled the thread up to its latest note, with nothing to write ("seen, nothing to do"). Writes no note and does not claim. Not with `to`, `text` or `claim`. |
 | `key` | string, 1 to 100 characters, optional | Idempotency key. A repeated `send` from the same person with the same key, within 24 hours of the `send` that used it, returns the first result and writes nothing. Only a successful `send` uses up a key. After 24 hours the key expires: the same key is a fresh `send`, which uses it up for another 24 hours. The server forgets expired keys. |
 
 The body is a JSON object; anything else (an array, say), or any other field, fails with `BAD_REQUEST`. Characters here and below are Unicode scalar values.
@@ -79,7 +86,7 @@ Rules:
 - Text over 64 KiB (counted once decoded from JSON) fails with `TOO_LARGE` (400); empty or blank text with `BAD_REQUEST`. The whole request body may be up to 400 KiB, so a note of 64 KiB fits however the client escapes it.
 - Loop guard: a thread accepts at most 20 notes in any rolling hour. The 21st fails with `THREAD_BUSY`, whose message tells the agent to check with its person before going on. (The server cannot tell a person from an agent, so this caps speed, not authorship.)
 - A person may send at most 60 notes per rolling minute: beyond that, `RATE_LIMITED`.
-- The limits count notes only: a close or a claim without text is never limited.
+- The limits count notes only: a close, a claim or a `done` without text is never limited.
 
 Returns `{ "thread": "<id>", "note": "<id>", "status": "open" | "closed", "claimed": "this-session" | "other-session" | null }`. `note` is `null` when the `send` only closed the thread. `claimed` is who holds the thread for your person after this `send`: `"other-session"` means another of your sessions had it first, so this one should step aside; `null` after opening a thread, and after any close, which releases every claim. A replayed `send` returns who held the thread after its first result, named for the session that replays: `"this-session"` only when that session is the one that held it, so a retry from another session (an agent restarted under a new id, say) is not told it holds a thread it does not.
 
@@ -107,6 +114,7 @@ Returns:
       "participants": ["oscar", "ana"],
       "status": "open" | "closed",
       "waiting_for_you": true,
+      "pending": true,
       "last_note": { "id": "n_…", "author": "ana", "via": "Claude Code laptop", "created_at": "…", "text": "…", "truncated": false },
       "context": "pagos-api",
       "claimed": "this-session",
@@ -123,6 +131,7 @@ Returns:
 
 - `team` lists every active person, you included, so the agent knows whom to ask. `contexts` are the distinct contexts of their sessions seen in the last 15 minutes, sorted.
 - `session` is the session this request counts as; `you` is the handle of its person, so an agent knows which member of `team` it speaks for.
+- `waiting_for_you` and `pending` say the same thing: the thread is pending for your person (see [Delivery state](#delivery-state)); `pending` is the name to use, `waiting_for_you` stays for older clients.
 - `held_by` lists the other participants who hold the thread now (live claims only), with the session's label, context and since when, so whoever asked sees who is on it without opening the thread; empty when nobody else holds it.
 - A thread's `context` is the context it was addressed to for you, or `null`. `claimed` is `null` (unclaimed), `"this-session"`, or, only with `all` (and in `thread`, which also shows any thread of the person), `"other-session"`.
 - At most 20 threads: first those with new notes (waiting ones first among them), then waiting ones with nothing new; within each group, by latest note, newest first. `more` counts the rest. So threads that are only waiting, which stay until someone replies, never keep new notes out.
@@ -138,8 +147,9 @@ The whole history of one thread your person takes part in, from any of their ses
 Returns the same thread object as `inbox`, with `notes` (every note, in full, oldest first, `truncated: false`) in place of `new_notes`, plus `delivery`: for each participant, in the order of `participants`, the latest note by someone else that they have, when it reached them and which session it reached (`by`), which session of theirs claimed the thread and since when (`claimed_by`, with `since`), or `null`s, and how many of their sessions that note has reached (`seen_by`, 0 when none has). Each session shows its label and its context at that moment: when the note reached it, when it claimed the thread. This is how a writer sees "picked up by her agent 5 minutes ago".
 
 ```json
-"delivery": [ { "handle": "ana", "note": "n_…", "delivered_at": "2026-11-08T10:46:00Z", "by": { "label": "Claude Code laptop", "context": "pagos-api" }, "claimed_by": { "label": "Claude Code laptop", "context": "pagos-api", "since": "2026-11-08T10:47:00Z" }, "seen_by": 1 },
-              { "handle": "bob", "note": null, "delivered_at": null, "by": null, "claimed_by": null, "seen_by": 0 } ]
+"delivery": [ { "handle": "ana", "note": "n_…", "delivered_at": "2026-11-08T10:46:00Z", "by": { "label": "Claude Code laptop", "context": "pagos-api" }, "claimed_by": { "label": "Claude Code laptop", "context": "pagos-api", "since": "2026-11-08T10:47:00Z" }, "seen_by": 1,
+                "handled_at": null, "handled_by": null },
+              { "handle": "bob", "note": null, "delivered_at": null, "by": null, "claimed_by": null, "seen_by": 0, "handled_at": null, "handled_by": null } ]
 ```
 
 ## HTTP
@@ -191,7 +201,7 @@ relevo backup <dest-file>                                                       
 relevo backup --keep 14 <dest-dir>                                                         # writes <dest-dir>/YYYYMMDD-HHMMSS.db (UTC), keeps the newest 14
 ```
 
-The database records the version of its layout. v0 does not migrate: every command, `serve` included, refuses a database made by another version of relevo and says so; delete it (with its `-wal` and `-shm` files) and invite the team again.
+The database records the version of its layout. From layout 6 on (relevo 0.3.0), relevo migrates a database of layout 5 (relevo 0.1.0 to 0.2.x) in place when it first opens it: the person's handled state starts at what their sessions had reached, so nothing old becomes pending again. It refuses any other older layout, and any newer one, and says so; such a database must be deleted (with its `-wal` and `-shm` files) and the team invited again.
 
 `backup` copies the database with SQLite's `VACUUM INTO`: one consistent snapshot, taken without stopping the server (a plain copy of a database in WAL mode can miss what is still in its `-wal` file). It only reads the database: it never creates one, and copies one made by another version too, so it can be kept before an upgrade. The copy is created 0600 under a hidden name, checked (`PRAGMA quick_check`), and only then given its name; an existing file is never overwritten. When `<dest>` is a directory (with `--keep N` it must be one, and is created 0700 if missing), the copy is named `YYYYMMDD-HHMMSS.db` (UTC), and `--keep N` then removes the oldest files named that way beyond the newest N, the new one always among them; other files there are left alone. Restoring is putting a copy in place of the database while the server is stopped (and deleting the old database's `-wal` and `-shm` files).
 
