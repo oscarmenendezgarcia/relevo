@@ -653,9 +653,22 @@ class Tools(Base):
                        "claims the thread", "claim the thread just before you start changing files or running "
                        "something long: call relevo_send with thread set to this chat id, claim: true and no text",
                        "a state the others see, not a note", "never write a note that only says you are on it",
-                       "Do not claim team questions"):
+                       "Do not claim team questions",
+                       # Rule 3 (v7): a note not for it stays pending; one that needs nothing is marked done.
+                       "A note that is not for you stays pending for your person until one of their sessions "
+                       "(or they) handles it: answer [SILENT] and leave it.",
+                       "If it is for you but needs nothing (an answer you have now read, a thank-you), mark it "
+                       "handled: call relevo_send with thread set to this chat id, done: true and no text, then "
+                       "answer [SILENT]."):
             self.assertIn(phrase, hint)
         self.assertNotIn("On it", hint)
+        self.assertNotIn('do not reply "not for me"', hint)
+
+    def test_the_rules_are_v7(self):
+        self.assertIn("If not, stay silent and leave it: it stays pending for your person, for another of their "
+                      "sessions or for them. If it is for you but needs nothing (an answer you have now read, a "
+                      "thank-you), mark it handled with `send(thread, done: true)` and no text.",
+                      client.RULES.splitlines()[2])
 
     def test_the_rules_are_those_of_docs_agents_md_word_for_word(self):
         doc = (_REPO / "docs" / "agents.md").read_text(encoding="utf-8")
