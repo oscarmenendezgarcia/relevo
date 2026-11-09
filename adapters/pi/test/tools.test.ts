@@ -104,6 +104,8 @@ test("the context is worked out again for every request", async () => {
 test("thread shows every note and the delivery", async () => {
   const ext = extension();
   const opened = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Can you look at the webhook retries?" });
+  // Read first: a reply handles only what reached the session.
+  await ext.tool("relevo_inbox", {}, work);
   const reply = await ext.tool("relevo_send", { thread: opened.thread, text: "They back off 1, 5 and 25 minutes." }, work);
   assert.match(reply, /This session holds the thread/);
   const out = await ext.tool("relevo_thread", { id: opened.thread }, work);
@@ -126,10 +128,12 @@ test("send with done marks the thread handled, writing and claiming nothing", as
   const ext = extension();
   const opened = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Thanks, the fix works." });
   assert.equal((await api(server, oscar, "GET", "/api/inbox", undefined, "done-checker")).threads.find((t: any) => t.id === opened.thread)?.pending, true);
+  // `done` handles only what reached this session: it reads the note first.
+  assert.match(await ext.tool("relevo_inbox", {}, work), /Thanks, the fix works\./);
   const out = await ext.tool("relevo_send", { thread: opened.thread, done: true }, work);
   assert.equal(
     out,
-    `Marked thread ${opened.thread} handled: it is no longer pending for your person (a new note by someone else makes it pending again). Nothing was written, and nothing claimed.`,
+    `Marked thread ${opened.thread} handled, up to the notes this session has received: those are no longer pending for your person. Any note this session has not received yet, and any new one by someone else, stays pending. Nothing was written, and nothing claimed.`,
   );
   const seen = await api(server, ana, "GET", `/api/threads/${opened.thread}`);
   assert.equal(seen.notes.length, 1, "nothing written");

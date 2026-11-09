@@ -54,8 +54,8 @@ function describe(err: unknown): Error {
 /** What `send` with `done` did, as relevo mcp says it (src/render.rs). */
 export function markedDone(res: SendResult): string {
   let text =
-    `Marked thread ${res.thread} handled: it is no longer pending for your person (a new note by ` +
-    "someone else makes it pending again). Nothing was written, and nothing claimed.";
+    `Marked thread ${res.thread} handled, up to the notes this session has received: those are no longer pending for your person. ` +
+    "Any note this session has not received yet, and any new one by someone else, stays pending. Nothing was written, and nothing claimed.";
   if (res.claimed === "other-session") text += " Another of your person's sessions still holds it.";
   return text;
 }

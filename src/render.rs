@@ -417,8 +417,9 @@ pub fn pushed(threads: &[Value], me: Option<&str>) -> String {
 pub fn done(v: &Value) -> String {
     let id = s(&v["thread"]);
     let mut out = format!(
-        "Marked thread {id} handled: it is no longer pending for your person (a new note by \
-         someone else makes it pending again). Nothing was written, and nothing claimed."
+        "Marked thread {id} handled, up to the notes this session has received: those are no \
+         longer pending for your person. Any note this session has not received yet, and any new \
+         one by someone else, stays pending. Nothing was written, and nothing claimed."
     );
     if v["claimed"] == "other-session" {
         out.push_str(" Another of your person's sessions still holds it.");
@@ -734,6 +735,12 @@ mod tests {
         let v = json!({ "thread": "r_1", "note": null, "status": "open", "claimed": null });
         let out = done(&v);
         assert!(out.starts_with("Marked thread r_1 handled"), "{out}");
+        // Only what reached this session: a note it has not received stays pending.
+        assert!(
+            out.contains("up to the notes this session has received")
+                && out.contains("Any note this session has not received yet"),
+            "{out}"
+        );
         assert!(
             out.contains("Nothing was written, and nothing claimed."),
             "{out}"

@@ -1100,9 +1100,10 @@ class Sessions(Base):
         opened = self.ana.send(to=["oscar"], text="Thanks, the fix works.")
         self.assertIn("Thanks, the fix works.", tools.relevo_inbox({}))
         out = tools.relevo_send({"thread": opened["thread"], "done": True})
-        self.assertEqual(out, f"Marked thread {opened['thread']} handled: it is no longer pending for your person "
-                              "(a new note by someone else makes it pending again). Nothing was written, and "
-                              "nothing claimed.")
+        self.assertEqual(out, f"Marked thread {opened['thread']} handled, up to the notes this session has "
+                              "received: those are no longer pending for your person. Any note this session has "
+                              "not received yet, and any new one by someone else, stays pending. Nothing was "
+                              "written, and nothing claimed.")
         self.assertEqual(len(self.ana.thread(opened["thread"])["notes"]), 1)
         oscar = self._oscar(opened["thread"])
         self.assertIsNone(oscar["claimed_by"])
