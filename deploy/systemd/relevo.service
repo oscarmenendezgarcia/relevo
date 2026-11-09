@@ -27,6 +27,9 @@ Restart=on-failure
 RestartSec=5
 
 # Limits and sandbox. The data directory is the only place it may write.
+# Room for 1,024 connections that have not been authenticated yet, each holding at most a 16 KiB
+# request head and its TLS buffers (about 40 KiB in all). A body (up to 400 KiB) is read only
+# after its token is checked.
 MemoryMax=128M
 UMask=0077
 NoNewPrivileges=yes

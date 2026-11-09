@@ -230,6 +230,37 @@ async fn a_slow_request_head_is_dropped_after_the_head_timeout() {
 }
 
 #[tokio::test]
+async fn a_request_head_over_its_size_is_refused() {
+    for with_tls in [false, true] {
+        let s = start(Limits::default(), with_tls).await;
+        let head = |pad: usize| {
+            format!(
+                "GET /health HTTP/1.1\r\nhost: relevo\r\nx-pad: {}\r\n\r\n",
+                "a".repeat(pad)
+            )
+        };
+        // A head near the limit is answered.
+        let mut c = s.stream().await;
+        c.write_all(head(Limits::default().head_size - 200).as_bytes())
+            .await
+            .unwrap();
+        let got = response(&mut c).await;
+        assert!(got.starts_with("HTTP/1.1 200"), "{with_tls}: {got}");
+        // One over it is refused, whole or still coming, without waiting for the rest.
+        for whole in [true, false] {
+            let mut c = s.stream().await;
+            let mut text = head(Limits::default().head_size + 1024);
+            if !whole {
+                text.truncate(text.len() - 4);
+            }
+            let _ = c.write_all(text.as_bytes()).await;
+            let got = response(&mut c).await;
+            assert!(got.starts_with("HTTP/1.1 431"), "{with_tls} {whole}: {got}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn a_slow_body_is_dropped_after_the_body_timeout() {
     let s = start(short(), false).await;
     let mut c = s.stream().await;

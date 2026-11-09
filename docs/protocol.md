@@ -203,7 +203,7 @@ The database records the version of its layout. v0 does not migrate: every comma
 - `relevo serve --tls-cert <pem> --tls-key <pem>` uses a certificate you already have (one from Let's Encrypt or the office's own authority).
 - Without TLS, `serve` speaks plain HTTP, as before: keep `--addr` on loopback, or behind a proxy or a VPN that encrypts. It logs a warning when `--addr` is not a loopback address and TLS is off.
 
-Whatever the transport, the server limits what a client can hold: 10 seconds to send the request head, 30 seconds to send the body, an idle connection closed after 75 seconds, a request answered within 90 seconds (a waiting `inbox` answers by 60), at most 1,024 connections at once and 64 from one address; beyond that, new connections wait or are refused. These replace what the proxy used to enforce; a proxy in front stays possible.
+Whatever the transport, the server limits what a client can hold: 10 seconds to send the request head, which may take at most 16 KiB (a longer one is refused with 431, so a connection holds little before its token is checked), 30 seconds to send the body, an idle connection closed after 75 seconds, a request answered within 90 seconds (a waiting `inbox` answers by 60), at most 1,024 connections at once and 64 from one address; beyond that, new connections wait or are refused. These replace what the proxy used to enforce; a proxy in front stays possible.
 
 `invite` on an existing handle reactivates the person, sets the new `--name`, and `--about` if given. `team` and `equipo` cannot be handles (they mean the whole team). `--label` defaults to `agent`. `deactivate` revokes every token of the person, for good: inviting them back issues a new token, and their old ones never work again.
 

@@ -33,6 +33,9 @@ pub struct Limits {
     pub idle: Duration,
     /// For the whole request, from its head to its answer (a waiting `inbox` answers by 60 s).
     pub request: Duration,
+    /// The most a request head may take, in bytes; a longer one is refused with 431. It bounds
+    /// what a connection holds before its request is authenticated.
+    pub head_size: usize,
     /// Connections at once; beyond, new ones wait.
     pub connections: usize,
     /// Connections at once from one address; beyond, new ones are refused.
@@ -46,6 +49,7 @@ impl Default for Limits {
             body: Duration::from_secs(30),
             idle: Duration::from_secs(75),
             request: Duration::from_secs(90),
+            head_size: 16 * 1024,
             connections: 1024,
             per_address: 64,
         }
@@ -170,6 +174,7 @@ where
         watch: watch.clone(),
         head: limits.head,
     });
+    let head_size = limits.head_size.max(8192);
     let in_service = watch.clone();
     let service = hyper::service::service_fn(move |req: hyper::Request<Incoming>| {
         let (router, limits, watch) = (router.clone(), limits.clone(), in_service.clone());
@@ -187,7 +192,10 @@ where
             res
         }
     });
-    let conn = http1::Builder::new().serve_connection(io, service);
+    let conn = http1::Builder::new()
+        // hyper's read buffer, the head's room (by default about 400 KiB); never below its least.
+        .max_buf_size(head_size)
+        .serve_connection(io, service);
     tokio::pin!(conn);
     loop {
         let deadline = watch.deadline();
@@ -382,6 +390,7 @@ mod tests {
             (10, 30, 75, 90)
         );
         assert_eq!((l.connections, l.per_address), (1024, 64));
+        assert_eq!(l.head_size, 16 * 1024);
         // A waiting inbox (at most 60 s) fits in a request.
         assert!(l.request > Duration::from_secs(60));
     }
