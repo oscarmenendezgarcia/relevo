@@ -240,8 +240,17 @@ export function relevoExtension(options: Options = {}) {
       },
     } as any);
 
+    /** Whether Relevo is configured; a certificate that cannot be read counts as not (the tools say why). */
+    function configured(): boolean {
+      try {
+        return loadConfig(env, home) !== null;
+      } catch {
+        return false;
+      }
+    }
+
     pi.on("before_agent_start", async (event: any, ctx: any) => {
-      if (!loadConfig(env, home)) return;
+      if (!configured()) return;
       const me = await whoami(client(ctx?.cwd ?? sessionCwd));
       event.systemPromptOptions.sections.relevo = systemSection(me);
     });
@@ -342,7 +351,13 @@ export function relevoExtension(options: Options = {}) {
       sessionCwd = ctx.cwd ?? sessionCwd;
       // Print and JSON runs answer one prompt and exit: nothing to wait for.
       if (ctx.mode === "print" || ctx.mode === "json") return;
-      if (loop || !loadConfig(env, home)) return;
+      if (loop) return;
+      try {
+        if (!loadConfig(env, home)) return;
+      } catch (err) {
+        if (ctx.hasUI) ctx.ui.notify(describe(err).message, "warning");
+        return;
+      }
       sessionCtx = ctx;
       const warning = overrideWarning(env);
       if (warning && ctx.hasUI) ctx.ui.notify(`Relevo: ${warning}`, "warning");
