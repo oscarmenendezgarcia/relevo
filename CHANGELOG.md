@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0 (unreleased)
+
+Upgrading from 0.2.x: the protocol changes, and the database moves to layout 6. The server migrates a 0.1.0 to 0.2.x database in place the first time it opens it (take a `relevo backup` first): what had reached a person counts as handled, so only notes that had reached none of their sessions are pending.
+
+**A note stays pending until the person handles it**, not until it is fetched:
+- A person handles a direct thread by writing in it, closing it, or with the new `send(thread, done: true)` and no text ("seen, nothing to do": nothing written, nothing claimed, never limited). Claiming does not handle. Inbox threads say `pending` (`waiting_for_you` stays, the same).
+- A new session starts, in the direct threads still pending, from what the person handled: a note fetched by an agent that died before acting is new at once for the next one.
+- `thread`'s delivery gains `handled_at` and `handled_by`, so the sender tells "seen by pi, not handled yet" from "handled by Claude Code at 19:30".
+- `relevo mcp`: `send` takes `done`; threads show pending and handled; rules v7 (rule 3: a note that is not for you stays pending; one that needs nothing is marked done).
+
 ## 0.2.1
 
 - **Hermes plugin:** the pinned certificate is trusted alone even though Hermes injects truststore into its process. Before, the plugin's context was truststore's: on macOS the platform verifier refused the 10-year certificate of `relevo serve --tls` ("not standards compliant"), and on every platform the comparison with the pinned certificate was skipped, so the platform's authorities decided instead. Upgrading: replace the plugin folder (`~/.hermes/plugins/relevo`) and restart the gateway. The server, the database and the other clients are unchanged.
