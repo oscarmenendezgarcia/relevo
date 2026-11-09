@@ -60,9 +60,13 @@ CREATE INDEX IF NOT EXISTS threads_by_opener ON threads(opener_id, kind, created
 -- `delivered_at`, `_label` and `_context` say when the latest one by someone else first did, and
 -- which session (its label and context then). `last_seq` is the thread's latest note, `last_other_seq` the
 -- latest one not theirs; `has_new` (no session of theirs has that one),
--- `waiting` (open, direct, latest note not theirs), `inbox` (`has_new` or `waiting`) and
--- `resolved` (a closed `team` thread: it shows only with `all`) are kept by `api::refresh` after
--- every change to the thread.
+-- `waiting` (pending: open, direct, with a note not theirs after `handled_seq`), `inbox` (`has_new`
+-- or `waiting`), `resolved` (a closed `team` thread: it shows only with `all`) and `fresh` (pending,
+-- with a note past `handled_seq` that reached one of their sessions: a new session of theirs gets
+-- its own row, starting at `handled_seq`) are kept by `api::refresh` after every change to the
+-- thread. `handled_seq` is how far the person has handled the thread (by writing in it, closing it
+-- or `done`); `handled_at`, `_label` and `_context` say when they last handled a note by someone
+-- else, and from which session (its label and context then).
 CREATE TABLE IF NOT EXISTS participants (
     thread_id         TEXT NOT NULL REFERENCES threads(id),
     person_id         INTEGER NOT NULL REFERENCES people(id),
@@ -80,11 +84,18 @@ CREATE TABLE IF NOT EXISTS participants (
     waiting           INTEGER NOT NULL DEFAULT 0,
     inbox             INTEGER NOT NULL DEFAULT 0,
     resolved          INTEGER NOT NULL DEFAULT 0,
+    handled_seq       INTEGER,
+    handled_at        INTEGER,
+    handled_label     TEXT,
+    handled_context   TEXT,
+    fresh             INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (thread_id, person_id)
 );
 -- What a session has of a thread, once it differs from its person's: a session without a row has
 -- what its person has (`participants.delivered_seq`). Before that moves, every other session of
 -- the person gets a row with the old value, so one session reading never delivers to another.
+-- A new session gets a row for each `fresh` thread of its person, at what the person handled, so
+-- a note that reached a session which died before handling it is new for the next one.
 -- The other columns copy the participant row (kept by `api::refresh`) so that the inbox can read
 -- a session's new threads, in order, from an index.
 CREATE TABLE IF NOT EXISTS session_threads (
@@ -105,6 +116,7 @@ CREATE INDEX IF NOT EXISTS session_threads_by_thread ON session_threads(thread_i
 CREATE INDEX IF NOT EXISTS session_threads_by_claim
     ON session_threads(claimed_by) WHERE claimed_by IS NOT NULL;
 CREATE INDEX IF NOT EXISTS participants_by_person ON participants(person_id);
+CREATE INDEX IF NOT EXISTS participants_fresh ON participants(person_id) WHERE fresh = 1;
 CREATE INDEX IF NOT EXISTS participants_by_claim
     ON participants(claimed_by) WHERE claimed_by IS NOT NULL;
 -- The inbox of a session is the union of a few index ranges, each already in inbox order, so it
@@ -169,12 +181,56 @@ pub const SESSION_LIFETIME_SECS: i64 = 7 * 24 * 3600;
 /// The claims of a session not seen for this long lapse.
 pub const CLAIM_LAPSE_SECS: i64 = 15 * 60;
 
-/// The layout of `SCHEMA`, kept in SQLite's `user_version`. v0 does not migrate: a database with
-/// another layout is refused, never half-updated (`CREATE TABLE IF NOT EXISTS` would skip the
-/// old tables and fail on their missing columns).
-const SCHEMA_VERSION: i64 = 5;
+/// The layout of `SCHEMA`, kept in SQLite's `user_version`. A database of layout 5 (relevo 0.1.0
+/// to 0.2.x) is migrated in place (`MIGRATE_FROM_5`); any other layout is refused, never
+/// half-updated (`CREATE TABLE IF NOT EXISTS` would skip the old tables and fail on their missing
+/// columns).
+const SCHEMA_VERSION: i64 = 6;
 
-/// Opens (or creates) the database and applies the schema. `":memory:"` works for tests.
+/// Layout 5 to 6: the handled state of each participant. It starts at what their sessions had
+/// reached, or at their own latest note when that is later (writing handles a thread), so nothing
+/// that had reached them becomes pending; when it covers a note by someone else, it was handled
+/// when that reached them (or when they wrote), from that session. Then the flags that depend on
+/// it, as `api::refresh` keeps them. The new columns go last, as in `SCHEMA`.
+const MIGRATE_FROM_5: &str = "
+ALTER TABLE participants ADD COLUMN handled_seq INTEGER;
+ALTER TABLE participants ADD COLUMN handled_at INTEGER;
+ALTER TABLE participants ADD COLUMN handled_label TEXT;
+ALTER TABLE participants ADD COLUMN handled_context TEXT;
+ALTER TABLE participants ADD COLUMN fresh INTEGER NOT NULL DEFAULT 0;
+UPDATE participants AS p SET handled_seq = nullif(max(
+    coalesce(p.delivered_seq, 0),
+    coalesce((SELECT max(n.seq) FROM notes n
+              WHERE n.thread_id = p.thread_id AND n.author_id = p.person_id), 0)), 0);
+UPDATE participants AS p SET
+    handled_at = coalesce(
+        (SELECT n.created_at FROM notes n
+         WHERE n.thread_id = p.thread_id AND n.author_id = p.person_id
+           AND n.seq = p.handled_seq AND n.seq > coalesce(p.delivered_seq, 0)),
+        p.delivered_at),
+    handled_label = coalesce(
+        (SELECT n.via FROM notes n
+         WHERE n.thread_id = p.thread_id AND n.author_id = p.person_id
+           AND n.seq = p.handled_seq AND n.seq > coalesce(p.delivered_seq, 0)),
+        p.delivered_label),
+    handled_context = CASE WHEN p.handled_seq > coalesce(p.delivered_seq, 0) THEN NULL
+                           ELSE p.delivered_context END
+WHERE EXISTS (SELECT 1 FROM notes n
+              WHERE n.thread_id = p.thread_id AND n.author_id != p.person_id
+                AND n.seq <= p.handled_seq);
+UPDATE participants AS p SET
+    waiting = t.kind = 'direct' AND t.status = 'open'
+              AND coalesce(p.handled_seq, 0) < p.last_other_seq,
+    inbox = coalesce(p.delivered_seq, 0) < p.last_other_seq
+            OR (t.kind = 'direct' AND t.status = 'open'
+                AND coalesce(p.handled_seq, 0) < p.last_other_seq)
+FROM threads t WHERE t.id = p.thread_id;
+UPDATE session_threads AS s SET waiting = p.waiting, person_inbox = p.inbox
+FROM participants p WHERE p.thread_id = s.thread_id AND p.person_id = s.person_id;
+";
+
+/// Opens (or creates) the database and applies the schema, migrating a database of layout 5.
+/// `":memory:"` works for tests.
 pub fn open(path: &str) -> Result<Connection> {
     create_private(path).with_context(|| format!("creating database {path}"))?;
     let mut conn = Connection::open(path).with_context(|| format!("opening database {path}"))?;
@@ -182,7 +238,7 @@ pub fn open(path: &str) -> Result<Connection> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     // One transaction, so a process opening a new file at the same time sees it either empty or
-    // with its version set.
+    // with its version set, and one opening an old file sees it either old or migrated.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
     if version != SCHEMA_VERSION {
@@ -190,10 +246,14 @@ pub fn open(path: &str) -> Result<Connection> {
         if version > SCHEMA_VERSION {
             bail!("database {path} was made by a newer version of relevo; use that one");
         }
-        if tables > 0 {
+        if version == 5 {
+            tx.execute_batch(MIGRATE_FROM_5)
+                .with_context(|| format!("migrating database {path} from layout 5"))?;
+        } else if tables > 0 {
             bail!(
-                "database {path} was made by an older version of relevo, and v0 does not \
-                 migrate: delete it (with its -wal and -shm files) and invite the team again"
+                "database {path} was made by an older version of relevo (before 0.1.0), which \
+                 this one does not migrate: delete it (with its -wal and -shm files) and invite \
+                 the team again"
             );
         }
     }

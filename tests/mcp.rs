@@ -375,8 +375,11 @@ async fn tools_carry_a_conversation_between_sessions() {
         ),
         "{inbox}"
     );
-    // So does a new session of Ana's, for which another session fetched the note.
+    // A new session of Ana's gets the note as new, though another session fetched it: Ana has
+    // not handled it. Then it too shows what the thread waits on.
     let mut ana3 = Mcp::start(&s, "ana", &s.dir, Some(""), &[]).await;
+    let inbox = ana3.ok("inbox", json!({})).await;
+    assert!(inbox.contains("New notes:\n"), "{inbox}");
     let inbox = ana3.ok("inbox", json!({})).await;
     assert!(inbox.contains("No new notes"), "{inbox}");
     assert!(inbox.contains("Latest: @bob at "), "{inbox}");

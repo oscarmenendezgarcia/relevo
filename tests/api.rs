@@ -466,11 +466,12 @@ async fn writers_own_notes_are_delivered_at_once() {
     assert_eq!(
         delivery[0],
         json!({ "handle": "ana", "note": null, "delivered_at": null, "by": null,
-                "claimed_by": null, "seen_by": 0 })
+                "claimed_by": null, "seen_by": 0, "handled_at": null, "handled_by": null })
     );
     assert_eq!(
         delivery[1],
-        json!({ "handle": "bob", "note": null, "delivered_at": null, "by": null, "claimed_by": null, "seen_by": 0 })
+        json!({ "handle": "bob", "note": null, "delivered_at": null, "by": null, "claimed_by": null,
+                "seen_by": 0, "handled_at": null, "handled_by": null })
     );
 }
 
@@ -936,6 +937,12 @@ async fn bad_requests() {
         json!({ "thread": id, "claim": "yes" }),
         json!({ "to": ["bob"], "claim": true }),
         json!({ "to": ["bob"], "text": "x", "claim": true }),
+        json!({ "thread": id, "done": false }),
+        json!({ "thread": id, "done": "yes" }),
+        json!({ "thread": id, "done": true, "text": "x" }),
+        json!({ "thread": id, "done": true, "claim": true }),
+        json!({ "to": ["bob"], "done": true }),
+        json!({ "to": ["bob"], "text": "x", "done": true }),
         json!({ "to": ["bob"], "text": "" }),
         json!({ "to": ["bob"], "text": " \n " }),
         json!({ "to": [], "text": "nobody" }),
@@ -1850,10 +1857,12 @@ async fn a_note_to_a_repository_reaches_it_on_any_branch_and_one_to_a_branch_onl
         thread_ids(&t.inbox("ana").await),
         vec![to_repo.clone(), to_branch.clone()]
     );
-    // `all` shows both anywhere, and the team list names branches as sessions sent them.
+    // `all` shows both anywhere, and the team list names branches as sessions sent them. The
+    // `main` session started after the note to the branch had reached Ana's other sessions, but
+    // she has not handled it, so it is new there.
     assert_eq!(
         thread_ids(&main.inbox_at("/api/inbox?all=1").await),
-        vec![to_repo, to_branch]
+        vec![to_branch, to_repo]
     );
     let (_, v) = t.get("bob", "/api/people").await;
     assert_eq!(
@@ -2489,11 +2498,15 @@ async fn the_answer_to_a_question_reaches_the_askers_next_session() {
         .find(|th| th["id"] == id)
         .unwrap();
     assert_eq!(direct["waiting_for_you"], true);
-    // Unclaimed, it shows in his other sessions too, in any context, waiting for his reply
-    // (the answer reached B, so they start with it).
+    // Unclaimed, it shows in his other sessions too, in any context, waiting for his reply. The
+    // answer reached B, but Oscar has not handled it, so they start before it: it is new there.
     for (sid, context) in [("term-cccc", "frontend"), ("term-dddd", "")] {
         let v = t.agent("oscar", sid, context).inbox().await;
-        assert_eq!(new_texts(&v, &id), Some(vec![]), "{v}");
+        assert_eq!(
+            new_texts(&v, &id),
+            Some(vec!["Yes, since Monday.".to_string()]),
+            "{v}"
+        );
     }
 }
 
@@ -2527,9 +2540,13 @@ async fn a_new_session_sees_the_answer_another_session_fetched_as_last_note() {
         new_texts(&a.inbox().await, &id),
         Some(vec!["Yes, since Monday.".to_string()])
     );
-    // Oscar's new session B: nothing new, but the thread waits for him, and its last note is
-    // Ana's answer.
+    // Oscar's new session B gets the answer as new: Oscar has not handled it. Once B has it,
+    // nothing is new, but the thread waits for him, and its last note is Ana's answer.
     let b = t.agent("oscar", "term-bbbb", "");
+    assert_eq!(
+        new_texts(&b.inbox().await, &id),
+        Some(vec!["Yes, since Monday.".to_string()])
+    );
     let v = b.inbox().await;
     assert_eq!(new_texts(&v, &id), Some(vec![]), "{v}");
     assert_eq!(v["threads"][0]["waiting_for_you"], true, "{v}");
@@ -2636,17 +2653,29 @@ async fn reading_in_one_session_does_not_deliver_to_another() {
         new_texts(&second.inbox().await, &id),
         Some(vec!["two".to_string()])
     );
-    // A session first seen after the notes reached the person starts with what the person has:
-    // nothing new, only waiting.
+    // A session first seen after the notes reached the person starts with what the person has
+    // handled: Bob has not handled them, so they are new for it.
     let later = t.agent("bob", "term-0003", "");
+    assert_eq!(
+        new_texts(&later.inbox().await, &id),
+        Some(vec!["one".to_string(), "two".to_string()])
+    );
     assert_eq!(new_texts(&later.inbox().await, &id), Some(vec![]));
-    // But notes that reached no session of the person are new for it too.
+    // And notes that reached no session of the person are new for it too.
     t.ok("ana", json!({ "thread": id, "text": "three" })).await;
     let fresh = t.agent("bob", "term-0004", "");
     assert_eq!(
         new_texts(&fresh.inbox().await, &id),
-        Some(vec!["three".to_string()])
+        Some(vec![
+            "one".to_string(),
+            "two".to_string(),
+            "three".to_string()
+        ])
     );
+    // Once Bob has handled them (he replies), a new session starts with them.
+    later.ok(json!({ "thread": id, "text": "got it" })).await;
+    let after = t.agent("bob", "term-0005", "");
+    assert!(thread_ids(&after.inbox().await).is_empty());
 }
 
 #[tokio::test]
@@ -3189,11 +3218,25 @@ struct ModelThread {
     /// Order of the latest note, and of the latest one not bob's.
     last: u64,
     last_other: u64,
-    last_is_bobs: bool,
+    /// How far bob has handled it (written in it or marked it done).
+    handled: u64,
+    /// The latest note that reached any session of bob's, ended ones included.
+    reached: u64,
     context: Option<&'static str>,
     claimed: Option<usize>,
     /// What reached each session.
     delivered: [u64; SESSIONS.len()],
+}
+
+impl ModelThread {
+    fn pending(&self) -> bool {
+        !self.team && self.open && self.handled < self.last_other
+    }
+
+    fn deliver(&mut self, s: usize, upto: u64) {
+        self.delivered[s] = self.delivered[s].max(upto);
+        self.reached = self.reached.max(upto);
+    }
 }
 
 /// Bob's sessions: general, pagos-api, frontend, and pagos-api on a branch.
@@ -3226,7 +3269,7 @@ async fn session_inbox_matches(t: &Team, s: usize, all: bool, model: &mut [Model
         .filter(|th| sees(th))
         .map(|th| {
             let new = th.last_other > th.delivered[s];
-            let waiting = !th.team && th.open && !th.last_is_bobs;
+            let waiting = th.pending();
             (new, waiting, th.last, th.id.clone())
         })
         .filter(|(new, waiting, _, _)| *new || *waiting)
@@ -3243,6 +3286,7 @@ async fn session_inbox_matches(t: &Team, s: usize, all: bool, model: &mut [Model
     assert_eq!(inbox["more"], expected.len().saturating_sub(20), "{id}");
     for (shown, e) in inbox["threads"].as_array().unwrap().iter().zip(&expected) {
         assert_eq!(shown["waiting_for_you"], e.1, "{}", e.3);
+        assert_eq!(shown["pending"], e.1, "{}", e.3);
         assert_eq!(
             shown["new_notes"].as_array().unwrap().is_empty(),
             !e.0,
@@ -3251,7 +3295,8 @@ async fn session_inbox_matches(t: &Team, s: usize, all: bool, model: &mut [Model
         );
     }
     for th in model.iter_mut().filter(|th| want.contains(&th.id)) {
-        th.delivered[s] = th.last;
+        let last = th.last;
+        th.deliver(s, last);
     }
 }
 
@@ -3300,7 +3345,8 @@ async fn session_inboxes_hold_order_and_more_over_hundreds_of_routed_threads() {
             open: true,
             last: order,
             last_other: order,
-            last_is_bobs: false,
+            handled: 0,
+            reached: 0,
             context: if team { None } else { context },
             claimed: None,
             delivered: [0; SESSIONS.len()],
@@ -3321,7 +3367,7 @@ async fn session_inboxes_hold_order_and_more_over_hundreds_of_routed_threads() {
             }
         }
         let s = next(SESSIONS.len() as u64) as usize;
-        match next(10) {
+        match next(12) {
             // A session reads its inbox (sometimes all of it).
             0..=3 => {
                 session_inbox_matches(&t, s, next(4) == 0, &mut model).await;
@@ -3340,10 +3386,10 @@ async fn session_inboxes_hold_order_and_more_over_hundreds_of_routed_threads() {
                     .await;
                 order += 1;
                 if th.delivered[s] >= th.last {
-                    th.delivered[s] = order;
+                    th.deliver(s, order);
                 }
                 th.last = order;
-                th.last_is_bobs = true;
+                th.handled = order;
                 // A claim is never taken from another session.
                 th.claimed.get_or_insert(s);
                 seen[s] = now;
@@ -3365,7 +3411,6 @@ async fn session_inboxes_hold_order_and_more_over_hundreds_of_routed_threads() {
                 order += 1;
                 th.last = order;
                 th.last_other = order;
-                th.last_is_bobs = false;
                 th.open = !close;
                 // Closing releases every claim on the thread.
                 if close {
@@ -3373,11 +3418,45 @@ async fn session_inboxes_hold_order_and_more_over_hundreds_of_routed_threads() {
                 }
             }
             // A session reads one thread whole.
-            _ => {
+            9 => {
                 let i = next(model.len() as u64) as usize;
                 let (id, context) = SESSIONS[s];
                 t.agent("bob", id, context).thread(&model[i].id).await;
-                model[i].delivered[s] = model[i].last;
+                let last = model[i].last;
+                model[i].deliver(s, last);
+                seen[s] = now;
+            }
+            // A session marks an open thread done: nothing written, nothing claimed.
+            10 => {
+                let i = next(model.len() as u64) as usize;
+                let th = &mut model[i];
+                if !th.open {
+                    continue;
+                }
+                let (id, context) = SESSIONS[s];
+                t.agent("bob", id, context)
+                    .ok(json!({ "thread": th.id, "done": true }))
+                    .await;
+                th.handled = th.last;
+                seen[s] = now;
+            }
+            // A session ends, with its claims, and starts again: for the threads still pending
+            // where a note bob has not handled reached a session, it starts with what bob handled;
+            // elsewhere with what reached bob.
+            _ => {
+                let (id, context) = SESSIONS[s];
+                t.agent("bob", id, context).end().await;
+                for th in model.iter_mut() {
+                    if th.claimed == Some(s) {
+                        th.claimed = None;
+                    }
+                    th.delivered[s] = if th.pending() && th.handled < th.reached {
+                        th.handled
+                    } else {
+                        th.reached
+                    };
+                }
+                session_inbox_matches(&t, s, next(4) == 0, &mut model).await;
                 seen[s] = now;
             }
         }
@@ -3642,9 +3721,10 @@ async fn a_lapse_any_request_notices_wakes_waiting_inboxes() {
 async fn a_wait_does_not_outlive_its_token() {
     let t = team(&["ana", "bob"]);
     let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
-    t.inbox("bob").await;
+    let bridge = t.agent("bob", "bridge-01", "");
+    bridge.inbox().await;
     let waiter = tokio::spawn({
-        let bob = t.agent("bob", "bridge-01", "");
+        let bob = bridge.clone();
         async move { bob.get("/api/inbox?wait=30").await }
     });
     until_waiting(&t.app, 1).await;
@@ -3654,4 +3734,280 @@ async fn a_wait_does_not_outlive_its_token() {
     let (status, v) = waiter.await.unwrap();
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{v}");
     assert_eq!(code(&v), "UNAUTHORIZED");
+}
+
+// ---------- handled: a note stays pending until the person handles it ----------
+
+/// The thread `id` in an inbox, if it is there.
+fn listed<'a>(inbox: &'a Value, id: &str) -> Option<&'a Value> {
+    inbox["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == id)
+}
+
+/// `who`'s entry of a thread's delivery.
+fn delivery_of<'a>(th: &'a Value, who: &str) -> &'a Value {
+    th["delivery"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["handle"] == who)
+        .unwrap_or_else(|| panic!("{who} not in {th}"))
+}
+
+#[tokio::test]
+async fn a_note_fetched_by_a_session_that_ends_is_new_for_the_persons_next_session() {
+    let t = team(&["ana", "bob"]);
+    let id = t
+        .ok("ana", json!({ "to": ["bob"], "text": "Rotate the key?" }))
+        .await;
+    // Bob's pi fetches the note and dies before doing anything with it.
+    let pi = t.agent("bob", "pi-000001", "infra");
+    assert_eq!(
+        new_texts(&pi.inbox().await, &id),
+        Some(vec!["Rotate the key?".to_string()])
+    );
+    pi.end().await;
+    // The next one gets it as new at once: a waiting inbox answers without waiting.
+    let next = t.agent("bob", "pi-000002", "infra");
+    let (status, v) = next.get("/api/inbox?wait=30").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(
+        new_texts(&v, &id),
+        Some(vec!["Rotate the key?".to_string()]),
+        "{v}"
+    );
+    let th = listed(&v, &id).unwrap();
+    assert_eq!(th["pending"], true);
+    assert_eq!(th["waiting_for_you"], true);
+    // Once: it reached this session, so it is not new for it again, though still pending.
+    let v = next.inbox().await;
+    assert_eq!(new_texts(&v, &id), Some(vec![]));
+    assert_eq!(listed(&v, &id).unwrap()["pending"], true);
+}
+
+#[tokio::test]
+async fn a_note_fetched_by_a_session_that_lapses_is_new_for_the_persons_next_session() {
+    let t = team(&["ana", "bob"]);
+    let id = t
+        .ok("ana", json!({ "to": ["bob"], "text": "Rotate the key?" }))
+        .await;
+    // Bob's pi fetches the note, claims the thread, and stops answering.
+    let pi = t.agent("bob", "pi-000001", "infra");
+    pi.inbox().await;
+    let (_, v) = pi.send(json!({ "thread": id, "claim": true })).await;
+    assert_eq!(v["claimed"], "this-session", "{v}");
+    // A session started while the claim holds does not see the thread.
+    t.app.clock.advance(60);
+    let early = t.agent("bob", "pi-000002", "infra");
+    assert!(listed(&early.inbox().await, &id).is_none());
+    // Once the claim has lapsed, it shows there, as new: it never reached that session. And a
+    // session started now gets it as new too.
+    t.app.clock.advance(LAPSE);
+    let v = early.inbox().await;
+    assert_eq!(
+        new_texts(&v, &id),
+        Some(vec!["Rotate the key?".to_string()]),
+        "{v}"
+    );
+    assert_eq!(listed(&v, &id).unwrap()["claimed"], Value::Null);
+    let late = t.agent("bob", "pi-000003", "");
+    assert_eq!(
+        new_texts(&late.inbox().await, &id),
+        Some(vec!["Rotate the key?".to_string()])
+    );
+}
+
+#[tokio::test]
+async fn a_claim_does_not_handle_and_when_it_ends_the_thread_shows_again() {
+    let t = team(&["ana", "bob"]);
+    let one = t.agent("bob", "term-0001", "");
+    let two = t.agent("bob", "term-0002", "");
+    one.inbox().await;
+    two.inbox().await;
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
+    let v = one.inbox().await;
+    assert_eq!(listed(&v, &id).unwrap()["pending"], true);
+    one.ok(json!({ "thread": id, "claim": true })).await;
+    // Claimed: still pending for Bob, in the claiming session, and hidden from the other.
+    let v = one.inbox().await;
+    assert_eq!(listed(&v, &id).unwrap()["pending"], true, "{v}");
+    assert!(listed(&two.inbox().await, &id).is_none());
+    assert_eq!(
+        t.thread("ana", &id).await["delivery"][1]["handled_at"],
+        Value::Null
+    );
+    // The claiming session ends: the thread shows again in the other one, new and pending.
+    one.end().await;
+    let v = two.inbox().await;
+    let th = listed(&v, &id).unwrap();
+    assert_eq!(th["pending"], true);
+    assert_eq!(th["claimed"], Value::Null);
+    assert_eq!(new_texts(&v, &id), Some(vec!["q".to_string()]));
+}
+
+#[tokio::test]
+async fn done_handles_the_thread_without_a_note() {
+    let t = team(&["ana", "bob"]);
+    let id = t
+        .ok("ana", json!({ "to": ["bob"], "text": "FYI: deployed." }))
+        .await;
+    let pi = t.agent("bob", "pi-000001", "infra");
+    pi.inbox().await;
+    t.app.clock.advance(90);
+    let (status, v) = pi.send(json!({ "thread": id, "done": true })).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(
+        v,
+        json!({ "thread": id, "note": null, "status": "open", "claimed": null })
+    );
+    // No note, no claim: the thread just stops being pending for Bob, in every session.
+    let th = t.thread("ana", &id).await;
+    assert_eq!(th["notes"].as_array().unwrap().len(), 1);
+    assert_eq!(th["status"], "open");
+    assert!(listed(&pi.inbox().await, &id).is_none());
+    assert!(thread_ids(&t.agent("bob", "pi-000002", "").inbox().await).is_empty());
+    let bob = delivery_of(&th, "bob");
+    assert_eq!(bob["claimed_by"], Value::Null);
+    assert_eq!(bob["handled_at"], "2026-11-08T10:42:30Z");
+    assert_eq!(
+        bob["handled_by"],
+        json!({ "label": "laptop", "context": "infra" })
+    );
+    let th = pi.thread(&id).await;
+    assert_eq!(th["pending"], false);
+    assert_eq!(th["waiting_for_you"], false);
+    // A new note by Ana makes it pending again.
+    t.ok("ana", json!({ "thread": id, "text": "And restarted." }))
+        .await;
+    let v = pi.inbox().await;
+    assert_eq!(listed(&v, &id).unwrap()["pending"], true);
+    assert_eq!(
+        delivery_of(&t.thread("ana", &id).await, "bob")["handled_at"],
+        Value::Null
+    );
+}
+
+#[tokio::test]
+async fn done_without_a_fetch_is_never_limited_idempotent_and_refused_once_closed() {
+    let t = team(&["ana", "bob"]);
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
+    for i in 0..19 {
+        t.ok("ana", json!({ "thread": id, "text": format!("n{i}") }))
+            .await;
+    }
+    let (_, v) = t
+        .send("bob", json!({ "thread": id, "text": "busy?" }))
+        .await;
+    assert_eq!(code(&v), "THREAD_BUSY", "{v}");
+    // Never limited, and a key replays it.
+    let body = json!({ "thread": id, "done": true, "key": "done-1" });
+    let (status, first) = t.send("bob", body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let (_, again) = t.send("bob", body).await;
+    assert_eq!(first, again);
+    // Not pending: once its notes have reached the session (they had not), it is gone.
+    let v = t.inbox("bob").await;
+    assert_eq!(listed(&v, &id).unwrap()["pending"], false);
+    assert_eq!(new_texts(&v, &id).unwrap().len(), 20);
+    assert!(listed(&t.inbox("bob").await, &id).is_none());
+    // Done on a closed thread is a write in a closed thread.
+    t.ok("ana", json!({ "thread": id, "close": true })).await;
+    let (status, v) = t.send("bob", json!({ "thread": id, "done": true })).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(code(&v), "THREAD_CLOSED");
+}
+
+#[tokio::test]
+async fn replying_or_closing_handles_and_closed_or_team_threads_are_never_pending() {
+    let t = team(&["ana", "bob", "carl"]);
+    // A reply handles.
+    let replied = t.ok("ana", json!({ "to": ["bob"], "text": "a" })).await;
+    let pi = t.agent("bob", "pi-000001", "");
+    pi.inbox().await;
+    pi.ok(json!({ "thread": replied, "text": "done" })).await;
+    let bob = delivery_of(&t.thread("ana", &replied).await, "bob").clone();
+    assert_eq!(
+        bob["handled_by"],
+        json!({ "label": "laptop", "context": null })
+    );
+    // A close by Bob handles, without text too.
+    let closed = t.ok("ana", json!({ "to": ["bob"], "text": "b" })).await;
+    pi.inbox().await;
+    pi.ok(json!({ "thread": closed, "close": true })).await;
+    assert!(delivery_of(&t.thread("ana", &closed).await, "bob")["handled_at"].is_string());
+    // A close by Ana does not handle for Bob, but a closed thread is never pending.
+    let by_ana = t.ok("ana", json!({ "to": ["bob"], "text": "c" })).await;
+    pi.inbox().await;
+    t.ok("ana", json!({ "thread": by_ana, "close": true }))
+        .await;
+    let th = pi.thread(&by_ana).await;
+    assert_eq!(th["pending"], false);
+    assert_eq!(delivery_of(&th, "bob")["handled_at"], Value::Null);
+    // A team question is never pending, and a new session starts with what reached the person.
+    let team_q = t
+        .ok("ana", json!({ "to": ["@team"], "text": "Who?" }))
+        .await;
+    let v = pi.inbox().await;
+    assert_eq!(listed(&v, &team_q).unwrap()["pending"], false);
+    // None of these threads is new or pending for a new session of Bob's.
+    assert!(thread_ids(&t.agent("bob", "pi-000002", "").inbox().await).is_empty());
+    assert!(thread_ids(&pi.inbox().await).is_empty());
+}
+
+#[tokio::test]
+async fn the_senders_delivery_tells_seen_from_handled() {
+    let t = team(&["ana", "bob"]);
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
+    let bob = delivery_of(&t.thread("ana", &id).await, "bob").clone();
+    assert_eq!(
+        bob,
+        json!({ "handle": "bob", "note": null, "delivered_at": null, "by": null,
+                "claimed_by": null, "seen_by": 0, "handled_at": null, "handled_by": null })
+    );
+    // Seen by pi, not handled.
+    let pi = t.agent("bob", "pi-000001", "embeddings");
+    pi.inbox().await;
+    let note = t.thread("ana", &id).await["notes"][0]["id"].clone();
+    let bob = delivery_of(&t.thread("ana", &id).await, "bob").clone();
+    assert_eq!(bob["note"], note);
+    assert_eq!(
+        bob["by"],
+        json!({ "label": "laptop", "context": "embeddings" })
+    );
+    assert_eq!(bob["seen_by"], 1);
+    assert_eq!(bob["handled_at"], Value::Null);
+    // Pi ends: no live session has it, but `by` still says who saw it first.
+    pi.end().await;
+    let bob = delivery_of(&t.thread("ana", &id).await, "bob").clone();
+    assert_eq!(bob["seen_by"], 0);
+    assert_eq!(
+        bob["by"],
+        json!({ "label": "laptop", "context": "embeddings" })
+    );
+    assert_eq!(bob["delivered_at"], "2026-11-08T10:41:00Z");
+    // Another session of Bob's answers: handled, when and from where.
+    t.app.clock.advance(120);
+    let cc = t.agent("bob", "cc-0000001", "producto");
+    cc.inbox().await;
+    cc.ok(json!({ "thread": id, "text": "Yes." })).await;
+    let bob = delivery_of(&t.thread("ana", &id).await, "bob").clone();
+    assert_eq!(bob["note"], note);
+    assert_eq!(
+        bob["by"],
+        json!({ "label": "laptop", "context": "embeddings" })
+    );
+    assert_eq!(bob["seen_by"], 1);
+    assert_eq!(bob["handled_at"], "2026-11-08T10:43:00Z");
+    assert_eq!(
+        bob["handled_by"],
+        json!({ "label": "laptop", "context": "producto" })
+    );
+    // Handling again later, with nothing new by someone else, keeps when it was handled.
+    t.app.clock.advance(60);
+    cc.ok(json!({ "thread": id, "text": "And more." })).await;
+    let bob = delivery_of(&t.thread("ana", &id).await, "bob").clone();
+    assert_eq!(bob["handled_at"], "2026-11-08T10:43:00Z");
 }

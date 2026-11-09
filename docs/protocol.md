@@ -45,7 +45,7 @@ Two things are kept apart: whether a note has **reached** a session (it was fetc
 
 **Reached.** Delivery is kept per session. For each session the server knows the last note of each thread that reached it. A note reaches a session when that session fetches it through `inbox` or `thread`. Each session gets each note once: a note that reached it is not new for it again, pending or not.
 
-**Where a new session starts.** A session starts, for each `direct` thread, with what its person has *handled*: notes still pending for the person are new for it, so an agent that starts after another one died with a note half done gets that note at once. For `team` threads it starts with what any of the person's sessions has reached, so a new terminal does not replay old team questions.
+**Where a new session starts.** A session starts, for each `direct` thread still pending for its person, with what the person has *handled*: the notes they have not handled are new for it, so an agent that starts after another one died with a note half done gets that note at once. For every other thread (`team` threads, and `direct` threads that are closed or handled) it starts with what any of the person's sessions has reached, so a new terminal does not replay old team questions, nor the last note of every thread the other person closed.
 
 A thread is **new for a session** when it holds notes, not written by the session's person, that have not reached that session. A person's own notes are never new for any of their sessions. When a session writes a note, everything in the thread up to that note has reached it, unless earlier notes had not: then nothing moves, so a reply written without reading never hides a note.
 
@@ -144,7 +144,7 @@ Returns:
 
 The whole history of one thread your person takes part in, from any of their sessions. Delivers all its notes to this session. Does not claim it.
 
-Returns the same thread object as `inbox`, with `notes` (every note, in full, oldest first, `truncated: false`) in place of `new_notes`, plus `delivery`: for each participant, in the order of `participants`, the latest note by someone else that they have, when it reached them and which session it reached (`by`), which session of theirs claimed the thread and since when (`claimed_by`, with `since`), or `null`s, and how many of their sessions that note has reached (`seen_by`, 0 when none has). Each session shows its label and its context at that moment: when the note reached it, when it claimed the thread. This is how a writer sees "picked up by her agent 5 minutes ago".
+Returns the same thread object as `inbox`, with `notes` (every note, in full, oldest first, `truncated: false`) in place of `new_notes`, plus `delivery`: for each participant, in the order of `participants`, the latest note by someone else that they have, when it reached them and which session it reached first (`by`, kept after that session ends), which session of theirs claimed the thread and since when (`claimed_by`, with `since`), or `null`s, how many of their live sessions have that note (`seen_by`, 0 when none has), and, once the person has handled that note, when and from which session (`handled_at`, `handled_by`; `null` until then). `handled_at` is when they last handled a note by someone else that they had not handled yet: handling the thread again with nothing new by others keeps it. Each session shows its label and its context at that moment: when the note reached it, when it claimed the thread, when it handled it. This is how a writer sees "picked up by her agent 5 minutes ago", and tells "seen by pi, not handled yet" from "handled by Claude Code at 19:30".
 
 ```json
 "delivery": [ { "handle": "ana", "note": "n_…", "delivered_at": "2026-11-08T10:46:00Z", "by": { "label": "Claude Code laptop", "context": "pagos-api" }, "claimed_by": { "label": "Claude Code laptop", "context": "pagos-api", "since": "2026-11-08T10:47:00Z" }, "seen_by": 1,
@@ -159,7 +159,7 @@ Every route needs `Authorization: Bearer <token>`, and takes the optional `Relev
 ```
 GET  /api/inbox?all=1&wait=30
 GET  /api/threads/:id
-POST /api/send            { to | thread, text, close?, claim?, key? }
+POST /api/send            { to | thread, text, close?, claim?, done?, key? }
 GET  /api/people          { "team": [...], "you": "ana" }  (same list as inbox)
 DELETE /api/session        forget this session (the one the headers name) and release its claims; { "ok": true }
 GET  /health              no token; { "ok": true }
