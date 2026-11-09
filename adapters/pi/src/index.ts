@@ -135,9 +135,9 @@ export function relevoExtension(options: Options = {}) {
       name: "relevo_send",
       label: "Relevo send",
       description:
-        'Send a note through Relevo. Open a new thread with `to` (handles like "ana", "ana/repo" or "ana/repo@branch", or exactly ["@team"]), ' +
+        'Send a note through Relevo. Open a new thread with `to`: one address or a list (handles like "ana", "ana/repo" or "ana/repo@branch", or "@team" alone), ' +
         "or write in an existing one with `thread`. `close: true` closes the thread after writing; `text` may then be left out. " +
-        'If your person names whom to ask (a teammate, or the whole team: ["@team"]), send it there. ' +
+        'If your person names whom to ask (a teammate, or the whole team: "@team"), send it there. ' +
         "Otherwise, before opening a new thread, look at relevo_inbox: an answer may already be waiting, and the team's `about` lines say whom to ask; " +
         "ask @team only when you do not know who knows. Writing in a thread takes it for this session; opening one does not. " +
         "Read what you need first; if you can answer or explain from that, just answer: the answer claims it. " +
@@ -150,7 +150,12 @@ export function relevoExtension(options: Options = {}) {
       parameters: {
         type: "object",
         properties: {
-          to: { type: "array", items: { type: "string" }, description: 'Addresses for a new thread, or ["@team"].' },
+          to: {
+            anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
+            description:
+              'To open a new thread: who to ask, one address or a list of them ("ana", "ana/pagos-api", "ana/pagos-api@feat/refunds", or "@team" alone). ' +
+              "Give `to` or `thread`, not both.",
+          },
           thread: { type: "string", description: "Id of the thread to write in (r_…)." },
           text: {
             type: "string",
@@ -169,7 +174,9 @@ export function relevoExtension(options: Options = {}) {
         additionalProperties: false,
       } as any,
       async execute(_id: string, params: any, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: any) {
-        const res = await call(ctx?.cwd, (c) => c.send(params, signal));
+        // `to` may be one address; the server takes a list.
+        const fields = typeof params?.to === "string" ? { ...params, to: [params.to] } : params;
+        const res = await call(ctx?.cwd, (c) => c.send(fields, signal));
         return result(sent(res), { ...res });
       },
     } as any);
