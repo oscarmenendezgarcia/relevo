@@ -291,3 +291,43 @@ test("a claim shows as a state, with who and since when, as relevo mcp shows it"
   assert.match(out, /- @oscar: [^\n]*; seen by 1 of their sessions; nobody of theirs has it\.$/m);
   for (const text of [asker, mine, out]) assert.doesNotMatch(text, /On it/);
 });
+
+test("the inbox says who else holds a thread (held_by), as relevo mcp does", () => {
+  const t: Thread = {
+    ...arrivalThread("direct"),
+    held_by: [
+      { handle: "ana", label: "Claude Code", context: "pagos-api", since: "2026-11-08T10:47:00Z" },
+      { handle: "carl", label: "Codex", context: null, since: "2026-11-08T11:02:00Z" },
+    ],
+  };
+  const out = renderThread(t, { me: "oscar" });
+  assert.ok(
+    out.includes(
+      'None of your person\'s sessions has it. If it needs work first, claim it with relevo_send { thread: "r_bbbbbbbbbbbb", claim: true } and no text just before you start.\n' +
+        "@ana's Claude Code in pagos-api has it since 10:47 UTC on 2026-11-08.\n" +
+        "@carl's Codex (general) has it since 11:02 UTC on 2026-11-08.",
+    ),
+    out,
+  );
+  // Nobody else, or a server before it: nothing more.
+  assert.doesNotMatch(renderThread({ ...t, held_by: [] }, { me: "oscar" }), / has it since/);
+  assert.doesNotMatch(renderThread({ ...t, held_by: undefined }, { me: "oscar" }), / has it since/);
+  // relevo_thread says it in its delivery, once.
+  const whole: Thread = {
+    ...t,
+    held_by: [{ handle: "ana", label: "Claude Code", context: null, since: "2026-11-08T10:47:00Z" }],
+    notes: t.new_notes,
+    new_notes: undefined,
+    delivery: [
+      {
+        handle: "ana",
+        note: "n_bbbbbbbbbbbb",
+        delivered_at: "2026-11-08T10:46:00Z",
+        by: { label: "Claude Code", context: null },
+        seen_by: 1,
+        claimed_by: { label: "Claude Code", context: null, since: "2026-11-08T10:47:00Z" },
+      },
+    ],
+  };
+  assert.equal(renderThread(whole, { me: "oscar" }).match(/@ana's Claude Code \(general\) has it/g)?.length, 1);
+});

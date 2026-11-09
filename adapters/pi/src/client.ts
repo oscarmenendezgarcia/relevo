@@ -49,6 +49,8 @@ export interface Thread {
   last_note?: Note | null;
   notes?: Note[];
   delivery?: Delivery[];
+  /** In the inbox: the other participants who hold the thread now, with their session and since when (servers before it leave it out). */
+  held_by?: (SessionRef & { handle: string; since?: string })[];
 }
 
 export interface Inbox {

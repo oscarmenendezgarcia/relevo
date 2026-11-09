@@ -128,6 +128,9 @@ export function renderThread(t: Thread, options: ThreadOptions = {}): string {
   if (t.context) lines.push(`Addressed to your person in context ${t.context}.`);
   if (t.waiting_for_you) lines.push("Waiting for your person's reply.");
   lines.push(holder(t, me));
+  // Who else in the thread holds it (`held_by`, from the inbox): `relevo_thread`'s delivery says it
+  // for every participant already.
+  if (!t.delivery) for (const h of t.held_by ?? []) lines.push(`${claimState(h.handle, h)}.`);
   if (t.kind === "team" && t.status === "open" && t.from !== me) {
     lines.push(
       "A team question: answer it only from your own work or your person's files " +

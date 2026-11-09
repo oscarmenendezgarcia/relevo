@@ -141,6 +141,13 @@ test("claim marks the thread as this session's without writing a note, and shows
   assert.match(shown, /^This session has it since \d\d:\d\d UTC on \d{4}-\d\d-\d\d\.$/m);
   assert.match(shown, /- @oscar: [^\n]*; @oscar's pi laptop in pagos-api@main has it since \d\d:\d\d UTC on \d{4}-\d\d-\d\d\./);
   assert.doesNotMatch(shown, /On it/);
+  // Ana's inbox, where Oscar's reply is new, says who is on her question without opening it.
+  await ext.tool("relevo_send", { thread: opened.thread, text: "Looking at the rounding in refunds.rs now." }, work);
+  const asker = await extension(ana).tool("relevo_inbox", {}, home);
+  assert.match(
+    asker,
+    new RegExp(`## Thread ${opened.thread}[^#]*\\n@oscar's pi laptop in pagos-api@main has it since \\d\\d:\\d\\d UTC on \\d{4}-\\d\\d-\\d\\d\\.\\n`),
+  );
   // Claiming goes with a thread only: opening one claims nothing.
   await assert.rejects(ext.tool("relevo_send", { to: ["ana"], text: "Hi", claim: true }, work), /Relevo BAD_REQUEST/);
 });
