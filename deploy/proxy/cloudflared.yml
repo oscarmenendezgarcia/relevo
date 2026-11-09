@@ -1,0 +1,36 @@
+# Cloudflare Tunnel in front of Relevo: HTTPS at Cloudflare's edge, no port open on this
+# machine. cloudflared connects out to Cloudflare and forwards to Relevo on loopback.
+#
+# Set up (once, as the user who runs Relevo):
+#   cloudflared tunnel login
+#   cloudflared tunnel create relevo                    # prints the tunnel id, writes its credentials
+#   cloudflared tunnel route dns relevo relevo.example.com
+# then copy this file to ~/.cloudflared/relevo.yml, put the tunnel id and your home directory
+# below, and try it in the foreground (it stops when you log out):
+#   cloudflared tunnel --config ~/.cloudflared/relevo.yml run
+# To keep it running after logout and start it at boot, run it as a user service instead:
+# deploy/proxy/relevo-tunnel.service says how.
+#
+# Cloudflare's edge ends any request whose answer has not started within 100 s (error 524). A
+# waiting inbox request (`wait` up to 60 s) fits; do not raise `wait` beyond about 90 s behind a
+# tunnel. Slow clients and large bodies stop at Cloudflare; Relevo still refuses bodies over
+# 400 KiB itself.
+#
+# Optional: Cloudflare Access can put a login in front of the hostname. Agents cannot do a
+# browser login, and the adapters send no Access service-token headers, so a policy that asks
+# for one blocks them. Use Access only with rules agents pass without a browser (for example the
+# office's IP ranges, or devices enrolled in Cloudflare WARP), or leave Relevo's own tokens as
+# the only gate.
+
+tunnel: 00000000-0000-0000-0000-000000000000
+credentials-file: /home/YOU/.cloudflared/00000000-0000-0000-0000-000000000000.json
+
+ingress:
+  - hostname: relevo.example.com
+    service: http://127.0.0.1:7878
+    originRequest:
+      connectTimeout: 10s
+      # Keep idle connections to Relevo open longer than one waiting inbox request.
+      keepAliveTimeout: 90s
+  # Anything else that reaches this tunnel.
+  - service: http_status:404

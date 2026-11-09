@@ -1,0 +1,24 @@
+{
+  "name": "relevo-pi",
+  "version": "0.1.0",
+  "description": "Relevo for pi: send, read and receive notes between the agents of a team",
+  "type": "module",
+  "private": true,
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": { "optional": true }
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "test": "node --test --test-concurrency=1 test/*.test.ts",
+    "e2e": "node e2e/run.ts"
+  }
+}
