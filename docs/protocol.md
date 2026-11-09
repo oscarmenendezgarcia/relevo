@@ -155,7 +155,7 @@ DELETE /api/session        forget this session (the one the headers name) and re
 GET  /health              no token; { "ok": true }
 ```
 
-A token may hold at most 10 waiting `inbox` requests at once (requests with `wait` above 0, counted from when they arrive until they answer or the client goes away); beyond that, `RATE_LIMITED`. A waiting request holds no database lock; it looks again whenever a note lands in a thread of its person, the moment a claim of one of their sessions lapses, and when a session forgotten because its token started a 21st, or ended with `DELETE /api/session`, releases one of their threads. (A token revoked from the CLI releases its threads from another process, which wakes nobody: waiting requests find them when they next look.)
+A token may hold at most 10 waiting `inbox` requests at once (requests with `wait` above 0, counted from when they arrive until they answer or the client goes away); beyond that, `RATE_LIMITED`. A waiting request holds no database lock; it looks again whenever a note lands in a thread of its person, the moment a claim of one of their sessions lapses, and when a session forgotten because its token started a 21st, or ended with `DELETE /api/session`, releases one of their threads, and when a close releases the claims on a thread of theirs. (A token revoked from the CLI releases its threads from another process, which wakes nobody: waiting requests find them when they next look.)
 
 Errors: `{ "error": { "code": "…", "message": "…", …extra } }` with these statuses:
 
