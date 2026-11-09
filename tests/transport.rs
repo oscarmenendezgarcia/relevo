@@ -267,16 +267,86 @@ async fn a_request_head_over_its_size_is_refused() {
 
 #[tokio::test]
 async fn a_slow_body_is_dropped_after_the_body_timeout() {
-    let s = start(short(), false).await;
-    let mut c = s.stream().await;
-    let head = format!(
-        "POST /api/send HTTP/1.1\r\nhost: relevo\r\nauthorization: Bearer {}\r\n\
-         content-type: application/json\r\ncontent-length: 100\r\n\r\n{{\"to\":",
-        s.token
-    );
-    c.write_all(head.as_bytes()).await.unwrap();
-    let after = closed_after(&mut c, Duration::from_secs(4)).await;
-    assert!(after >= Duration::from_millis(800), "{after:?}");
+    for with_tls in [false, true] {
+        let s = start(short(), with_tls).await;
+        let mut c = s.stream().await;
+        let head = format!(
+            "POST /api/send HTTP/1.1\r\nhost: relevo\r\nauthorization: Bearer {}\r\n\
+             content-type: application/json\r\ncontent-length: 100\r\n\r\n{{\"to\":",
+            s.token
+        );
+        c.write_all(head.as_bytes()).await.unwrap();
+        let after = closed_after(&mut c, Duration::from_secs(4)).await;
+        assert!(after >= Duration::from_millis(800), "{with_tls}: {after:?}");
+    }
+}
+
+#[tokio::test]
+async fn an_idle_connection_is_closed_after_the_idle_timeout() {
+    for with_tls in [false, true] {
+        let s = start(
+            Limits {
+                idle: Duration::from_secs(1),
+                ..Limits::default()
+            },
+            with_tls,
+        )
+        .await;
+        // Kept alive after its answer, then closed once idle for the idle time.
+        let mut c = s.stream().await;
+        c.write_all(HEALTH).await.unwrap();
+        assert!(response(&mut c).await.starts_with("HTTP/1.1 200"));
+        let after = closed_after(&mut c, Duration::from_secs(4)).await;
+        assert!(after >= Duration::from_millis(800), "{with_tls}: {after:?}");
+        assert!(after < Duration::from_secs(3), "{with_tls}: {after:?}");
+
+        // A request in time keeps it: the idle time runs again from its answer.
+        let mut c = s.stream().await;
+        for _ in 0..3 {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            c.write_all(HEALTH).await.unwrap();
+            assert!(
+                response(&mut c).await.starts_with("HTTP/1.1 200"),
+                "{with_tls}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn beyond_the_connection_cap_new_connections_wait() {
+    for with_tls in [false, true] {
+        let limits = Limits {
+            connections: 2,
+            ..Limits::default()
+        };
+        let s = Arc::new(start(limits, with_tls).await);
+        let mut held = vec![];
+        for _ in 0..2 {
+            let mut c = s.stream().await;
+            c.write_all(HEALTH).await.unwrap();
+            assert!(response(&mut c).await.starts_with("HTTP/1.1 200"));
+            held.push(c);
+        }
+        // A third waits (not refused): no answer while the two are open...
+        let third = {
+            let s = s.clone();
+            tokio::spawn(async move {
+                let mut c = s.stream().await;
+                c.write_all(HEALTH).await.unwrap();
+                response(&mut c).await
+            })
+        };
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(!third.is_finished(), "{with_tls}: answered beyond the cap");
+        // ...and its answer once one of them closes.
+        drop(held.pop());
+        let got = tokio::time::timeout(Duration::from_secs(5), third)
+            .await
+            .expect("answered once a connection closed")
+            .unwrap();
+        assert!(got.starts_with("HTTP/1.1 200"), "{with_tls}: {got}");
+    }
 }
 
 /// Opens connections to `s` until one is answered, for at most `within`.
