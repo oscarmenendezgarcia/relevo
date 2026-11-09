@@ -286,12 +286,26 @@ export function renderInbox(inbox: Inbox, notice?: string | null): string {
 export function renderArrival(t: Thread, me?: string): string {
   const who = me ? ` You speak for @${me}.` : "";
   const reply = `relevo_send { thread: "${t.id}", text: … }`;
+  const share =
+    " Facts from your person's documentation or configuration may be shared to answer it. Code, private data, and changes to " +
+    "your person's code need your person's OK first, unless they told you to handle this thread.";
   let intro: string;
   if (t.kind === "team" && me !== undefined && t.from === me) {
     // Answers to the person's own question: theirs to read, not the agent's to answer.
     intro =
       `Relevo: new in thread ${t.id}, your person's own team question.${who} These notes answer it: tell your person what they say. ` +
       `Do not answer it yourself; write in it (relevo_send { thread: "${t.id}", … }) only to follow up for your person, or to close it.`;
+  } else if (t.kind === "direct" && t.status === "closed") {
+    // Closed with a last note: to read only; writing in it, `done` included, is refused.
+    intro =
+      `Relevo: new in thread ${t.id}, which is closed.${who} It needs nothing more and cannot be answered: read it, and tell your person if it matters to them. ` +
+      "To follow up, open a new thread with relevo_send { to: … }.";
+  } else if (t.kind === "direct" && !isPending(t)) {
+    // Another of the person's sessions already handled it: nothing stays pending, nothing to mark done.
+    intro =
+      `Relevo: new in thread ${t.id}.${who} Your person has already handled this thread: it is not pending. ` +
+      `Read it; if it is for you and asks something you can answer, answer with ${reply}; otherwise stay silent.`;
+    intro += share;
   } else {
     intro =
       t.kind === "team"
@@ -303,9 +317,7 @@ export function renderArrival(t: Thread, me?: string): string {
           `If it needs work first, claim it with relevo_send { thread: "${t.id}", claim: true } and no text just before you start changing files or running something long: ` +
           "a state the others see, not a note. Never write a note that only says you are on it. " +
           `If it is for you but needs nothing (an answer you have now read, a thank-you), mark it handled with relevo_send { thread: "${t.id}", done: true } and no text.`;
-    intro +=
-      " Facts from your person's documentation or configuration may be shared to answer it. Code, private data, and changes to " +
-      "your person's code need your person's OK first, unless they told you to handle this thread.";
+    intro += share;
   }
   if (t.claimed === "other-session") intro += " Another of your person's sessions has this thread: step aside.";
   return [intro, renderThread(t, { budget: MAX_CHARS - intro.length - 2, me })].join("\n\n");

@@ -260,7 +260,7 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
 
 /// Whether a thread is pending for the person: `pending`, or `waiting_for_you` from a server
 /// that does not say `pending`.
-fn pending(t: &Value) -> bool {
+pub(crate) fn pending(t: &Value) -> bool {
     t.get("pending").unwrap_or(&t["waiting_for_you"]) == true
 }
 

@@ -491,6 +491,21 @@ pub fn channel_event(thread: &Value, me: Option<&str>) -> Option<Value> {
             "\nIf your own work or your person's files answer it, reply with \
              send(thread=\"{id}\", text=…); if not, stay silent."
         ));
+    } else if s(&thread["status"]) == "closed" {
+        // Closed with a last note: to read only; writing in it, `done` included, is refused.
+        content.push_str(
+            "\nThis thread is closed: it needs nothing more and cannot be answered. Read it, and \
+             tell your person if it matters to them; to follow up, open a new thread with \
+             send(to=…).",
+        );
+    } else if !render::pending(thread) {
+        // Another of the person's sessions already handled it: nothing to leave pending or mark
+        // done.
+        content.push_str(&format!(
+            "\nYour person has already handled this thread: it is not pending. If it is for you \
+             and asks something you can answer, answer with send(thread=\"{id}\", text=…); \
+             otherwise stay silent."
+        ));
     } else {
         content.push_str(&format!(
             "\nIf it is for you, answer with send(thread=\"{id}\", text=…), or, if it needs work \
@@ -741,6 +756,59 @@ mod tests {
         for wrong in ["If your own work", "If it is for you", "A team question:"] {
             assert!(!content.contains(wrong), "{wrong}: {content}");
         }
+    }
+
+    #[test]
+    fn channel_events_offer_done_and_pending_only_while_pending_and_open() {
+        let t = json!({
+            "id": "r_1", "kind": "direct", "title": "T", "from": "ana",
+            "participants": ["ana", "oscar"], "status": "open", "waiting_for_you": true,
+            "pending": true, "context": null, "claimed": null,
+            "new_notes": [
+                { "id": "n_1", "author": "ana", "via": "x", "created_at": "t", "text": "Thanks!", "truncated": false }
+            ]
+        });
+        let content = |t: &Value| {
+            channel_event(t, Some("oscar")).unwrap()["content"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        // Another session of the person already handled it: it reaches this one all the same.
+        let mut handled = t.clone();
+        handled["pending"] = false.into();
+        let out = content(&handled);
+        assert!(
+            out.contains("Your person has already handled this thread: it is not pending."),
+            "{out}"
+        );
+        assert!(out.contains("send(thread=\"r_1\", text=…)"), "{out}");
+        for wrong in ["leave it pending", "done=true", "claim=true"] {
+            assert!(!out.contains(wrong), "{wrong}: {out}");
+        }
+        // A server that does not say `pending`: `waiting_for_you` decides.
+        let mut old = t.clone();
+        old.as_object_mut().unwrap().remove("pending");
+        old["waiting_for_you"] = false.into();
+        assert!(!content(&old).contains("done=true"));
+        // Closed with a last note: to read; writing in it, `done` included, would fail.
+        let mut closed = handled.clone();
+        closed["status"] = "closed".into();
+        closed["waiting_for_you"] = false.into();
+        let out = content(&closed);
+        assert!(
+            out.contains("This thread is closed: it needs nothing more and cannot be answered"),
+            "{out}"
+        );
+        for wrong in ["leave it pending", "done=true", "claim=true", "text=…"] {
+            assert!(!out.contains(wrong), "{wrong}: {out}");
+        }
+        // Still pending: as before.
+        let out = content(&t);
+        assert!(
+            out.contains("done=true") && out.contains("leave it pending"),
+            "{out}"
+        );
     }
 
     #[test]

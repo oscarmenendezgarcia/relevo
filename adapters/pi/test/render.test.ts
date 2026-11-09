@@ -171,6 +171,20 @@ test("a direct arrival says who you are, to read and answer if you can, and when
   );
 });
 
+test("a direct arrival already handled, or closed, neither says it stays pending nor offers done", () => {
+  // Another session of the person handled it (each session still gets each note once).
+  const handled = renderArrival({ ...arrivalThread("direct"), pending: false }, "oscar");
+  assert.match(handled, /^Relevo: new in thread r_bbbbbbbbbbbb\. You speak for @oscar\. Your person has already handled this thread: it is not pending\./);
+  assert.match(handled, /if it is for you and asks something you can answer, answer with relevo_send \{ thread: "r_bbbbbbbbbbbb", text: … \}; otherwise stay silent\./);
+  for (const wrong of [/stays pending/, /leave it pending/, /done: true/, /claim: true/]) assert.doesNotMatch(handled, wrong);
+  // A server that does not say `pending`: `waiting_for_you` decides.
+  assert.doesNotMatch(renderArrival({ ...arrivalThread("direct"), waiting_for_you: false }, "oscar"), /stays pending|done: true/);
+  // Closed by the other person with a last note: only to read; writing in it would fail.
+  const closed = renderArrival({ ...arrivalThread("direct"), status: "closed", pending: false, waiting_for_you: false }, "oscar");
+  assert.match(closed, /^Relevo: new in thread r_bbbbbbbbbbbb, which is closed\. You speak for @oscar\. It needs nothing more and cannot be answered: read it/);
+  for (const wrong of [/stays pending/, /done: true/, /claim: true/, /text: …/]) assert.doesNotMatch(closed, wrong);
+});
+
 test("pending comes from `pending`, or from `waiting_for_you` on a server that does not say it", () => {
   const t = arrivalThread("direct");
   assert.match(renderThread(t, { me: "oscar" }), /^Pending for your person/m);
