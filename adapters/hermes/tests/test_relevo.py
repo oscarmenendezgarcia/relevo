@@ -8,7 +8,9 @@ Run with the Hermes venv python, from the repository root:
 HERMES_SRC points at the Hermes source (default ~/.hermes/hermes-agent). The plugin is installed
 the way the README says, into a temporary Hermes home, and loaded by Hermes' own plugin discovery.
 HOME and HERMES_HOME point at that temporary directory, so nothing of a real Hermes home is read or
-written. The server listens on a free port in 7990-7999 and is stopped at the end.
+written. The server listens on a free port in 7990-7999 and is stopped at the end; so do the
+`relevo serve --tls` servers of the Tls tests (and one with a certificate an office authority signed,
+made with openssl, skipped without it).
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ import os
 import re
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -43,7 +46,7 @@ for _key, _value in {
     "XDG_STATE_HOME": _TMP / "state", "XDG_CONFIG_HOME": _TMP / "config", "XDG_CACHE_HOME": _TMP / "cache",
 }.items():
     os.environ[_key] = str(_value)
-for _key in ("RELEVO_URL", "RELEVO_TOKEN", "RELEVO_CONTEXT", "RELEVO_CONFIG", "RELEVO_ALLOWED_USERS",
+for _key in ("RELEVO_URL", "RELEVO_TOKEN", "RELEVO_CERT", "RELEVO_CONTEXT", "RELEVO_CONFIG", "RELEVO_ALLOWED_USERS",
              "RELEVO_ALLOW_ALL_USERS"):
     os.environ.pop(_key, None)
 # Install as the README says: copy to <home>/plugins/relevo and enable it.
@@ -100,10 +103,13 @@ def _free_port() -> int:
 
 
 class Server:
-    """A relevo server on a temporary database, with Oscar (the Hermes owner), Ana and Bob."""
+    """A relevo server on a temporary database, with Oscar (the Hermes owner), Ana and Bob.
 
-    def __init__(self) -> None:
-        self.dir = _TMP / "server"
+    `tls`: `relevo serve --tls`, its own certificate made for 127.0.0.1 alone; `own`: `--tls-cert` and
+    `--tls-key` with a certificate of yours (PEM files). Then `cert` is the server's certificate (PEM)."""
+
+    def __init__(self, name: str = "server", *, tls: bool = False, own: tuple[str, str] | None = None) -> None:
+        self.dir = _TMP / name
         self.dir.mkdir()
         self.db = str(self.dir / "relevo.db")
         self.tokens = {
@@ -111,24 +117,42 @@ class Server:
             "ana": self._invite("ana", "Ana", "payments backend", "Claude Code"),
             "bob": self._invite("bob", "Bob", "frontend", "pi"),
         }
+        args = (["--tls-cert", own[0], "--tls-key", own[1]] if own
+                else ["--tls", "--tls-name", "127.0.0.1"] if tls else [])
+        self.cert_file = own[0] if own else f"{self.db}.tls/cert.pem" if tls else None
+        self.cert = ""
         self.port = _free_port()
-        self.url = f"http://127.0.0.1:{self.port}"
+        self.url = f"{'https' if self.cert_file else 'http'}://127.0.0.1:{self.port}"
         self.log = open(self.dir / "server.log", "wb")
-        self.proc = subprocess.Popen([RELEVO_BIN, "serve", "--addr", f"127.0.0.1:{self.port}", "--db", self.db],
-                                     stdout=self.log, stderr=subprocess.STDOUT)
+        self.proc = subprocess.Popen([RELEVO_BIN, "serve", "--addr", f"127.0.0.1:{self.port}", "--db", self.db,
+                                      *args], stdout=self.log, stderr=subprocess.STDOUT)
         deadline = time.time() + 15
-        while time.time() < deadline:
+        while time.time() < deadline and self.proc.poll() is None:
             try:
-                if httpx.get(self.url + "/health", timeout=1).status_code == 200:
+                if self.cert_file and not self.cert:
+                    if not Path(self.cert_file).is_file():
+                        raise httpx.ConnectError("no certificate yet")
+                    self.cert = Path(self.cert_file).read_text()
+                if httpx.get(self.url + "/health", timeout=1, verify=self.verify).status_code == 200:
                     return
             except httpx.HTTPError:
                 time.sleep(0.1)
         self.stop()
         raise RuntimeError("relevo serve did not start")
 
+    @property
+    def verify(self):
+        """What a teammate's client trusts for this server: its own certificate alone, over https."""
+        return client.pinned_context(self.cert) if self.cert else True
+
     def _invite(self, handle: str, name: str, about: str, label: str) -> str:
         out = subprocess.run([RELEVO_BIN, "invite", handle, "--name", name, "--about", about, "--label", label,
                               "--db", self.db], check=True, capture_output=True, text=True).stdout
+        return next(line.strip() for line in out.splitlines() if line.strip().startswith("rlv_"))
+
+    def token_add(self, handle: str, label: str) -> str:
+        out = subprocess.run([RELEVO_BIN, "token", "add", handle, "--label", label, "--db", self.db], check=True,
+                             capture_output=True, text=True).stdout
         return next(line.strip() for line in out.splitlines() if line.strip().startswith("rlv_"))
 
     def sessions(self, handle: str) -> str:
@@ -148,21 +172,25 @@ class Person:
     """A teammate's agent talking plain HTTP, under its own session."""
 
     def __init__(self, server: Server, handle: str):
-        self.url, self.handle = server.url, handle
+        self.url, self.handle, self.verify = server.url, handle, server.verify
         self.headers = {"Authorization": f"Bearer {server.tokens[handle]}", "Relevo-Session": f"test-{handle}-session"}
 
     def _parse(self, resp: httpx.Response) -> dict:
         assert resp.status_code < 400, resp.text
         return resp.json()
 
+    def _call(self, method: str, path: str, **kw) -> dict:
+        with httpx.Client(verify=self.verify, timeout=10) as http:
+            return self._parse(http.request(method, self.url + path, headers=self.headers, **kw))
+
     def send(self, **body) -> dict:
-        return self._parse(httpx.post(self.url + "/api/send", json=body, headers=self.headers, timeout=10))
+        return self._call("POST", "/api/send", json=body)
 
     def thread(self, thread_id: str) -> dict:
-        return self._parse(httpx.get(f"{self.url}/api/threads/{thread_id}", headers=self.headers, timeout=10))
+        return self._call("GET", f"/api/threads/{thread_id}")
 
     def inbox(self) -> dict:
-        return self._parse(httpx.get(self.url + "/api/inbox", headers=self.headers, timeout=10))
+        return self._call("GET", "/api/inbox")
 
 
 SERVER: Server
@@ -1205,6 +1233,251 @@ class Loop(Base):
         a = self.make_adapter()
         self.assertFalse(await a.connect())
         self.assertTrue(a.has_fatal_error)
+
+
+
+def _office_certificates() -> tuple[str, str, str] | None:
+    """An office authority and a certificate it signed for 127.0.0.1, made with openssl: (authority,
+    certificate, key), PEM files; None without openssl."""
+    if not shutil.which("openssl"):
+        return None
+    d = _TMP / "office"
+    d.mkdir()
+
+    def openssl(*args: str) -> None:
+        subprocess.run(["openssl", *args], check=True, capture_output=True, cwd=d)
+
+    ec = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes"]
+    try:
+        openssl("req", "-x509", *ec, "-keyout", "ca.key", "-out", "ca.pem", "-days", "2", "-subj", "/CN=Office CA",
+                "-addext", "basicConstraints=critical,CA:TRUE")
+        openssl("req", *ec, "-keyout", "key.pem", "-out", "req.csr", "-subj", "/CN=relevo")
+        (d / "ext.cnf").write_text("subjectAltName=IP:127.0.0.1\nbasicConstraints=CA:FALSE\n")
+        openssl("x509", "-req", "-in", "req.csr", "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial",
+                "-out", "cert.pem", "-days", "2", "-extfile", "ext.cnf")
+    except subprocess.CalledProcessError:
+        return None
+    return str(d / "ca.pem"), str(d / "cert.pem"), str(d / "key.pem")
+
+
+class Tls(Base):
+    """Over https (relevo serve --tls): the certificate `relevo connect` saved (`cert`), or the file
+    RELEVO_CERT names, is trusted alone; any other is refused before the token is sent."""
+
+    TLS: Server
+    OTHER: Server  # another server, with a certificate of its own
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.TLS = Server("tls", tls=True)
+        cls.OTHER = Server("tls-other", tls=True)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.TLS.stop()
+        cls.OTHER.stop()
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.ana = Person(self.TLS, "ana")
+        self._files: list[Path] = []
+
+    async def asyncTearDown(self) -> None:
+        # Leave nothing new on the TLS server either, for the next test.
+        self.use(self.TLS)
+        new_adapter().api.inbox()
+        tools.relevo_inbox({})
+        for key in ("RELEVO_CERT", "RELEVO_CONFIG"):
+            os.environ.pop(key, None)
+        for f in self._files:
+            f.unlink(missing_ok=True)
+        await super().asyncTearDown()
+
+    def file(self, text: str) -> str:
+        f = _TMP / f"tls-{len(self._files)}-{os.getpid()}-{time.monotonic_ns()}"
+        f.write_text(text)
+        self._files.append(f)
+        return str(f)
+
+    def use(self, server: Server, *, cert: str | None = None) -> str:
+        """What `relevo connect` saves for `server`, in a file RELEVO_CONFIG names (with `cert`, the
+        server's own unless given); RELEVO_URL and RELEVO_TOKEN unset, so the tools and the gateway use
+        it. Returns the file."""
+        os.environ.pop("RELEVO_URL", None)
+        os.environ.pop("RELEVO_TOKEN", None)
+        os.environ.pop("RELEVO_CERT", None)
+        saved = {"url": server.url, "token": server.tokens["oscar"], "cert": server.cert if cert is None else cert}
+        os.environ["RELEVO_CONFIG"] = self.file(json.dumps(saved))
+        return os.environ["RELEVO_CONFIG"]
+
+    def test_the_tools_work_over_https_with_the_saved_certificate(self):
+        self.assertTrue(self.TLS.url.startswith("https://"))
+        self.use(self.TLS)
+        settings = client.resolve_settings()
+        self.assertEqual((settings.url, settings.cert, settings.cert_problem), (self.TLS.url, self.TLS.cert, ""))
+        out = tools.relevo_send({"to": "ana", "text": "Over TLS: is /refunds idempotent?"})
+        thread_id = re.search(r"thread (r_\w+)", out).group(1)
+        self.assertEqual(self.ana.thread(thread_id)["notes"][0]["text"], "Over TLS: is /refunds idempotent?")
+        self.ana.send(thread=thread_id, text="Yes, by key.")
+        inbox = tools.relevo_inbox({})
+        self.assertIn("You speak for @oscar", inbox)
+        self.assertIn("Yes, by key.", inbox)
+        self.assertIn("Over TLS: is /refunds idempotent?", tools.relevo_thread({"id": thread_id}))
+
+    def test_relevo_cert_names_the_certificate_whatever_the_server(self):
+        # The env's pair for the TLS server; the saved file is another server's, with its certificate.
+        self.use(self.OTHER)
+        os.environ["RELEVO_URL"], os.environ["RELEVO_TOKEN"] = self.TLS.url, self.TLS.tokens["oscar"]
+        # The saved certificate goes with the saved URL only: not used for this one, so refused.
+        self.assertEqual(client.resolve_settings().cert, "")
+        self.assertTrue(tools.relevo_inbox({}).startswith("Error: could not reach the Relevo server"))
+        os.environ["RELEVO_CERT"] = self.file(self.TLS.cert)
+        self.assertEqual(client.resolve_settings().cert, self.TLS.cert)
+        self.assertIn("You speak for @oscar", tools.relevo_inbox({}))
+        # RELEVO_CERT wins over the certificate saved with the same URL, too.
+        self.use(self.TLS)
+        os.environ["RELEVO_CERT"] = self.file(self.OTHER.cert)
+        self.assertIn(client.NOT_PINNED, tools.relevo_inbox({}))
+
+    async def test_the_gateway_loop_works_over_https(self):
+        self.use(self.TLS)
+        a = self.make_adapter()
+        self.assertTrue(await a.connect())
+        await asyncio.sleep(0.3)  # the waiting request is open
+        opened = self.ana.send(to=["oscar"], text="Over TLS: can you check the refunds cron?")
+        await self.until(lambda: len(self.events) == 1)
+        self.assertIn("Over TLS: can you check the refunds cron?", self.events[0].text)
+        sent = await a.send(opened["thread"], "It runs at 02:00 UTC.", metadata=FINAL)
+        self.assertTrue(sent.success, sent.error)
+        self.assertEqual(self.ana.thread(opened["thread"])["notes"][-1]["text"], "It runs at 02:00 UTC.")
+        self.assertIn(a.settings.session, self.TLS.sessions("oscar"))
+        # A stop still ends the session, over https, within the waiting request.
+        started = time.monotonic()
+        await a.disconnect()
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertNotIn(a.settings.session, self.TLS.sessions("oscar"))
+
+    async def test_another_certificate_is_refused_before_the_token_is_sent(self):
+        # The certificate to trust is the other server's: the TLS server's own is not it. A token of
+        # its own shows whether anything reached the server: any request with it would start a session.
+        os.environ["RELEVO_URL"] = self.TLS.url
+        os.environ["RELEVO_TOKEN"] = self.TLS.token_add("oscar", "Never reached")
+        os.environ["RELEVO_CERT"] = self.file(self.OTHER.cert)
+        out = tools.relevo_inbox({})
+        self.assertTrue(out.startswith("Error: could not reach the Relevo server"), out)
+        self.assertIn(client.NOT_PINNED, out)
+        self.assertIn(client.NOT_PINNED, tools.relevo_send({"to": "ana", "text": "Never sent"}))
+        self.assertEqual(self.ana.inbox()["threads"], [])
+
+        # The gateway keeps trying with its back-off, as for a server it cannot reach, and stops at once.
+        a = self.make_adapter()
+        a.backoff_initial, a.backoff_max = 0.05, 0.2
+        errors: list[str] = []
+        real = a.api.ainbox
+
+        async def counted(http, *, wait=0):
+            try:
+                return await real(http, wait=wait)
+            except Exception as exc:
+                errors.append(client.describe_error(exc))
+                raise
+
+        a.api.ainbox = counted
+        self.assertTrue(await a.connect())
+        await self.until(lambda: len(errors) >= 3)
+        self.assertTrue(all(client.NOT_PINNED in e for e in errors), errors)
+        self.assertTrue(a.is_connected)
+        self.assertFalse(a.has_fatal_error)
+        started = time.monotonic()
+        await a.disconnect()
+        self.assertLess(time.monotonic() - started, a.end_timeout + 1)
+        self.assertEqual(self.events, [])
+        self.assertNotIn("Never reached", self.TLS.sessions("oscar"))
+
+    def test_without_a_certificate_a_server_s_own_certificate_is_refused(self):
+        self.use(self.TLS, cert="")
+        out = tools.relevo_inbox({})
+        self.assertTrue(out.startswith("Error: could not reach the Relevo server"), out)
+        self.assertIn("certificate was refused", out)
+
+    def test_a_host_the_certificate_does_not_name_is_refused(self):
+        # The certificate is made for 127.0.0.1 alone, and pinned; localhost is not one of its names.
+        self.use(self.TLS)
+        url = self.TLS.url.replace("127.0.0.1", "localhost")
+        os.environ["RELEVO_URL"], os.environ["RELEVO_TOKEN"] = url, self.TLS.tokens["oscar"]
+        os.environ["RELEVO_CERT"] = self.file(self.TLS.cert)
+        out = tools.relevo_inbox({})
+        self.assertTrue(out.startswith("Error: could not reach the Relevo server"), out)
+        self.assertIn("certificate was refused", out)
+        self.assertNotIn(client.NOT_PINNED, out)
+
+    async def test_a_certificate_that_cannot_be_used_is_an_error_not_a_fallback(self):
+        self.use(self.TLS, cert="not a certificate")
+        problem = client.resolve_settings().cert_problem
+        self.assertIn("is not a PEM certificate", problem)
+        self.assertIn("run `relevo connect` again", tools.relevo_inbox({}))
+        self.assertTrue(client.configured())  # the tools show, and say what is wrong
+        a = self.make_adapter()
+        self.assertFalse(await a.connect())
+        self.assertTrue(a.has_fatal_error)
+        self.assertFalse(a.fatal_error_retryable)
+        self.assertIn("is not a PEM certificate", a.fatal_error_message)
+        self.assertIsNone(a._poll_task)
+
+        os.environ["RELEVO_CERT"] = str(_TMP / "no-such-cert.pem")
+        self.assertTrue(tools.relevo_inbox({}).startswith("Error: reading RELEVO_CERT"))
+        b = self.make_adapter()
+        self.assertFalse(await b.connect())
+        self.assertIn("reading RELEVO_CERT", b.fatal_error_message)
+
+    def test_a_pinned_certificate_out_of_its_dates_says_so_as_relevo_mcp_does(self):
+        # What the handshake raises for the pinned certificate itself once it has expired, or before
+        # it is valid (OpenSSL checks the dates; relevo mcp checks them too).
+        def refused(code: int, message: str) -> ssl.SSLCertVerificationError:
+            exc = ssl.SSLCertVerificationError(1, f"[SSL: CERTIFICATE_VERIFY_FAILED] {message}")
+            exc.verify_code, exc.verify_message = code, message
+            return exc
+
+        expired = client._cert_refusal(client._explained(refused(10, "certificate has expired")))
+        self.assertEqual(expired, client.out_of_date("has expired"))
+        self.assertTrue(expired.endswith(
+            "expired: the server needs a new certificate; then run `relevo connect` again"), expired)
+        early = client._cert_refusal(client._explained(refused(9, "certificate is not yet valid")))
+        self.assertEqual(early, client.out_of_date("is not valid yet"))
+        # Another certificate is still not the pinned one; another refusal keeps OpenSSL's reason.
+        self.assertEqual(client._cert_refusal(client._explained(refused(18, "self-signed"))), client.NOT_PINNED)
+        other = refused(62, "hostname mismatch")
+        self.assertIs(client._explained(other), other)
+        self.assertIn("hostname mismatch", client._cert_refusal(other))
+
+    def test_an_office_authority_s_certificate_is_trusted_on_its_own_and_the_authority_alone_is_not(self):
+        office = _office_certificates()
+        if office is None:
+            self.skipTest("openssl is not available")
+        authority, cert, key = office
+        signed = Server("tls-office", own=(cert, key))
+        try:
+            os.environ["RELEVO_URL"], os.environ["RELEVO_TOKEN"] = signed.url, signed.tokens["oscar"]
+            os.environ["RELEVO_CERT"] = cert  # the server's own certificate, without its authority
+            self.assertIn("You speak for @oscar", tools.relevo_inbox({}))
+            os.environ["RELEVO_CERT"] = authority  # what signed it is not the certificate saved
+            self.assertIn(client.NOT_PINNED, tools.relevo_inbox({}))
+        finally:
+            signed.stop()
+
+    async def test_plain_http_is_unchanged(self):
+        # A certificate saved with an http:// server, or named by RELEVO_CERT, is not used for it.
+        self.use(SERVER, cert=self.TLS.cert)
+        self.assertEqual(client.resolve_settings().cert, self.TLS.cert)
+        self.assertIn("You speak for @oscar", tools.relevo_inbox({}))
+        os.environ["RELEVO_CERT"] = self.file(self.OTHER.cert)
+        self.assertIn("You speak for @oscar", tools.relevo_inbox({}))
+        a = self.make_adapter()
+        self.assertTrue(await a.connect())
+        await asyncio.sleep(0.3)
+        Person(SERVER, "ana").send(to=["oscar"], text="Plain http still works")
+        await self.until(lambda: len(self.events) == 1)
+        self.assertIn("Plain http still works", self.events[0].text)
 
 
 if __name__ == "__main__":

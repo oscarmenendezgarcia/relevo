@@ -2,6 +2,7 @@
 
 import { randomBytes, randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
+import { pinnedRequest, type Answer } from "./pinned.ts";
 
 export interface Person {
   handle: string;
@@ -125,26 +126,29 @@ export class Client {
     if (context) headers["Relevo-Context"] = context;
     if (body !== undefined) headers["Content-Type"] = "application/json";
     const timeout = AbortSignal.timeout(timeoutMs);
-    const res = await fetch(this.config.url + path, {
+    const init = {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-    });
-    const text = await res.text();
+    };
+    const url = this.config.url + path;
+    // A pinned certificate: trusted alone, over node:https (fetch cannot take it).
+    const pem = this.config.cert;
+    const { status, ok, text } = pem && url.startsWith("https://") ? await pinnedRequest(url, init, pem) : await fetched(url, init);
     let json: any = null;
     try {
       json = text ? JSON.parse(text) : null;
     } catch {
       // Not JSON: a proxy page, say. Reported below by status.
     }
-    if (!res.ok) {
+    if (!ok) {
       const err = json?.error;
       if (err && typeof err.code === "string") {
         const { code, message, ...extra } = err;
-        throw new RelevoError(code, String(message ?? code), res.status, extra);
+        throw new RelevoError(code, String(message ?? code), status, extra);
       }
-      throw new RelevoError("HTTP", `HTTP ${res.status} from ${this.config.url}`, res.status);
+      throw new RelevoError("HTTP", `HTTP ${status} from ${this.config.url}`, status);
     }
     return json as T;
   }
@@ -182,6 +186,11 @@ export class Client {
       return await this.request<SendResult>("POST", "/api/send", body, signal);
     }
   }
+}
+
+async function fetched(url: string, init: RequestInit): Promise<Answer> {
+  const res = await fetch(url, init);
+  return { status: res.status, ok: res.ok, text: await res.text() };
 }
 
 function retryable(err: unknown): boolean {

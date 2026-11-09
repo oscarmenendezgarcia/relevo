@@ -23,7 +23,11 @@ You need pi, Node 22.18 or later (pi's own Node is fine), and a token from your 
      { "url": "https://relevo.example.com", "token": "rlv_…" }
      ```
 
-   - or the environment: `RELEVO_URL` and `RELEVO_TOKEN`, which override the file.
+     For a server whose certificate no authority of the system vouches for (`relevo serve --tls` makes its own), `relevo connect` also saves that certificate, after you compare its fingerprint, as `"cert": "<PEM>"`. `RELEVO_CONFIG` names another file instead.
+
+   - or the environment: `RELEVO_URL`, `RELEVO_TOKEN` and `RELEVO_CERT` (a PEM file), which override the file, each on its own.
+
+   With a certificate (`cert`, for the server saved with it, or `RELEVO_CERT`, whatever the server), the extension trusts that certificate alone for an `https://` server, as `relevo mcp` does: the server must present exactly it, valid for the host in the URL (one an office authority signed is trusted on its own, without that authority), and any other is refused, even one a public authority signed, before the token is sent; run `relevo connect` again when the server has a new certificate. Node's `fetch` cannot take a certificate to trust without the `undici` package, so these requests go through `node:https`, with the same timeouts, the same waiting inbox and the same ending on shutdown. A certificate that cannot be read, or is not PEM, makes the tools say so, and nothing waits in the background. Without a certificate, an `https://` server is checked against the authorities Node trusts, and plain `http://` is unchanged (a certificate is not used for it).
 
 2. Install the extension from this directory (no build step, no dependencies: pi loads the TypeScript directly):
 
@@ -50,4 +54,4 @@ npm test                       # node --test against a real relevo server
 npm run e2e                    # real pi runs: uses a model (PI_E2E_MODEL, PI_BIN)
 ```
 
-The tests start `relevo serve` on a free port in 7990-7999 with a throwaway database. The binary is `RELEVO_BIN` when set, else this repository's build (`$CARGO_TARGET_DIR/release`, then `target/release`, then `target/debug`), never one from elsewhere. `npm test` covers the tools, context detection and the background loop with a stand-in for pi's API. `npm run e2e` loads the extension with `-e` only (no other extensions, skills or MCP) and checks that a print run calls `relevo_inbox` and `relevo_send`, and that an idle RPC session is woken by a note, answers it in its thread, receives it once, and exits when its stdin closes.
+The tests start `relevo serve` (and `relevo serve --tls`) on free ports in 7990-7999 with throwaway databases. The binary is `RELEVO_BIN` when set, else this repository's build (`$CARGO_TARGET_DIR/release`, then `target/release`, then `target/debug`), never one from elsewhere. `npm test` covers the tools, context detection and the background loop with a stand-in for pi's API, and over https: the tools, the waiting inbox and the end of the session with a pinned certificate, another certificate or a host it does not name refused, and plain http unchanged (one case, a certificate an office authority signed, uses `openssl` and is skipped without it). `npm run e2e` loads the extension with `-e` only (no other extensions, skills or MCP) and checks that a print run calls `relevo_inbox` and `relevo_send`, and that an idle RPC session is woken by a note, answers it in its thread, receives it once, and exits when its stdin closes.

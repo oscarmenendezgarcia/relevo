@@ -8,19 +8,19 @@ Status: 0.1.0, the first version for a team to try ([CHANGELOG](CHANGELOG.md)). 
 
 ## Quick start
 
-On the server (keep it on loopback behind a reverse proxy that terminates TLS; see the protocol):
+On the server (open port 7878 only to the office network or the VPN; a reverse proxy in front is optional, see [docs/install.md](docs/install.md)):
 
 ```
 cargo install --path .
 export RELEVO_DB=/srv/relevo/relevo.db
-relevo serve &                                          # 127.0.0.1:7878
+relevo serve --tls --addr 0.0.0.0:7878 &                # HTTPS with its own certificate; prints its fingerprint
 relevo invite ana --name "Ana" --about "payments backend" --label "Claude Code laptop"   # prints Ana's token once
 ```
 
-On Ana's machine, with Claude Code:
+Give Ana the server's address, her token and the fingerprint (`relevo tls-fingerprint`). On her machine, with Claude Code:
 
 ```
-relevo connect https://relevo.example.com             # paste the token; it is checked and saved to ~/.config/relevo/config.json
+relevo connect https://192.168.1.50:7878              # compare the fingerprint it shows, then paste the token; saved to ~/.config/relevo/config.json
 claude mcp add --scope user relevo -- relevo mcp --channel
 claude --dangerously-load-development-channels server:relevo
 ```

@@ -1,6 +1,7 @@
 # Relevo server, as a systemd *user* unit: it runs as the owner's user, needs no root, and
-# listens on loopback only. Teammates reach it through a reverse proxy that terminates TLS (see
-# deploy/proxy/ and docs/install.md). Installed by deploy/install.sh into
+# listens on loopback only, in plain HTTP. For teammates, turn on HTTPS in Relevo itself with a
+# drop-in (Environment=RELEVO_TLS=true and RELEVO_ADDR=0.0.0.0:7878), or put a reverse proxy
+# that terminates TLS in front (see docs/install.md). Installed by deploy/install.sh into
 # ~/.config/systemd/user/. Change settings with `systemctl --user edit relevo`, not here.
 [Unit]
 Description=Relevo server (notes between teammates' agents)
@@ -26,6 +27,9 @@ Restart=on-failure
 RestartSec=5
 
 # Limits and sandbox. The data directory is the only place it may write.
+# Room for 1,024 connections that have not been authenticated yet, each holding at most a 16 KiB
+# request head and its TLS buffers (about 40 KiB in all). A body (up to 400 KiB) is read only
+# after its token is checked.
 MemoryMax=128M
 UMask=0077
 NoNewPrivileges=yes
@@ -33,8 +37,9 @@ ProtectSystem=strict
 ReadWritePaths=%h/.local/share/relevo
 PrivateTmp=yes
 # These need no namespaces, so they hold even where the mount sandbox above cannot be set up
-# (see "Sandbox" in docs/install.md).
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# (see "Sandbox" in docs/install.md). AF_NETLINK only reads the machine's addresses (glibc's
+# getifaddrs() needs it): without it, the certificate `serve --tls` makes has none of them.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 RestrictNamespaces=yes
 RestrictRealtime=yes
 LockPersonality=yes

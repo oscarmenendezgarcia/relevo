@@ -88,3 +88,22 @@ test("config comes from the file, and the environment overrides it", () => {
     token: "rlv_env",
   });
 });
+
+test("RELEVO_CONFIG names another file, and a certificate goes with its own server", () => {
+  const file = join(root, "elsewhere.json");
+  writeFileSync(file, JSON.stringify({ url: "https://r.example", token: "rlv_other", cert: "not a certificate" }));
+  // Read before the default file, and a certificate that is not PEM is an error, not a silent plain trust.
+  assert.throws(() => loadConfig({ RELEVO_CONFIG: file }, join(root, "home")), /saved certificate is not a PEM certificate/);
+  // The saved certificate is for the saved server only.
+  assert.deepEqual(loadConfig({ RELEVO_CONFIG: file, RELEVO_URL: "http://127.0.0.1:1" }, join(root, "home")), {
+    url: "http://127.0.0.1:1",
+    token: "rlv_other",
+  });
+  // RELEVO_CERT must be a file that can be read.
+  assert.throws(
+    () => loadConfig({ RELEVO_CONFIG: file, RELEVO_CERT: join(root, "missing.pem") }, join(root, "home")),
+    /reading RELEVO_CERT/,
+  );
+  writeFileSync(file, JSON.stringify({ url: "https://r.example", token: "rlv_other" }));
+  assert.deepEqual(loadConfig({ RELEVO_CONFIG: file }, join(root, "home")), { url: "https://r.example", token: "rlv_other" });
+});

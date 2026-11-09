@@ -1,5 +1,5 @@
-//! Where a client finds its server and token: `~/.config/relevo/config.json`, or the file
-//! `RELEVO_CONFIG` names, with `RELEVO_URL` and `RELEVO_TOKEN` over it.
+//! Where a client finds its server, token and pinned certificate: `~/.config/relevo/config.json`,
+//! or the file `RELEVO_CONFIG` names, with `RELEVO_URL`, `RELEVO_TOKEN` and `RELEVO_CERT` over it.
 
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
@@ -12,6 +12,10 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     pub url: String,
     pub token: String,
+    /// The server's certificate (PEM), trusted alone for it: saved by `connect` when the system's
+    /// authorities do not vouch for the server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert: Option<String>,
 }
 
 /// The config file: `RELEVO_CONFIG`, else `$HOME/.config/relevo/config.json`.
@@ -30,29 +34,38 @@ pub fn env(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }
 
-/// The file (if any), then `RELEVO_URL` and `RELEVO_TOKEN` over it.
+/// The file (if any), then `RELEVO_URL`, `RELEVO_TOKEN` and `RELEVO_CERT` (a PEM file) over it.
+/// The saved certificate goes with the saved URL: it is not used for another `RELEVO_URL`.
 pub fn load(env: impl Fn(&str) -> Option<String>) -> Result<Config> {
     let file = path(&env)?;
-    let mut url = None;
-    let mut token = None;
+    let mut saved = None;
     match std::fs::read(&file) {
         Ok(bytes) => {
-            let saved: Config = serde_json::from_slice(&bytes)
+            let config: Config = serde_json::from_slice(&bytes)
                 .with_context(|| format!("reading {}", file.display()))?;
-            url = Some(saved.url);
-            token = Some(saved.token);
+            saved = Some(config);
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e).with_context(|| format!("reading {}", file.display())),
     }
     let set = |name| env(name).filter(|v: &String| !v.is_empty());
-    let url = set("RELEVO_URL").or(url);
-    let token = set("RELEVO_TOKEN").or(token);
-    match (url, token) {
-        (Some(url), Some(token)) => Ok(Config {
-            url: normalize_url(&url)?,
-            token,
+    let url = match (set("RELEVO_URL"), &saved) {
+        (Some(url), _) => Some(normalize_url(&url)?),
+        (None, Some(saved)) => Some(normalize_url(&saved.url)?),
+        (None, None) => None,
+    };
+    let token = set("RELEVO_TOKEN").or_else(|| saved.as_ref().map(|s| s.token.clone()));
+    let cert = match set("RELEVO_CERT") {
+        Some(pem) => Some(
+            std::fs::read_to_string(&pem).with_context(|| format!("reading RELEVO_CERT {pem}"))?,
+        ),
+        None => saved.and_then(|s| {
+            let same = url.as_deref() == normalize_url(&s.url).ok().as_deref();
+            s.cert.filter(|_| same)
         }),
+    };
+    match (url, token) {
+        (Some(url), Some(token)) => Ok(Config { url, token, cert }),
         _ => bail!(
             "Relevo is not configured: run `relevo connect <url>` and give it the token \
              (or set RELEVO_URL and RELEVO_TOKEN)"
@@ -169,6 +182,7 @@ mod tests {
         let config = Config {
             url: "https://relevo.example.com".into(),
             token: "rlv_secret".into(),
+            cert: Some("-----BEGIN CERTIFICATE-----\n...".into()),
         };
         save(&file, &config).unwrap();
         assert_eq!(mode(&file), 0o600);
@@ -193,6 +207,7 @@ mod tests {
             &Config {
                 url: "https://a.example".into(),
                 token: "rlv_a".into(),
+                cert: Some("saved pem".into()),
             },
         )
         .unwrap();
@@ -200,11 +215,23 @@ mod tests {
         let env = env_of(&[("RELEVO_CONFIG", f), ("RELEVO_TOKEN", "rlv_b")]);
         let c = load(env).unwrap();
         assert_eq!(
-            (c.url.as_str(), c.token.as_str()),
-            ("https://a.example", "rlv_b")
+            (c.url.as_str(), c.token.as_str(), c.cert.as_deref()),
+            ("https://a.example", "rlv_b", Some("saved pem"))
         );
+        // The saved certificate is for the saved server only.
         let env = env_of(&[("RELEVO_CONFIG", f), ("RELEVO_URL", "http://127.0.0.1:1/")]);
-        assert_eq!(load(env).unwrap().url, "http://127.0.0.1:1");
+        let c = load(env).unwrap();
+        assert_eq!((c.url.as_str(), c.cert), ("http://127.0.0.1:1", None));
+        let env = env_of(&[("RELEVO_CONFIG", f), ("RELEVO_URL", "https://a.example/")]);
+        assert_eq!(load(env).unwrap().cert.as_deref(), Some("saved pem"));
+        // RELEVO_CERT names a PEM file that wins over it, whatever the server.
+        let pem = dir.join("other.pem");
+        std::fs::write(&pem, "other pem").unwrap();
+        let p = pem.to_str().unwrap();
+        let env = env_of(&[("RELEVO_CONFIG", f), ("RELEVO_CERT", p)]);
+        assert_eq!(load(env).unwrap().cert.as_deref(), Some("other pem"));
+        let env = env_of(&[("RELEVO_CONFIG", f), ("RELEVO_CERT", "/nonexistent.pem")]);
+        assert!(load(env).unwrap_err().to_string().contains("RELEVO_CERT"));
 
         // No file: the environment alone is enough, and nothing alone is an error.
         let missing = dir.join("missing.json");

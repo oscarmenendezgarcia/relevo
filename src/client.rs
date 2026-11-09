@@ -58,8 +58,9 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 impl Client {
-    /// Fails only when TLS cannot be set up (no CA certificates on the system) for an `https://`
-    /// server; a plain `http://` one needs none.
+    /// Fails only when TLS cannot be set up: a pinned certificate (`config.cert`) that is not
+    /// PEM, or, for an `https://` server without one, no CA certificates on the system. A plain
+    /// `http://` server needs neither.
     pub fn new(
         config: &Config,
         fixed_context: Option<String>,
@@ -69,15 +70,25 @@ impl Client {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let builder =
             || reqwest::Client::builder().user_agent(concat!("relevo/", env!("CARGO_PKG_VERSION")));
-        let http = match builder().build() {
-            Ok(http) => http,
-            // The system's roots are loaded up front even for plain http; without any, an empty
-            // root store still serves http (and refuses every https certificate).
-            Err(_) if config.url.starts_with("http://") => builder()
-                .tls_certs_only([])
+        let http = match &config.cert {
+            // That certificate alone, never the system's authorities.
+            Some(pem) => builder()
+                .tls_backend_preconfigured(
+                    crate::tls::pinned(pem)
+                        .map_err(|e| anyhow::anyhow!("the saved certificate: {e:#}"))?,
+                )
                 .build()
-                .map_err(|e| anyhow::anyhow!("setting up HTTP: {}", causes(&e)))?,
-            Err(e) => anyhow::bail!("TLS roots could not be loaded: {}", causes(&e)),
+                .map_err(|e| anyhow::anyhow!("setting up TLS: {}", causes(&e)))?,
+            None => match builder().build() {
+                Ok(http) => http,
+                // The system's roots are loaded up front even for plain http; without any, an
+                // empty root store still serves http (and refuses every https certificate).
+                Err(_) if config.url.starts_with("http://") => builder()
+                    .tls_certs_only([])
+                    .build()
+                    .map_err(|e| anyhow::anyhow!("setting up HTTP: {}", causes(&e)))?,
+                Err(e) => anyhow::bail!("TLS roots could not be loaded: {}", causes(&e)),
+            },
         };
         Ok(Client {
             http,
@@ -342,6 +353,7 @@ mod tests {
         let config = Config {
             url: format!("http://{addr}"),
             token: "rlv_test".into(),
+            cert: None,
         };
         let client = Client::new(&config, Some(String::new()), std::env::temp_dir()).unwrap();
         let mut body = serde_json::Map::new();
@@ -379,6 +391,7 @@ mod tests {
         let config = Config {
             url: format!("http://{addr}"),
             token: "rlv_test".into(),
+            cert: None,
         };
         (config, server)
     }

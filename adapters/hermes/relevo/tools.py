@@ -48,6 +48,9 @@ def _run(name: str, fn) -> str:
         return fn()
     except client.RelevoError as exc:
         return "Error: " + client.describe_refusal(exc)
+    except client.CertError as exc:
+        # Nothing was sent: the certificate to trust cannot be used, and no other is tried.
+        return f"Error: {exc}."
     except Exception as exc:
         logger.warning("relevo: %s failed: %s", name, client.describe_error(exc))
         return f"Error: could not reach the Relevo server ({client.describe_error(exc)})."

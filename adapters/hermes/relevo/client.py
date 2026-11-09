@@ -8,10 +8,12 @@ imported lazily so plugin discovery stays cheap. Never logs tokens or note text.
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import logging
 import re
+import ssl
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -70,6 +72,10 @@ class Settings:
     source: str = ""
     # The one of RELEVO_URL / RELEVO_TOKEN set (env or config.yaml) without the other, or "".
     unpaired: str = ""
+    # The server's pinned certificate (PEM): `cert` saved with this URL, or the file RELEVO_CERT names.
+    cert: str = ""
+    # Why the certificate to trust cannot be used (RELEVO_CERT unreadable, not PEM), or "".
+    cert_problem: str = ""
 
     @property
     def configured(self) -> bool:
@@ -79,6 +85,15 @@ class Settings:
     def identity(self) -> str:
         """A key for "the person this token acts for", without keeping the token itself."""
         return hashlib.sha256(f"{self.url}\0{self.token}".encode("utf-8")).hexdigest()[:16]
+
+    def verify(self) -> Any:
+        """httpx's `verify` for this server: with a pinned certificate, an ssl context that trusts it
+        alone; otherwise httpx's default. Raises CertError when the certificate cannot be used."""
+        if self.cert_problem:
+            raise CertError(self.cert_problem)
+        if self.cert and self.url.startswith("https://"):
+            return pinned_context(self.cert)
+        return True
 
 
 def saved_config_path() -> Path:
@@ -90,6 +105,126 @@ def saved_config_path() -> Path:
     if named:
         return Path(named)
     return Path.home() / ".config" / "relevo" / "config.json"
+
+
+NOT_PINNED = ("the server's certificate is not the one `relevo connect` saved; if the server has a new "
+              "certificate, run `relevo connect` again")
+_PEM_CERT = re.compile(r"-----BEGIN CERTIFICATE-----\s+[A-Za-z0-9+/=\s]+?-----END CERTIFICATE-----")
+# OpenSSL's verify results for a chain that does not lead to the one trusted certificate: the server
+# has another certificate (X509_V_ERR_*: self-signed, self-signed in chain, unable to get issuer,
+# locally, verify leaf, signature failure, untrusted, rejected).
+_OTHER_CERT = {18, 19, 2, 20, 21, 7, 27, 28}
+
+
+class CertError(Exception):
+    """The certificate to trust cannot be used: RELEVO_CERT unreadable, or not a PEM certificate."""
+
+
+class NotPinned(ssl.SSLCertVerificationError):
+    """The server presented another certificate than the pinned one."""
+
+
+# OpenSSL's verify results for the pinned certificate out of its validity dates (X509_V_ERR_*:
+# not yet valid, has expired), which relevo mcp refuses too (src/tls.rs).
+_OUT_OF_DATE = {9: "is not valid yet", 10: "has expired"}
+
+
+def out_of_date(why: str) -> str:
+    """What every client says of the pinned certificate out of its dates, as relevo mcp says it."""
+    return (f"the server's certificate, the one `relevo connect` saved, {why}: the server needs a new "
+            "certificate; then run `relevo connect` again")
+
+
+class OutOfDate(ssl.SSLCertVerificationError):
+    """The pinned certificate is out of its validity dates."""
+
+
+def _explained(exc: ssl.SSLCertVerificationError) -> ssl.SSLCertVerificationError:
+    """A refused handshake in Relevo's words when it is about the pinned certificate: out of its
+    dates, or another certificate; else `exc` as it is."""
+    code = getattr(exc, "verify_code", None)
+    if code in _OUT_OF_DATE:
+        return OutOfDate(out_of_date(_OUT_OF_DATE[code]))
+    if code in _OTHER_CERT:
+        return NotPinned(NOT_PINNED)
+    return exc
+
+
+def first_pem_cert(pem: str) -> Optional[str]:
+    """The first certificate of a PEM text (the one trusted, as relevo mcp does), or None."""
+    found = _PEM_CERT.search(pem or "")
+    if not found:
+        return None
+    try:
+        ssl.PEM_cert_to_DER_cert(found.group(0))
+    except ValueError:
+        return None
+    return found.group(0)
+
+
+@functools.lru_cache(maxsize=8)
+def pinned_context(pem: str) -> ssl.SSLContext:
+    """An ssl context that trusts `pem`'s first certificate alone, as relevo mcp does (src/tls.rs):
+    no system or certifi authority, and the server must present that very certificate (not merely
+    one it signed), valid for the URL's host. Partial chains are allowed, so a pinned certificate an
+    office authority signed is trusted on its own. The certificate lives in the context, never on
+    disk."""
+    first = first_pem_cert(pem)
+    if first is None:
+        raise CertError("the certificate to trust is not a PEM certificate; run `relevo connect` again")
+    der = ssl.PEM_cert_to_DER_cert(first)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)  # hostname checked, certificate required
+    ctx.load_verify_locations(cadata=first)
+    ctx.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+    ctx.set_alpn_protocols(["http/1.1"])
+
+    def check(handshake, conn) -> Any:
+        try:
+            done = handshake()
+        except ssl.SSLCertVerificationError as exc:
+            explained = _explained(exc)
+            if explained is not exc:
+                raise explained from exc
+            raise
+        if conn.getpeercert(binary_form=True) != der:
+            raise NotPinned(NOT_PINNED)
+        return done
+
+    # The handshake of both httpx clients (sync: wrap_socket, async: wrap_bio) goes through these, so
+    # nothing, the token included, is sent before the certificate is compared.
+    class _Socket(ssl.SSLSocket):
+        def do_handshake(self, *args: Any, **kw: Any) -> Any:
+            return check(lambda: super(_Socket, self).do_handshake(*args, **kw), self)
+
+    class _Object(ssl.SSLObject):
+        def do_handshake(self) -> Any:
+            return check(lambda: super(_Object, self).do_handshake(), self)
+
+    ctx.sslsocket_class = _Socket
+    ctx.sslobject_class = _Object
+    return ctx
+
+
+def _certificate(saved: dict, url: str) -> tuple[str, str]:
+    """(the certificate to trust, a problem): the file RELEVO_CERT names, whatever the server, else the
+    `cert` saved with this very URL (not for another server). A problem when it cannot be used."""
+    from gateway.platforms._shared import get_scoped_secret
+
+    named = str(get_scoped_secret("RELEVO_CERT", "") or "").strip()
+    if named:
+        try:
+            pem = Path(named).expanduser().read_text(encoding="utf-8")
+        except (OSError, ValueError) as exc:
+            return "", f"reading RELEVO_CERT {named}: {type(exc).__name__}"
+        if first_pem_cert(pem) is None:
+            return "", f"RELEVO_CERT {named} is not a PEM certificate"
+        return pem, ""
+    pem = saved.get("cert")
+    if not isinstance(pem, str) or not pem or str(saved.get("url") or "").strip().rstrip("/") != url:
+        return "", ""
+    if first_pem_cert(pem) is None:
+        return "", f"the certificate saved in {saved_config_path()} is not a PEM certificate; run `relevo connect` again"
+    return pem, ""
 
 
 def _saved_config() -> dict:
@@ -158,7 +293,8 @@ def resolve_settings(extra: Optional[dict] = None, *, session: Optional[str] = N
     """The server and token as a pair: RELEVO_URL and RELEVO_TOKEN (profile-scoped env, or the
     platform's config.yaml extra) when both are set there, otherwise both from the file `relevo
     connect` writes. Never one from each: a token only goes to the server it came with.
-    RELEVO_CONTEXT sets the context; without it the session is general.
+    RELEVO_CONTEXT sets the context; without it the session is general. The certificate to trust
+    is the file RELEVO_CERT names, else the one saved with that same URL.
 
     One set without the other is named in `unpaired` and logged once: the gateway platform
     refuses it, and the tools fall back to the saved pair."""
@@ -168,19 +304,21 @@ def resolve_settings(extra: Optional[dict] = None, *, session: Optional[str] = N
     token = str(extra_or_secret(extra, "token", "RELEVO_TOKEN") or "").strip()
     unpaired = ("RELEVO_URL" if url else "RELEVO_TOKEN") if bool(url) != bool(token) else ""
     source = CONFIGURED_HERE
+    saved = _saved_config()
     if not (url and token):
-        saved = _saved_config()
         url = str(saved.get("url") or "").strip()
         token = str(saved.get("token") or "").strip()
         source = str(saved_config_path())
+    url = url.rstrip("/")
+    cert, cert_problem = _certificate(saved, url) if url else ("", "")
     if unpaired and unpaired not in _warned_unpaired:
         _warned_unpaired.add(unpaired)
         logger.warning("relevo: %s is set (env or config.yaml) without %s; the server and token come as "
                        "a pair, so neither is used from there (the gateway platform will not start; the "
                        "tools use %s)", unpaired, partner(unpaired), saved_config_path())
     context = str(extra_or_secret(extra, "context", "RELEVO_CONTEXT") or "").strip()
-    return Settings(url=url.rstrip("/"), token=token, context=context, session=session or session_id(),
-                    source=source, unpaired=unpaired)
+    return Settings(url=url, token=token, context=context, session=session or session_id(),
+                    source=source, unpaired=unpaired, cert=cert, cert_problem=cert_problem)
 
 
 def partner(name: str) -> str:
@@ -281,7 +419,7 @@ class Api:
     def _call(self, method: str, path: str, *, timeout: float = _TIMEOUT, **kw: Any) -> dict:
         import httpx
 
-        with httpx.Client(timeout=timeout) as http:
+        with httpx.Client(timeout=timeout, verify=self.settings.verify()) as http:
             return _parse(http.request(**self._request(method, path, **kw)))
 
     def inbox(self, *, all_: bool = False) -> dict:
@@ -327,10 +465,32 @@ class Api:
             return _parse(await http.request(**req, timeout=_TIMEOUT))
 
 
+def _cert_refusal(exc: BaseException) -> Optional[str]:
+    """Why the server's certificate was refused, when that is what `exc` comes from: the pinned
+    certificate's own words, or OpenSSL's reason (a host the certificate does not name, say)."""
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, NotPinned):
+            return NOT_PINNED
+        if isinstance(exc, OutOfDate):
+            return str(exc.args[0])
+        if isinstance(exc, ssl.SSLCertVerificationError):
+            return f"the server's certificate was refused: {exc.verify_message or exc.reason or 'not trusted'}"
+        exc = exc.__cause__ or exc.__context__
+    return None
+
+
 def describe_error(exc: BaseException) -> str:
-    """What may be logged about a failure: the server's code, or the exception type. Never a token."""
+    """What may be logged about a failure: the server's code, or the exception type, with why a
+    certificate was refused or could not be used. Never a token."""
     if isinstance(exc, RelevoError):
         return f"{exc.code} (HTTP {exc.status})"
+    if isinstance(exc, CertError):
+        return f"{type(exc).__name__}: {exc}"
+    refused = _cert_refusal(exc)
+    if refused:
+        return f"{type(exc).__name__}: {refused}"
     return type(exc).__name__
 
 
