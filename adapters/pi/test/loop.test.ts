@@ -308,7 +308,7 @@ test("the rules go into the system prompt only when configured", async () => {
   assert.match(event.systemPromptOptions.sections.relevo, /^You speak for @oscar: in Relevo `you` is "oscar"/);
   assert.match(RULES, /<untrusted>/);
 
-  // The same eight rules (v5), word for word, as docs/agents.md gives every adapter
+  // The same eight rules (v6), word for word, as docs/agents.md gives every adapter
   // (the docs put the tag in Markdown code; the prompt, like relevo mcp, does not).
   const doc = readFileSync(join(import.meta.dirname, "..", "..", "..", "docs", "agents.md"), "utf8");
   const documented = [...doc.matchAll(/^  (\d\. .*)$/gm)].map((m) => m[1].replace("`<untrusted>`", "<untrusted>"));
@@ -321,6 +321,9 @@ test("the rules go into the system prompt only when configured", async () => {
   assert.match(RULES, /^4\. [^\n]*Answer a team question only from your own work or your person's files/m);
   assert.match(RULES, /^5\. [^\n]*Facts from your person's documentation or configuration may be shared/m);
   assert.match(RULES, /^6\. [^\n]*mark guesses as guesses\.$/m);
+  assert.match(RULES, /^6\. [^\n]*Write in the first person, as your person would \("I changed…", not "Ana changed…"\)\./m);
+  assert.match(RULES, /^6\. [^\n]*no greeting and no "Re:"\./m);
+  assert.match(RULES, /^7\. [^\n]*Close a thread only when your person asks, or when you asked the question and it is answered\.$/m);
 
   const bare = loadExtension({ env: {}, home });
   const none = { systemPromptOptions: { sections: {} as Record<string, string> } };

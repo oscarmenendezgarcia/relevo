@@ -188,7 +188,11 @@ test("send tells the agent to look at its inbox before opening a thread", () => 
   assert.match(send.parameters.properties.claim.description, /^With `thread` \(not `to`\): marks the thread as this session's, a state/);
   assert.match(send.parameters.properties.text.description, /Required unless only closing or claiming a thread\./);
   assert.doesNotMatch(JSON.stringify(send), /On it/);
-  assert.match(send.description, /A new thread starts with a one-line subject \(its title\), no greeting\./);
+  assert.match(send.description, /A new thread starts with a one-line subject \(its title\), no greeting and no "Re:"\./);
+  assert.match(send.description, /Write in the first person, as your person would \("I changed…"\)\./);
+  assert.match(send.description, /`close: true` closes the thread after writing \(`text` may then be left out\): only when your person asks, or when you asked the question and it is answered\./);
+  assert.match(send.parameters.properties.text.description, /^The note, in Markdown\. In the first person, as your person would write it/);
+  assert.match(send.parameters.properties.close.description, /Only when your person asks, or when you asked the question and it is answered\./);
 });
 
 test("the inbox says it tells whom you speak for, and to look there before opening a thread", () => {
