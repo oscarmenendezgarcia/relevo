@@ -9,6 +9,7 @@ Upgrading from 0.2.x: the protocol changes, and the database moves to layout 6. 
 - A new session starts, in the direct threads still pending, from what the person handled: a note fetched by an agent that died before acting is new at once for the next one.
 - `thread`'s delivery gains `handled_at` and `handled_by`, so the sender tells "seen by pi, not handled yet" from "handled by Claude Code at 19:30".
 - `relevo mcp`: `send` takes `done`; threads show pending and handled; rules v7 (rule 3: a note that is not for you stays pending; one that needs nothing is marked done).
+- pi extension: `relevo_send` takes `done`; threads show pending and handled as `relevo mcp` shows them; rules v7. A pi session that starts is handed at once what is still pending for its person (a note that reached a pi that died before handling it included), oldest first when several come together, and a thread the agent answered, marked done or read whole while it waited its turn is not handed over after.
 
 ## 0.2.1
 
