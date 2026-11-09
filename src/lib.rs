@@ -11,7 +11,9 @@ pub mod db;
 pub mod error;
 pub mod mcp;
 pub mod render;
+pub mod serve;
 pub mod session;
+pub mod tls;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
