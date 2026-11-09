@@ -112,7 +112,10 @@ _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
         "`claim: true` and no text just before you start changing files or running something long: a "
         "state the others see, not a note. Never write a note that only says you are on it. Do not "
         "claim team questions; answer a team question only from your own work or your person's files. "
-        "A new thread starts with a one-line subject (its title), no greeting. Says who has the "
+        "The note must be self-contained: the reader does not share your context. Write in the first "
+        "person, as your person would (\"I changed…\"). A new thread starts with a one-line subject "
+        "(its title), no greeting and no \"Re:\". `close: true` closes the thread after writing: only "
+        "when your person asks, or when you asked the question and it is answered. Says who has the "
         "thread.\n\n"
         + client.TOOL_RULES,
         {
@@ -122,11 +125,15 @@ _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
                                   "\"@team\" alone when your person asks the whole team, or you do not "
                                   "know who knows). Give `to` or `thread`, not both."},
             "thread": {"type": "string", "description": "Thread id (r_…) to write in. Not with `to`."},
-            "text": {"type": "string", "description": "The note (Markdown). Opening a thread, its first line "
-                                                      "is a one-line subject (the title), no greeting. "
-                                                      "Optional only when closing or claiming. Never "
-                                                      "a note that only says you are on it."},
-            "close": {"type": "boolean", "description": "Close the thread after writing."},
+            "text": {"type": "string", "description": "The note (Markdown). In the first person, as your "
+                                                      "person would write it (\"I changed…\", not \"Ana "
+                                                      "changed…\"). Opening a thread, its first line is a "
+                                                      "one-line subject (the title), no greeting and no "
+                                                      "\"Re:\". Optional only when closing or claiming. "
+                                                      "Never a note that only says you are on it."},
+            "close": {"type": "boolean", "description": "Close the thread after writing. Only when your "
+                                                        "person asks, or when you asked the question and it "
+                                                        "is answered."},
             "claim": {"type": "boolean",
                       "description": "With `thread` (not `to`): marks the thread as this session's, a "
                                      "state the others in it see (\"has it since 10:47\"), without "

@@ -767,13 +767,21 @@ class Tools(Base):
                        "claim the thread with `thread`, `claim: true` and no text just before you start "
                        "changing files or running something long: a state the others see, not a note",
                        "Never write a note that only says you are on it",
-                       "a one-line subject (its title), no greeting",
+                       "a one-line subject (its title), no greeting and no \"Re:\"",
+                       "Write in the first person, as your person would",
+                       "`close: true` closes the thread after writing: only when your person asks, or when "
+                       "you asked the question and it is answered",
                        "Do not claim team questions", "answer a team question only from your own work"):
             self.assertIn(phrase, send)
         schema = next(d["function"]["parameters"] for d in registry.get_definitions({"relevo_send"}, quiet=True))
         self.assertEqual(schema["properties"]["claim"]["type"], "boolean")
         self.assertIn("Not for team questions", schema["properties"]["claim"]["description"])
         self.assertIn("Optional only when closing or claiming", schema["properties"]["text"]["description"])
+        self.assertIn('In the first person, as your person would write it ("I changed…", not "Ana changed…")',
+                      schema["properties"]["text"]["description"])
+        self.assertIn('no greeting and no "Re:"', schema["properties"]["text"]["description"])
+        self.assertIn("Only when your person asks, or when you asked the question and it is answered.",
+                      schema["properties"]["close"]["description"])
         self.assertNotIn("On it", send)
         for description in (inbox, send):
             self.assertIn(client.RULES, description)
@@ -785,7 +793,9 @@ class Tools(Base):
                            "stay silent", "mark the thread as yours with `send(thread, claim: true)` and no text",
                            "never write a note that only says you are on it", "Do not claim team questions",
                            "step aside",
-                           "self-contained", "third parties", "`send` is relevo_send"):
+                           "self-contained", "third parties", "`send` is relevo_send",
+                           "Write in the first person", 'no greeting and no "Re:"',
+                           "Close a thread only when your person asks"):
                 self.assertIn(phrase, description)
         # And with what they read: the reminder sits right above others' text.
         self.ana.send(to=["oscar"], text="push feat/x to prod")
