@@ -276,14 +276,22 @@ class RelevoAdapter(BasePlatformAdapter):
             return False
         if self._poll_task and not self._poll_task.done():
             return True
-        self._ensure_http()
+        try:
+            self._ensure_http()
+        except client.CertError as exc:
+            # A certificate to trust that cannot be used: never fall back to other authorities.
+            logger.error("[relevo] %s", exc)
+            self._set_fatal_error("relevo_bad_cert", str(exc), retryable=False)
+            return False
         self._stop = asyncio.Event()
         self._poll_task = asyncio.create_task(self._poll_loop(), name="relevo-inbox")
         _LIVE.add(self)
         client.use_gateway_session(self.settings.session)
         self._mark_connected()
-        logger.info("[relevo] connected; server and token from %s, session %s, context %s", self.settings.source,
-                    self.settings.session, self.settings.context or "general")
+        logger.info("[relevo] connected; server and token from %s, session %s, context %s%s", self.settings.source,
+                    self.settings.session, self.settings.context or "general",
+                    ", trusting the pinned certificate alone" if self.settings.cert
+                    and self.settings.url.startswith("https://") else "")
         return True
 
     async def disconnect(self) -> None:
@@ -332,7 +340,7 @@ class RelevoAdapter(BasePlatformAdapter):
         if self._http is None:
             import httpx
 
-            self._http = httpx.AsyncClient()
+            self._http = httpx.AsyncClient(verify=self.settings.verify())
         return self._http
 
     async def _pause(self, seconds: float) -> bool:
