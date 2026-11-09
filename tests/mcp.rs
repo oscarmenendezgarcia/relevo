@@ -1371,6 +1371,12 @@ async fn over_tls_connect_pins_the_certificate_and_mcp_uses_it() {
     assert!(!out.ok);
     assert!(out.stderr.contains(&served.fingerprint), "{}", out.stderr);
     assert!(out.stderr.contains("--fingerprint"), "{}", out.stderr);
+    // And what trusting another certificate would do.
+    assert!(
+        out.stderr.contains("would send them your token"),
+        "{}",
+        out.stderr
+    );
     assert!(!file.exists());
 
     // A wrong fingerprint: refused, nothing saved.

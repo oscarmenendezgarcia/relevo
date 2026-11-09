@@ -198,7 +198,10 @@ async fn trust(url: &str, given: Option<&str>) -> Result<Option<String>> {
         eprintln!(
             "No authority this machine trusts vouches for the server's certificate.\n\
              Its SHA-256 fingerprint is\n  {fingerprint}\n\
-             Compare it with the one the server printed (relevo tls-fingerprint on the server)."
+             Compare it with the one the server's owner sent you (relevo tls-fingerprint on the \
+             server) through a channel you trust. If it differs, someone may be between you and \
+             the server: trusting it would send them your token, and from then on your agents \
+             would trust them alone."
         );
         if !std::io::stdin().is_terminal() {
             bail!(
