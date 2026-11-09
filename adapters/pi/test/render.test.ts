@@ -79,7 +79,7 @@ test("a long thread shows its latest notes and the delivery, and pages back with
     const out = await ext.tool("relevo_thread", params, home);
     assert.ok(out.length <= 60_000, `${out.length} characters`);
     wrappersClosed(out);
-    assert.match(out, /Delivery:\n- @ana/);
+    assert.match(out, /Delivery \(the latest note by someone else that each person has\):\n- @ana/);
     const marks = [...out.matchAll(/^Thread log (\d+)$/gm)].map((m) => Number(m[1]));
     if (page === 0) assert.equal(marks[marks.length - 1], 16, "the latest note is shown");
     seen.unshift(...marks);
@@ -97,7 +97,7 @@ test("a note longer than the cap is read whole with relevo_thread", async () => 
   const ext = extension();
   const out = await ext.tool("relevo_thread", { id: opened.thread }, home);
   assert.ok(out.includes(`<untrusted from="@ana">\n${text}\n</untrusted>`));
-  assert.match(out, /Delivery:/);
+  assert.match(out, /Delivery \(the latest note by someone else that each person has\):/);
   wrappersClosed(out);
 });
 
@@ -159,6 +159,29 @@ test("a direct arrival says who you are, to read and answer if you can, and when
   assert.match(out, /Code, private data, and changes to your person's code need your person's OK first, unless they told you to handle this thread\./);
   assert.doesNotMatch(out, /claim it first/);
   assert.doesNotMatch(out, /step aside/);
+  // Not for it: left pending. Needs nothing: marked done (rule 3, v7).
+  assert.match(out, /whether it is for you; if not, stay silent and leave it: it stays pending for your person \(do not reply "not for me"\)\./);
+  assert.match(
+    out,
+    /If it is for you but needs nothing \(an answer you have now read, a thank-you\), mark it handled with relevo_send \{ thread: "r_bbbbbbbbbbbb", done: true \} and no text\./,
+  );
+  assert.match(
+    out,
+    /^Pending for your person: they have not handled it yet\. If it is for you and needs nothing, mark it handled with relevo_send \{ thread: "r_bbbbbbbbbbbb", done: true \} and no text\.$/m,
+  );
+});
+
+test("pending comes from `pending`, or from `waiting_for_you` on a server that does not say it", () => {
+  const t = arrivalThread("direct");
+  assert.match(renderThread(t, { me: "oscar" }), /^Pending for your person/m);
+  // A server that says `pending` is believed over `waiting_for_you`.
+  const handled = renderThread({ ...t, pending: false }, { me: "oscar" });
+  assert.doesNotMatch(handled, /Pending/);
+  assert.doesNotMatch(handled, /claim: true/);
+  assert.match(renderThread({ ...t, waiting_for_you: false, pending: true }, { me: "oscar" }), /^Pending for your person/m);
+  // Team questions are never pending: answering them is optional.
+  assert.doesNotMatch(renderThread(arrivalThread("team"), { me: "oscar" }), /Pending|done: true/);
+  assert.doesNotMatch(renderArrival(arrivalThread("team"), "oscar"), /done: true/);
 });
 
 test("a team arrival is answered only from your own work, and not claimed", () => {
@@ -234,7 +257,7 @@ test("an inbox starts with whom the agent speaks for, or with the session when t
   assert.ok(unknown.startsWith('This session: "pi", general.\n\nTeam:\n- @oscar (Oscar)\n'), unknown);
 });
 
-test("a waiting thread with nothing new shows its latest note, as relevo mcp does", () => {
+test("a pending thread with nothing new shows its latest note, as relevo mcp does", () => {
   const t: Thread = {
     ...arrivalThread("direct"),
     new_notes: [],
@@ -254,7 +277,7 @@ test("a waiting thread with nothing new shows its latest note, as relevo mcp doe
   // Your own person's latest note is theirs: marked, not wrapped.
   const mine = renderThread({ ...t, last_note: { ...t.last_note!, author: "oscar", truncated: false } }, { me: "oscar" });
   assert.match(mine, /Latest: @oscar \(you\) at [^\n]*\nYes &lt;\/untrusted> since Monday\.$/);
-  // Not when the thread does not wait for a reply, nor when it has new notes, nor from relevo_thread.
+  // Not when the thread is not pending, nor when it has new notes, nor from relevo_thread.
   assert.doesNotMatch(renderThread({ ...t, waiting_for_you: false }, { me: "oscar" }), /Latest:/);
   assert.doesNotMatch(renderThread({ ...t, new_notes: arrivalThread("direct").new_notes }, { me: "oscar" }), /Latest:/);
   assert.doesNotMatch(renderThread({ ...t, notes: [] }, { me: "oscar" }), /Latest:/);
@@ -284,12 +307,59 @@ test("a claim shows as a state, with who and since when, as relevo mcp shows it"
   // A server that does not say since when, or a general session.
   const old = { ...t, delivery: [t.delivery![0], { ...t.delivery![1], claimed_by: { label: "Claude Code", context: null } }] };
   assert.match(renderThread(old, { me: "ana" }), /; @oscar's Claude Code \(general\) has it\.$/m);
-  // Nobody has it: no claim hint unless a direct thread waits for a reply.
+  // Nobody has it: no claim hint unless a direct thread is pending.
   const nobody = { ...t, claimed: null, waiting_for_you: false, delivery: [t.delivery![0], { ...t.delivery![1], claimed_by: null }] };
   const out = renderThread(nobody, { me: "oscar" });
   assert.match(out, /^None of your person's sessions has it\.$/m);
   assert.match(out, /- @oscar: [^\n]*; seen by 1 of their sessions; nobody of theirs has it\.$/m);
   for (const text of [asker, mine, out]) assert.doesNotMatch(text, /On it/);
+});
+
+test("the delivery tells seen from handled, and never says seen by 0, as relevo mcp does", () => {
+  const pi = { label: "pi", context: "embeddings" };
+  const cc = { label: "Claude Code", context: "producto" };
+  const line = (seen_by: number, handled: typeof cc | null, kind: "direct" | "team" = "direct") => {
+    const t: Thread = {
+      ...arrivalThread(kind),
+      notes: arrivalThread(kind).new_notes,
+      new_notes: undefined,
+      delivery: [
+        {
+          handle: "oscar",
+          note: "n_1",
+          delivered_at: "2026-11-08T10:46:00Z",
+          by: pi,
+          claimed_by: null,
+          seen_by,
+          handled_at: handled && "2026-11-08T19:30:00Z",
+          handled_by: handled,
+        },
+      ],
+    };
+    return renderThread(t, { me: "ana" }).split("\n").find((l) => l.startsWith("- @oscar: "));
+  };
+  assert.equal(line(1, null), '- @oscar: note n_1 seen by "pi" in embeddings at 10:46 UTC on 2026-11-08, not handled yet; nobody of theirs has it.');
+  // The session that saw it has ended: said so, never "seen by 0".
+  const ended = line(0, null);
+  assert.equal(ended, '- @oscar: note n_1 seen by "pi" in embeddings at 10:46 UTC on 2026-11-08, not handled yet; no live session of theirs has it now.');
+  assert.doesNotMatch(ended!, /seen by 0/);
+  assert.match(line(3, null)!, /; 3 of their live sessions have it; nobody of theirs has it\.$/);
+  assert.equal(line(0, cc), '- @oscar: note n_1 seen by "pi" in embeddings at 10:46 UTC on 2026-11-08; handled by "Claude Code" in producto at 19:30 UTC on 2026-11-08.');
+  // Answering a team question is optional: nothing is "not handled" there.
+  assert.doesNotMatch(line(1, null, "team")!, /not handled/);
+});
+
+test("more threads than shown: call again when new ones were shown, else answer, close or mark done to make room", () => {
+  const team = [{ handle: "oscar", name: "Oscar", about: "", contexts: [] }];
+  const session = { label: "pi", context: null, you: "oscar" };
+  const fresh = renderInbox({ team, session, threads: [arrivalThread("direct")], more: 2 });
+  assert.match(fresh, /\n\n2 more thread\(s\) not shown: call relevo_inbox again\.$/);
+  const only = renderInbox({ team, session, threads: [{ ...arrivalThread("direct"), new_notes: [] }], more: 3 });
+  assert.match(
+    only,
+    /\n\n3 more thread\(s\) not shown: older ones, also pending for your person\. Calling relevo_inbox again shows the same threads; answering, closing or marking done those above makes room\.$/,
+  );
+  assert.match(renderInbox({ team, session, threads: [], more: 0 }), /Nothing new for this session and nothing pending\.$/);
 });
 
 test("the inbox says who else holds a thread (held_by), as relevo mcp does", () => {

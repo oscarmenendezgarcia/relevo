@@ -242,7 +242,7 @@ export function relevoExtension(options: Options = {}) {
       name: "relevo_thread",
       label: "Relevo thread",
       description:
-        "A whole Relevo thread by id: its notes in full, who has seen it and who holds it. Does not claim it. " +
+        "A whole Relevo thread by id: its notes in full, who has seen it, who has handled it and who holds it. Does not claim it. " +
         "A long thread shows its latest notes and says how to read the earlier ones: call again with `before` set to the oldest note id shown.",
       promptSnippet: "Read a whole Relevo thread by id",
       parameters: {
