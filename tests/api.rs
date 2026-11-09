@@ -480,7 +480,8 @@ async fn writing_does_not_skip_notes_that_never_reached_the_writer() {
     let t = team(&["ana", "bob"]);
     let id = t.ok("ana", json!({ "to": ["bob"], "text": "one" })).await;
     t.ok("bob", json!({ "thread": id, "text": "two" })).await;
-    // Ana answers without having fetched "two": it must still reach her.
+    // Ana answers without having fetched "two": it must still reach her, and it stays pending for
+    // her (her answer did not handle a note she never saw).
     t.ok("ana", json!({ "thread": id, "text": "three" })).await;
     let inbox = t.inbox("ana").await;
     let texts: Vec<&str> = inbox["threads"][0]["new_notes"]
@@ -490,7 +491,7 @@ async fn writing_does_not_skip_notes_that_never_reached_the_writer() {
         .map(|n| n["text"].as_str().unwrap())
         .collect();
     assert_eq!(texts, vec!["two", "three"]);
-    assert_eq!(inbox["threads"][0]["waiting_for_you"], false);
+    assert_eq!(inbox["threads"][0]["waiting_for_you"], true);
 }
 
 #[tokio::test]
@@ -1385,15 +1386,16 @@ async fn inbox_order_and_more_hold_over_hundreds_of_threads() {
     for _ in 0..3 {
         inbox_matches(&t, "bob", &mut model).await;
     }
-    // Then: bob replies to some (they leave his inbox), ana writes again in some read and some
-    // unread ones, carl closes one with a last note and asks the team.
+    // Then: bob replies to some (those he had read leave his inbox; one he had not stays
+    // waiting), ana writes again in some read and some unread ones, carl closes one with a last
+    // note and asks the team.
     for i in [299, 250, 10] {
         t.app.clock.advance(1);
         t.ok("bob", json!({ "thread": model[i].id, "text": "done" }))
             .await;
         last += 1;
         model[i].last = last;
-        model[i].waiting = false;
+        model[i].waiting = model[i].new;
     }
     for i in [298, 280, 4, 0] {
         t.app.clock.advance(1);
@@ -1429,7 +1431,8 @@ async fn inbox_order_and_more_hold_over_hundreds_of_threads() {
         inbox_matches(&t, "bob", &mut model).await;
     }
     assert!(model.iter().all(|e| !e.new));
-    assert_eq!(t.inbox("bob").await["more"], 296 - 20);
+    // 300 threads, less the 2 bob answered after reading and the one carl closed, still wait.
+    assert_eq!(t.inbox("bob").await["more"], 297 - 20);
 }
 
 // ---------- sessions ----------
@@ -3264,15 +3267,19 @@ async fn session_inbox_matches(t: &Team, s: usize, all: bool, model: &mut [Model
                     && (context.is_empty()
                         || th.context.is_none_or(|to| context_matches(to, context)))))
     };
-    let mut expected: Vec<(bool, bool, u64, String)> = model
+    // Shown: new (a note by someone else has not reached the session) or waiting; then any note
+    // that has not reached it is in `new_notes`, bob's own included (a waiting thread may hold
+    // one, written by a session that was not caught up).
+    let mut expected: Vec<(bool, bool, u64, String, bool)> = model
         .iter()
         .filter(|th| sees(th))
         .map(|th| {
             let new = th.last_other > th.delivered[s];
             let waiting = th.pending();
-            (new, waiting, th.last, th.id.clone())
+            let unread = th.last > th.delivered[s];
+            (new, waiting, th.last, th.id.clone(), unread)
         })
-        .filter(|(new, waiting, _, _)| *new || *waiting)
+        .filter(|(new, waiting, _, _, _)| *new || *waiting)
         .collect();
     expected.sort_by_key(|e| std::cmp::Reverse((e.0, e.1, e.2)));
     let uri = if all {
@@ -3289,7 +3296,7 @@ async fn session_inbox_matches(t: &Team, s: usize, all: bool, model: &mut [Model
         assert_eq!(shown["pending"], e.1, "{}", e.3);
         assert_eq!(
             shown["new_notes"].as_array().unwrap().is_empty(),
-            !e.0,
+            !e.4,
             "{}",
             e.3
         );
@@ -3389,7 +3396,9 @@ async fn session_inboxes_hold_order_and_more_over_hundreds_of_routed_threads() {
                     th.deliver(s, order);
                 }
                 th.last = order;
-                th.handled = order;
+                // Writing handles what reached the session, its own note included when it was
+                // caught up.
+                th.handled = th.handled.max(th.delivered[s]);
                 // A claim is never taken from another session.
                 th.claimed.get_or_insert(s);
                 seen[s] = now;
@@ -3437,7 +3446,8 @@ async fn session_inboxes_hold_order_and_more_over_hundreds_of_routed_threads() {
                 t.agent("bob", id, context)
                     .ok(json!({ "thread": th.id, "done": true }))
                     .await;
-                th.handled = th.last;
+                // It handles what reached the session, not notes it never got.
+                th.handled = th.handled.max(th.delivered[s]);
                 seen[s] = now;
             }
             // A session ends, with its claims, and starts again: for the threads still pending
@@ -3891,7 +3901,8 @@ async fn done_handles_the_thread_without_a_note() {
 }
 
 #[tokio::test]
-async fn done_without_a_fetch_is_never_limited_idempotent_and_refused_once_closed() {
+async fn done_without_a_fetch_handles_nothing_is_never_limited_idempotent_and_refused_once_closed()
+{
     let t = team(&["ana", "bob"]);
     let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
     for i in 0..19 {
@@ -3908,10 +3919,16 @@ async fn done_without_a_fetch_is_never_limited_idempotent_and_refused_once_close
     assert_eq!(status, StatusCode::OK, "{first}");
     let (_, again) = t.send("bob", body).await;
     assert_eq!(first, again);
-    // Not pending: once its notes have reached the session (they had not), it is gone.
+    // Nothing had reached the session, so it handled nothing: the notes are still pending.
     let v = t.inbox("bob").await;
-    assert_eq!(listed(&v, &id).unwrap()["pending"], false);
+    assert_eq!(listed(&v, &id).unwrap()["pending"], true);
     assert_eq!(new_texts(&v, &id).unwrap().len(), 20);
+    assert_eq!(
+        delivery_of(&t.thread("ana", &id).await, "bob")["handled_at"],
+        Value::Null
+    );
+    // Once they reached it, `done` handles them all: it is gone.
+    t.ok("bob", json!({ "thread": id, "done": true })).await;
     assert!(listed(&t.inbox("bob").await, &id).is_none());
     // Done on a closed thread is a write in a closed thread.
     t.ok("ana", json!({ "thread": id, "close": true })).await;
@@ -4010,4 +4027,74 @@ async fn the_senders_delivery_tells_seen_from_handled() {
     cc.ok(json!({ "thread": id, "text": "And more." })).await;
     let bob = delivery_of(&t.thread("ana", &id).await, "bob").clone();
     assert_eq!(bob["handled_at"], "2026-11-08T10:43:00Z");
+}
+
+#[tokio::test]
+async fn done_or_a_reply_handles_only_what_reached_the_session() {
+    let t = team(&["ana", "bob"]);
+    let id = t
+        .ok(
+            "ana",
+            json!({ "to": ["bob"], "text": "Thanks for the deploy!" }),
+        )
+        .await;
+    let pi = t.agent("bob", "pi-000001", "infra");
+    pi.inbox().await;
+    // A note lands between pi's fetch and its `done`.
+    t.app.clock.advance(30);
+    t.ok(
+        "ana",
+        json!({ "thread": id, "text": "Also: can you rotate the key today?" }),
+    )
+    .await;
+    t.app.clock.advance(30);
+    pi.ok(json!({ "thread": id, "done": true })).await;
+    // The thank-you is handled; the follow-up never reached Bob, so it is still pending.
+    let bob = delivery_of(&t.thread("ana", &id).await, "bob").clone();
+    assert_eq!(bob["handled_at"], "2026-11-08T10:42:00Z");
+    pi.end().await;
+    let next = t.agent("bob", "pi-000002", "infra");
+    let v = next.inbox().await;
+    assert_eq!(listed(&v, &id).unwrap()["pending"], true, "{v}");
+    assert_eq!(
+        new_texts(&v, &id),
+        Some(vec!["Also: can you rotate the key today?".to_string()])
+    );
+    // It reached Bob, but nobody handled it: Ana is not told it was.
+    let th = t.thread("ana", &id).await;
+    let bob = delivery_of(&th, "bob");
+    assert_eq!(bob["note"], th["notes"][1]["id"]);
+    assert_eq!(bob["handled_at"], Value::Null);
+    let v = next.inbox().await;
+    assert_eq!(listed(&v, &id).unwrap()["pending"], true, "{v}");
+
+    // A reply written across a new note handles up to what reached the writer, not past it.
+    t.app.clock.advance(30);
+    t.ok(
+        "ana",
+        json!({ "thread": id, "text": "And the staging one." }),
+    )
+    .await;
+    t.app.clock.advance(30);
+    next.ok(json!({ "thread": id, "text": "Rotated the key." }))
+        .await;
+    let th = t.thread("ana", &id).await;
+    let bob = delivery_of(&th, "bob");
+    assert_eq!(bob["note"], th["notes"][1]["id"]);
+    assert_eq!(bob["handled_at"], "2026-11-08T10:43:00Z");
+    let v = next.inbox().await;
+    let listed_th = listed(&v, &id).unwrap();
+    assert_eq!(listed_th["pending"], true, "{v}");
+    assert_eq!(
+        new_texts(&v, &id),
+        Some(vec![
+            "And the staging one.".to_string(),
+            "Rotated the key.".to_string()
+        ])
+    );
+    // A reply once caught up handles it all.
+    next.ok(json!({ "thread": id, "text": "Staging too." }))
+        .await;
+    assert!(listed(&next.inbox().await, &id).is_none());
+    assert!(listed(&t.agent("bob", "pi-000003", "").inbox().await, &id).is_none());
 }

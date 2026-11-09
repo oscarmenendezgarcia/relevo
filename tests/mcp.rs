@@ -403,6 +403,9 @@ async fn tools_carry_a_conversation_between_sessions() {
         .await;
     assert!(taken.contains("claimed: other-session"), "{taken}");
     assert!(taken.contains("nothing was written"), "{taken}");
+    // Ana's second session reads the question before answering: a note written without having
+    // it would not handle it.
+    ana2.ok("thread", json!({ "id": id })).await;
     let lost = ana2
         .ok("send", json!({ "thread": id, "text": "I can look too." }))
         .await;

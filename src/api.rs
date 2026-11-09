@@ -150,7 +150,8 @@ struct SendRequest {
     /// With `thread`: claims it for this session, without a note when there is no `text`.
     #[serde(default)]
     claim: bool,
-    /// With `thread` and no `text`: the person has handled the thread up to its latest note.
+    /// With `thread` and no `text`: the person has handled the thread up to the latest note that
+    /// reached this session.
     #[serde(default)]
     done: bool,
     key: Option<String>,
@@ -1097,8 +1098,9 @@ fn write_as(
         }
         None => None,
     };
-    // Writing in the thread, closing it or `done` handles it for the writer's person, up to its
-    // latest note. Claiming does not: if the claiming session dies, the note is still pending.
+    // Writing in the thread, closing it or `done` handles it for the writer's person, up to the
+    // latest note that reached this session. Claiming does not: if the claiming session dies,
+    // the note is still pending.
     if note_id.is_some() || req.close || req.done {
         handle(tx, caller, session, &thread_id, now)?;
     }
@@ -1169,8 +1171,11 @@ fn write_as(
     Ok((result, woken))
 }
 
-/// The person has handled the thread up to its latest note. When that covers a note by someone
-/// else they had not handled, it records when and from which session (its context now).
+/// The person has handled the thread up to the latest note that reached this session (after
+/// `deliver` ran for a note it wrote caught up, so that note counts): a note that landed after
+/// the session last looked was never seen there, so writing or `done` cannot handle it. When
+/// that covers a note by someone else they had not handled, it records when and from which
+/// session (its context now).
 fn handle(
     tx: &Connection,
     caller: &Caller,
@@ -1178,22 +1183,33 @@ fn handle(
     thread_id: &str,
     now: i64,
 ) -> Result<(), ApiError> {
+    let reached: i64 = tx.query_row(
+        "SELECT coalesce(s.delivered_seq, p.delivered_seq, 0)
+         FROM participants p
+         LEFT JOIN session_threads s ON s.session_id = ?3 AND s.thread_id = p.thread_id
+         WHERE p.thread_id = ?1 AND p.person_id = ?2",
+        params![thread_id, caller.person_id, session.id],
+        |r| r.get(0),
+    )?;
     tx.execute(
         "UPDATE participants SET
-             handled_at = CASE WHEN coalesce(handled_seq, 0) < last_other_seq
-                               THEN ?3 ELSE handled_at END,
-             handled_label = CASE WHEN coalesce(handled_seq, 0) < last_other_seq
-                                  THEN ?4 ELSE handled_label END,
-             handled_context = CASE WHEN coalesce(handled_seq, 0) < last_other_seq
-                                    THEN ?5 ELSE handled_context END,
-             handled_seq = (SELECT max(seq) FROM notes WHERE thread_id = ?1)
+             handled_at = CASE WHEN covers THEN ?3 ELSE handled_at END,
+             handled_label = CASE WHEN covers THEN ?4 ELSE handled_label END,
+             handled_context = CASE WHEN covers THEN ?5 ELSE handled_context END,
+             handled_seq = nullif(max(coalesce(handled_seq, 0), ?6), 0)
+         FROM (SELECT EXISTS (
+                   SELECT 1 FROM notes n, participants q
+                   WHERE q.thread_id = ?1 AND q.person_id = ?2
+                     AND n.thread_id = ?1 AND n.author_id != ?2
+                     AND n.seq > coalesce(q.handled_seq, 0) AND n.seq <= ?6) AS covers)
          WHERE thread_id = ?1 AND person_id = ?2",
         params![
             thread_id,
             caller.person_id,
             now,
             session.label,
-            session.context
+            session.context,
+            reached
         ],
     )?;
     Ok(())
