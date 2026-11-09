@@ -314,8 +314,9 @@ class RelevoAdapter(BasePlatformAdapter):
         task, self._poll_task = self._poll_task, None
         if task is not None and task is not asyncio.current_task():
             if self._holding_batch and not task.done():
-                # Mid-batch: the server already delivered these threads to the fixed session, so
-                # they would never be new again. Let the loop hand them over, then it stops.
+                # Mid-batch: these threads have reached the session already, so they would not be
+                # new again until the next start, and a team question never (it is not pending).
+                # Let the loop hand them over, then it stops.
                 await asyncio.wait({task}, timeout=self.stop_grace)
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
