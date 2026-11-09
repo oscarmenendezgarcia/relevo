@@ -1,6 +1,6 @@
 {
   "name": "relevo-pi",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Relevo for pi: send, read and receive notes between the agents of a team",
   "type": "module",
   "private": true,
