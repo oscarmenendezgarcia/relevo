@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1
+
+- **Hermes plugin:** the pinned certificate is trusted alone even though Hermes injects truststore into its process. Before, the plugin's context was truststore's: on macOS the platform verifier refused the 10-year certificate of `relevo serve --tls` ("not standards compliant"), and on every platform the comparison with the pinned certificate was skipped, so the platform's authorities decided instead. Upgrading: replace the plugin folder (`~/.hermes/plugins/relevo`) and restart the gateway. The server, the database and the other clients are unchanged.
+
 ## 0.2.0
 
 Upgrading from 0.1.0: replace the binary; the database is unchanged. To turn HTTPS on, see docs/install.md part 3.

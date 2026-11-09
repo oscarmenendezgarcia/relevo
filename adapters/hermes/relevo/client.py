@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import re
+import _ssl
 import ssl
 import uuid
 from dataclasses import dataclass
@@ -162,6 +163,18 @@ def first_pem_cert(pem: str) -> Optional[str]:
     return found.group(0)
 
 
+def _stdlib_context_class() -> type[ssl.SSLContext]:
+    """The stdlib's ssl.SSLContext, even when truststore was injected into the process (Hermes does it
+    at start, agent/ssl_verify.py). truststore's context also asks the platform verifier, so on macOS
+    the pinned certificate would have to pass Apple's rules too (it refuses one valid for more than 825
+    days). Hermes builds its own explicit-bundle contexts the same way."""
+    if ssl.SSLContext.__module__ == "ssl":
+        return ssl.SSLContext
+    from truststore._ssl_constants import _original_SSLContext
+
+    return _original_SSLContext
+
+
 @functools.lru_cache(maxsize=8)
 def pinned_context(pem: str) -> ssl.SSLContext:
     """An ssl context that trusts `pem`'s first certificate alone, as relevo mcp does (src/tls.rs):
@@ -173,9 +186,13 @@ def pinned_context(pem: str) -> ssl.SSLContext:
     if first is None:
         raise CertError("the certificate to trust is not a PEM certificate; run `relevo connect` again")
     der = ssl.PEM_cert_to_DER_cert(first)
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)  # hostname checked, certificate required
+    # The stdlib's class, never truststore's: the pinned certificate alone decides, on every platform.
+    ctx = _stdlib_context_class()(ssl.PROTOCOL_TLS_CLIENT)  # hostname checked, certificate required
     ctx.load_verify_locations(cadata=first)
-    ctx.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+    # Through the C base class: once truststore is injected, ssl.SSLContext's own property setters look
+    # up the global name SSLContext (now truststore's) and recurse.
+    flags = _ssl._SSLContext.verify_flags
+    flags.__set__(ctx, flags.__get__(ctx) | ssl.VERIFY_X509_PARTIAL_CHAIN)
     ctx.set_alpn_protocols(["http/1.1"])
 
     def check(handshake, conn) -> Any:
