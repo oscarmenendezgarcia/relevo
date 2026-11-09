@@ -2087,6 +2087,75 @@ async fn closing_without_text_does_not_claim() {
     assert_eq!(pagos.thread(&id).await["claimed"], Value::Null);
 }
 
+#[tokio::test]
+async fn inbox_threads_say_who_else_holds_them() {
+    let t = team(&["ana", "bob", "carl"]);
+    let second = db::add_token(&t.app.db(), "bob", "Codex desktop", T0).unwrap();
+    let ana = t.agent("ana", "term-ana", "web");
+    let pagos = t.agent("bob", "term-pagos", "pagos-api");
+    let codex = Agent {
+        app: t.app.clone(),
+        token: second.secret,
+        headers: vec![
+            ("relevo-session".into(), "codex-front".into()),
+            ("relevo-context".into(), "frontend".into()),
+        ],
+    };
+    let id = ana.ok(json!({ "to": ["bob", "carl"], "text": "q" })).await;
+    // Nobody holds it yet.
+    let inbox = pagos.inbox().await;
+    assert_eq!(inbox["threads"][0]["held_by"], json!([]), "{inbox}");
+    // Bob's agent answers from pagos-api at 10:47: the asker sees who is on it, with the
+    // session's label and context and since when, without opening the thread.
+    t.app.clock.advance(6 * 60);
+    pagos.ok(json!({ "thread": id, "text": "Looking." })).await;
+    let bob_holds = json!({ "handle": "bob", "label": "laptop", "context": "pagos-api",
+                           "since": "2026-11-08T10:47:00Z" });
+    let inbox = ana.inbox().await;
+    assert_eq!(thread_ids(&inbox), vec![id.clone()]);
+    assert_eq!(
+        inbox["threads"][0]["held_by"],
+        json!([bob_holds]),
+        "{inbox}"
+    );
+    // `thread` returns the same object.
+    assert_eq!(ana.thread(&id).await["held_by"], json!([bob_holds]));
+    // Carl claims too, later: in participant order, since when each holds it.
+    t.app.clock.advance(60);
+    t.agent("carl", "term-carl", "")
+        .ok(json!({ "thread": id, "claim": true }))
+        .await;
+    let carl_holds = json!({ "handle": "carl", "label": "laptop", "context": null,
+                            "since": "2026-11-08T10:48:00Z" });
+    let inbox = ana.inbox().await;
+    assert_eq!(
+        inbox["threads"][0]["held_by"],
+        json!([bob_holds, carl_holds]),
+        "{inbox}"
+    );
+    // Ana writing holds it for her, which Bob's sessions see, with her session's context. Only
+    // the others: Bob's own session is in `claimed`, not in `held_by`.
+    ana.ok(json!({ "thread": id, "text": "Thanks." })).await;
+    let ana_holds = json!({ "handle": "ana", "label": "laptop", "context": "web",
+                           "since": "2026-11-08T10:48:00Z" });
+    let held = &codex.inbox_at("/api/inbox?all=1").await["threads"][0];
+    assert_eq!(held["claimed"], "other-session", "{held}");
+    assert_eq!(held["held_by"], json!([ana_holds, carl_holds]), "{held}");
+    let held = &pagos.inbox().await["threads"][0];
+    assert_eq!(held["claimed"], "this-session", "{held}");
+    assert_eq!(held["held_by"], json!([ana_holds, carl_holds]), "{held}");
+    // Live claims only: once Ana's and Carl's sessions have not been seen for 15 minutes,
+    // theirs are gone, and Bob's, seen since, stays.
+    t.app.clock.advance(LAPSE - 60);
+    pagos.inbox().await;
+    t.app.clock.advance(60);
+    let held = &pagos.inbox().await["threads"][0];
+    assert_eq!(held["held_by"], json!([]), "{held}");
+    let inbox = ana.inbox().await;
+    assert_eq!(inbox["threads"], json!([]), "{inbox}");
+    assert_eq!(ana.thread(&id).await["held_by"], json!([bob_holds]));
+}
+
 // ---------- claiming without a note ----------
 
 #[tokio::test]

@@ -97,6 +97,15 @@ struct ClaimOut {
     since: String,
 }
 
+/// Another participant who holds the thread now: whose session, its context when it claimed it,
+/// and since when.
+#[derive(Serialize)]
+struct HolderOut {
+    handle: String,
+    #[serde(flatten)]
+    claim: ClaimOut,
+}
+
 #[derive(Serialize)]
 struct ThreadOut {
     id: String,
@@ -108,6 +117,8 @@ struct ThreadOut {
     waiting_for_you: bool,
     context: Option<String>,
     claimed: Option<&'static str>,
+    /// The other participants who hold the thread now.
+    held_by: Vec<HolderOut>,
     /// In `inbox`: the thread's latest note, whoever wrote it and whether or not it reached
     /// this session.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -551,6 +562,7 @@ fn thread_out(
         waiting_for_you: row.waiting,
         context: row.context.clone(),
         claimed: claim(row.claimed_by, session),
+        held_by: held_by(conn, &row.id, session.person_id)?,
         last_note: None,
         new_notes: None,
         notes: None,
@@ -568,6 +580,35 @@ fn claim(claimed_by: Option<i64>, session: &Session) -> Option<&'static str> {
             "other-session"
         }
     })
+}
+
+/// The live claims of the participants of thread `?1` other than person `?2`, in participant
+/// order: the thread's participant rows by their key, and each holder's session, token and handle
+/// by theirs. (Lapsed claims were ended when the request was seen.)
+const HELD_BY_SQL: &str = "
+SELECT pe.handle, tk.label, p.claimed_context, p.claimed_at
+FROM participants p
+JOIN sessions cs ON cs.id = p.claimed_by
+JOIN tokens tk ON tk.id = cs.token_id
+JOIN people pe ON pe.id = p.person_id
+WHERE p.thread_id = ?1 AND p.person_id != ?2
+ORDER BY p.rowid";
+
+fn held_by(conn: &Connection, thread: &str, me: i64) -> Result<Vec<HolderOut>, ApiError> {
+    let rows = conn
+        .prepare_cached(HELD_BY_SQL)?
+        .query_map(params![thread, me], |r| {
+            Ok(HolderOut {
+                handle: r.get(0)?,
+                claim: ClaimOut {
+                    label: r.get(1)?,
+                    context: r.get(2)?,
+                    since: rfc3339(r.get(3)?),
+                },
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows)
 }
 
 /// For each participant, in order: the latest note by someone else that reached one of their
@@ -1252,7 +1293,7 @@ fn title_of(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{NOTE_AT_SQL, NOTE_COLUMNS, count_sql, page_sqls, title_of};
+    use super::{HELD_BY_SQL, NOTE_AT_SQL, NOTE_COLUMNS, count_sql, page_sqls, title_of};
     use rusqlite::types::Value as SqlValue;
 
     fn plan(sql: &str) -> Vec<String> {
@@ -1357,6 +1398,27 @@ mod tests {
             plan[1].starts_with("SEARCH a USING INTEGER PRIMARY KEY"),
             "{plan:#?}"
         );
+    }
+
+    /// `held_by` reads one thread's participant rows by their key, and each holder's session,
+    /// token and person by theirs: never the claims of other threads.
+    #[test]
+    fn held_by_reads_the_threads_rows_by_key() {
+        let plan = plan(HELD_BY_SQL);
+        assert!(
+            plan[0]
+                .starts_with("SEARCH p USING INDEX sqlite_autoindex_participants_1 (thread_id=?"),
+            "{plan:#?}"
+        );
+        for table in ["cs", "tk", "pe"] {
+            assert!(
+                plan.iter()
+                    .any(|s| s.starts_with(&format!("SEARCH {table} USING"))
+                        && (s.contains("PRIMARY KEY") || s.contains("autoindex"))),
+                "{table}: {plan:#?}"
+            );
+        }
+        assert!(!plan.iter().any(|s| s.starts_with("SCAN")), "{plan:#?}");
     }
 
     #[test]
