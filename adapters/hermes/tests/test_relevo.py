@@ -700,6 +700,27 @@ class Tools(Base):
         self.assertIn("@oscar's Hermes (general) has it since", client.render_thread(
             self.ana.thread(opened["thread"]), "ana"))
 
+    def test_the_inbox_says_who_else_holds_each_thread(self):
+        """`held_by`: one line per teammate who holds it, as a state, as relevo mcp's inbox says it."""
+        sent = tools.relevo_send({"to": ["ana", "bob"], "text": "# Refunds export\nCan one of you rerun it?"})
+        thread_id = sent.split(" in thread ")[1].split(" ")[0]
+        self.ana.inbox()
+        self.ana.send(thread=thread_id, claim=True)
+        self.bob.inbox()
+        self.bob.send(thread=thread_id, text="Ana is on it; I can check the numbers after.")
+        inbox = tools.relevo_inbox({})
+        block = inbox[inbox.index(f"Thread {thread_id}"):]
+        self.assertRegex(block, r"\nNone of your person's sessions has it\..*\n"
+                                r"@ana's Claude Code \(general\) has it since \d\d:\d\d UTC on \d{4}-\d\d-\d\d\.\n"
+                                r"@bob's pi \(general\) has it since \d\d:\d\d UTC on \d{4}-\d\d-\d\d\.\n")
+        # relevo_thread says it in its delivery, once.
+        whole = tools.relevo_thread({"id": thread_id})
+        self.assertEqual(whole.count("@ana's Claude Code (general) has it"), 1, whole)
+        # Nobody else holds it: no such line.
+        quiet = client.render_thread_head({"id": "r_1", "kind": "direct", "status": "open", "from": "ana",
+                                           "participants": ["ana", "oscar"], "held_by": []}, "oscar")
+        self.assertNotIn(" has it since", quiet)
+
     def test_who_you_are_comes_from_the_server_even_before_any_inbox(self):
         opened = self.ana.send(to=["oscar"], text="Can you look at the refunds cron?")
         tools.relevo_send({"thread": opened["thread"], "text": "Yes: it runs at 03:00 UTC."})

@@ -439,6 +439,12 @@ def render_thread_head(thread: dict, me: Optional[str] = None, *, claim_hint: bo
         joined = "; ".join(facts)
         lines.append(joined[0].upper() + joined[1:] + ".")
     lines.append(_holder(thread, me, claim_hint))
+    # Who else in the thread holds it (`held_by`, from the inbox): relevo_thread's delivery says it
+    # for every participant already.
+    if "delivery" not in thread:
+        for h in thread.get("held_by") or []:
+            if isinstance(h, dict):
+                lines.append(f"{claim_state(h.get('handle'), h)}.")
     return "\n".join(lines)
 
 
