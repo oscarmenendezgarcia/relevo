@@ -22,6 +22,7 @@ import os
 import re
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -1428,6 +1429,26 @@ class Tls(Base):
         b = self.make_adapter()
         self.assertFalse(await b.connect())
         self.assertIn("reading RELEVO_CERT", b.fatal_error_message)
+
+    def test_a_pinned_certificate_out_of_its_dates_says_so_as_relevo_mcp_does(self):
+        # What the handshake raises for the pinned certificate itself once it has expired, or before
+        # it is valid (OpenSSL checks the dates; relevo mcp checks them too).
+        def refused(code: int, message: str) -> ssl.SSLCertVerificationError:
+            exc = ssl.SSLCertVerificationError(1, f"[SSL: CERTIFICATE_VERIFY_FAILED] {message}")
+            exc.verify_code, exc.verify_message = code, message
+            return exc
+
+        expired = client._cert_refusal(client._explained(refused(10, "certificate has expired")))
+        self.assertEqual(expired, client.out_of_date("has expired"))
+        self.assertTrue(expired.endswith(
+            "expired: the server needs a new certificate; then run `relevo connect` again"), expired)
+        early = client._cert_refusal(client._explained(refused(9, "certificate is not yet valid")))
+        self.assertEqual(early, client.out_of_date("is not valid yet"))
+        # Another certificate is still not the pinned one; another refusal keeps OpenSSL's reason.
+        self.assertEqual(client._cert_refusal(client._explained(refused(18, "self-signed"))), client.NOT_PINNED)
+        other = refused(62, "hostname mismatch")
+        self.assertIs(client._explained(other), other)
+        self.assertIn("hostname mismatch", client._cert_refusal(other))
 
     def test_an_office_authority_s_certificate_is_trusted_on_its_own_and_the_authority_alone_is_not(self):
         office = _office_certificates()

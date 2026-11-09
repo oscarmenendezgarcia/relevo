@@ -124,6 +124,32 @@ class NotPinned(ssl.SSLCertVerificationError):
     """The server presented another certificate than the pinned one."""
 
 
+# OpenSSL's verify results for the pinned certificate out of its validity dates (X509_V_ERR_*:
+# not yet valid, has expired), which relevo mcp refuses too (src/tls.rs).
+_OUT_OF_DATE = {9: "is not valid yet", 10: "has expired"}
+
+
+def out_of_date(why: str) -> str:
+    """What every client says of the pinned certificate out of its dates, as relevo mcp says it."""
+    return (f"the server's certificate, the one `relevo connect` saved, {why}: the server needs a new "
+            "certificate; then run `relevo connect` again")
+
+
+class OutOfDate(ssl.SSLCertVerificationError):
+    """The pinned certificate is out of its validity dates."""
+
+
+def _explained(exc: ssl.SSLCertVerificationError) -> ssl.SSLCertVerificationError:
+    """A refused handshake in Relevo's words when it is about the pinned certificate: out of its
+    dates, or another certificate; else `exc` as it is."""
+    code = getattr(exc, "verify_code", None)
+    if code in _OUT_OF_DATE:
+        return OutOfDate(out_of_date(_OUT_OF_DATE[code]))
+    if code in _OTHER_CERT:
+        return NotPinned(NOT_PINNED)
+    return exc
+
+
 def first_pem_cert(pem: str) -> Optional[str]:
     """The first certificate of a PEM text (the one trusted, as relevo mcp does), or None."""
     found = _PEM_CERT.search(pem or "")
@@ -156,8 +182,9 @@ def pinned_context(pem: str) -> ssl.SSLContext:
         try:
             done = handshake()
         except ssl.SSLCertVerificationError as exc:
-            if getattr(exc, "verify_code", None) in _OTHER_CERT:
-                raise NotPinned(NOT_PINNED) from exc
+            explained = _explained(exc)
+            if explained is not exc:
+                raise explained from exc
             raise
         if conn.getpeercert(binary_form=True) != der:
             raise NotPinned(NOT_PINNED)
@@ -446,6 +473,8 @@ def _cert_refusal(exc: BaseException) -> Optional[str]:
         seen.add(id(exc))
         if isinstance(exc, NotPinned):
             return NOT_PINNED
+        if isinstance(exc, OutOfDate):
+            return str(exc.args[0])
         if isinstance(exc, ssl.SSLCertVerificationError):
             return f"the server's certificate was refused: {exc.verify_message or exc.reason or 'not trusted'}"
         exc = exc.__cause__ or exc.__context__

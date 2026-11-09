@@ -26,7 +26,20 @@ const OTHER_CERT = new Set([
   "CERT_REJECTED",
 ]);
 
-function explained(err: Error & { code?: string }): Error {
+/** The pinned certificate out of its validity dates, as relevo mcp says it (src/tls.rs). */
+export const outOfDate = (why: string) =>
+  `the server's certificate, the one \`relevo connect\` saved, ${why}: the server needs a new certificate; then run \`relevo connect\` again`;
+
+/** What OpenSSL says when the chain leads to the pinned certificate but it is out of its dates. */
+const OUT_OF_DATE: Record<string, string> = {
+  CERT_HAS_EXPIRED: "has expired",
+  CERT_NOT_YET_VALID: "is not valid yet",
+};
+
+/** `err` from a request, said in Relevo's words when it is about the pinned certificate. */
+export function explained(err: Error & { code?: string }): Error {
+  const why = err.code ? OUT_OF_DATE[err.code] : undefined;
+  if (why) return Object.assign(new Error(outOfDate(why), { cause: err }), { code: "RELEVO_OUT_OF_DATE" });
   if (!err.code || !OTHER_CERT.has(err.code)) return err;
   return Object.assign(new Error(NOT_PINNED, { cause: err }), { code: "RELEVO_NOT_PINNED" });
 }

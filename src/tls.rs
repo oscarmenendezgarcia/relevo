@@ -383,6 +383,93 @@ impl std::fmt::Display for NotPinned {
 
 impl std::error::Error for NotPinned {}
 
+/// Why a pinned certificate, the server's own, was refused: out of its validity dates, as
+/// OpenSSL (pi, Hermes) refuses it too.
+struct OutOfDate(&'static str);
+
+impl std::fmt::Debug for OutOfDate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+impl std::fmt::Display for OutOfDate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the server's certificate, the one `relevo connect` saved, {}: the server needs a \
+             new certificate; then run `relevo connect` again",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for OutOfDate {}
+
+/// A certificate's validity (DER): its notBefore and notAfter, in Unix seconds.
+fn validity(cert: &[u8]) -> Option<(i64, i64)> {
+    /// The first DER element of `d`: its tag, its contents, and what follows it.
+    fn element(d: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+        let (&tag, d) = d.split_first()?;
+        let (&len, mut d) = d.split_first()?;
+        let len = if len < 0x80 {
+            usize::from(len)
+        } else {
+            let n = usize::from(len & 0x7f);
+            if n == 0 || n > 4 || d.len() < n {
+                return None;
+            }
+            let (bytes, rest) = d.split_at(n);
+            d = rest;
+            bytes.iter().fold(0, |v, &b| (v << 8) | usize::from(b))
+        };
+        (d.len() >= len).then(|| (tag, &d[..len], &d[len..]))
+    }
+    /// UTCTime (0x17, `YYMMDDHHMMSSZ`) or GeneralizedTime (0x18, `YYYYMMDDHHMMSSZ`).
+    fn moment(tag: u8, text: &[u8]) -> Option<i64> {
+        let text = std::str::from_utf8(text).ok()?.strip_suffix('Z')?;
+        let (year, rest) = match tag {
+            0x17 => {
+                let yy: i32 = text.get(..2)?.parse().ok()?;
+                (if yy >= 50 { 1900 + yy } else { 2000 + yy }, &text[2..])
+            }
+            0x18 => (text.get(..4)?.parse().ok()?, &text[4..]),
+            _ => return None,
+        };
+        if rest.len() != 10 || !rest.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let two = |i: usize| rest[i..i + 2].parse::<u8>().ok();
+        let month = time::Month::try_from(two(0)?).ok()?;
+        let date = time::Date::from_calendar_date(year, month, two(2)?).ok()?;
+        let at = time::Time::from_hms(two(4)?, two(6)?, two(8)?).ok()?;
+        Some(
+            time::PrimitiveDateTime::new(date, at)
+                .assume_utc()
+                .unix_timestamp(),
+        )
+    }
+    let (0x30, cert, _) = element(cert)? else {
+        return None;
+    };
+    let (0x30, tbs, _) = element(cert)? else {
+        return None;
+    };
+    let (tag, _, mut rest) = element(tbs)?;
+    // [0] version, then the serial number.
+    if tag == 0xa0 {
+        (_, _, rest) = element(rest)?;
+    }
+    let (_, _, rest) = element(rest)?; // the signature algorithm
+    let (_, _, rest) = element(rest)?; // the issuer
+    let (0x30, dates, _) = element(rest)? else {
+        return None;
+    };
+    let (from_tag, from, dates) = element(dates)?;
+    let (until_tag, until, _) = element(dates)?;
+    Some((moment(from_tag, from)?, moment(until_tag, until)?))
+}
+
 impl ServerCertVerifier for Pinned {
     fn verify_server_cert(
         &self,
@@ -390,7 +477,7 @@ impl ServerCertVerifier for Pinned {
         _intermediates: &[CertificateDer<'_>],
         server_name: &ServerName<'_>,
         _ocsp: &[u8],
-        _now: UnixTime,
+        now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
         if end_entity.as_ref() != self.cert.as_ref() {
             return Err(rustls::Error::InvalidCertificate(CertificateError::Other(
@@ -402,7 +489,20 @@ impl ServerCertVerifier for Pinned {
                 CertificateError::NotValidForName,
             ));
         }
-        Ok(ServerCertVerified::assertion())
+        let out_of_date = |why| {
+            rustls::Error::InvalidCertificate(CertificateError::Other(rustls::OtherError(
+                Arc::new(OutOfDate(why)),
+            )))
+        };
+        let now = i64::try_from(now.as_secs()).unwrap_or(i64::MAX);
+        match validity(end_entity) {
+            None => Err(rustls::Error::InvalidCertificate(
+                CertificateError::BadEncoding,
+            )),
+            Some((from, _)) if now < from => Err(out_of_date("is not valid yet")),
+            Some((_, until)) if now > until => Err(out_of_date("has expired")),
+            Some(_) => Ok(ServerCertVerified::assertion()),
+        }
     }
 
     fn verify_tls12_signature(
@@ -546,6 +646,7 @@ impl ServerCertVerifier for Look {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db;
 
     fn tempdir() -> PathBuf {
         let dir = std::env::temp_dir().join(crate::db::random_id("relevo-tls-"));
@@ -613,6 +714,49 @@ mod tests {
 
         assert!(stored_or_new(&dir, &strings(&["not a name"]), default).is_err());
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// A self-signed certificate for `localhost`, valid from `from` to `until` (Unix seconds).
+    fn dated(from: i64, until: i64) -> CertificateDer<'static> {
+        let mut params = rcgen::CertificateParams::new(strings(&["localhost"])).unwrap();
+        params.not_before = time::OffsetDateTime::from_unix_timestamp(from).unwrap();
+        params.not_after = time::OffsetDateTime::from_unix_timestamp(until).unwrap();
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        params.self_signed(&key).unwrap().der().clone()
+    }
+
+    #[test]
+    fn a_pinned_certificate_out_of_its_dates_is_refused() {
+        let day = 86_400;
+        let now = db::now_unix();
+        let check = |cert: &CertificateDer<'static>, at: i64| {
+            let pinned = Pinned {
+                cert: cert.clone(),
+                algorithms: provider().signature_verification_algorithms,
+            };
+            let name = server_name("localhost").unwrap();
+            let at = UnixTime::since_unix_epoch(Duration::from_secs(at as u64));
+            pinned
+                .verify_server_cert(cert, &[], &name, &[], at)
+                .map_err(|e| e.to_string())
+        };
+        let current = dated(now - day, now + day);
+        assert!(check(&current, now).is_ok());
+        // OpenSSL (pi, Hermes) refuses it too.
+        let expired = dated(now - 3 * day, now - day);
+        let err = check(&expired, now).unwrap_err();
+        assert!(
+            err.contains("expired") && err.contains("relevo connect"),
+            "{err}"
+        );
+        let early = dated(now + day, now + 3 * day);
+        let err = check(&early, now).unwrap_err();
+        assert!(err.contains("not valid yet"), "{err}");
+        // Dates past 2049 are written another way (GeneralizedTime).
+        let far = 2_600_000_000; // 2052
+        let long = dated(now - day, far);
+        assert_eq!(validity(&long), Some((now - day, far)));
+        assert!(check(&long, far - 1).is_ok() && check(&long, far + 1).is_err());
     }
 
     #[test]

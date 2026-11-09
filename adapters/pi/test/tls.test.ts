@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
-import { NOT_PINNED } from "../src/pinned.ts";
+import { explained, NOT_PINNED, outOfDate } from "../src/pinned.ts";
 import { loadExtension, until } from "./mock-pi.ts";
 import { api, startServer, type TestServer } from "./server.ts";
 
@@ -100,6 +100,20 @@ test("a server with another certificate than the pinned one is refused, before t
   // And the system's authorities are not asked instead: without a pinned certificate it fails too.
   const plain = loadExtension({ env: { RELEVO_URL: server.url, RELEVO_TOKEN: oscar, RELEVO_CONTEXT: "" }, home });
   await assert.rejects(plain.tool("relevo_inbox", {}, home));
+});
+
+test("a pinned certificate out of its dates says so, as relevo mcp does", () => {
+  // What node:https rejects with for the pinned certificate itself once it has expired, or
+  // before it is valid (OpenSSL checks the dates; relevo mcp checks them too).
+  const expired = explained(Object.assign(new Error("certificate has expired"), { code: "CERT_HAS_EXPIRED" }));
+  assert.equal(expired.message, outOfDate("has expired"));
+  assert.match(expired.message, /expired: the server needs a new certificate; then run `relevo connect` again$/);
+  const early = explained(Object.assign(new Error("certificate is not yet valid"), { code: "CERT_NOT_YET_VALID" }));
+  assert.equal(early.message, outOfDate("is not valid yet"));
+  // Another certificate is still not the pinned one; other errors pass as they are.
+  assert.equal(explained(Object.assign(new Error("x"), { code: "DEPTH_ZERO_SELF_SIGNED_CERT" })).message, NOT_PINNED);
+  const refused = Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+  assert.equal(explained(refused), refused);
 });
 
 test("the pinned certificate must name the host the URL has", async () => {
