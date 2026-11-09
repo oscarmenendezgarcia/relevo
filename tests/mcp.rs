@@ -43,8 +43,14 @@ async fn server(handles: &[&str]) -> Server {
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
+    // The transport `relevo serve` uses, with its limits.
     let router = api::router(app.clone());
-    tokio::spawn(async move { axum::serve(listener, router).await });
+    tokio::spawn(relevo::serve::serve(
+        listener,
+        router,
+        None,
+        relevo::serve::Limits::default(),
+    ));
     let dir = std::env::temp_dir().join(db::random_id("relevo-mcp-"));
     std::fs::create_dir(&dir).unwrap();
     Server {
