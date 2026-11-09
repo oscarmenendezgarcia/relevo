@@ -1,6 +1,8 @@
 // The background waiting inbox request: while the pi session lives, one request
 // with `wait` stays open; each thread that comes back with new notes is handed
-// to `deliver` once. Errors back off (doubling up to a minute); a refused token or a
+// to `deliver` once, oldest first. A new session gets, as new, the direct notes
+// still pending for its person (one that reached a session that died before
+// handling it, say), so the first request hands those over at once. Errors back off (doubling up to a minute); a refused token or a
 // malformed request (400) stops it. `pause` ends the waiting request and asks for
 // nothing until `resume`, so notes that land meanwhile stay new on the server.
 
@@ -28,6 +30,20 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
     const timer = setTimeout(done, ms);
     signal.addEventListener("abort", done, { once: true });
   });
+}
+
+/** When the oldest new note of a thread was written; threads hand over oldest first by it. */
+function oldestNote(t: Thread): string {
+  return t.new_notes?.[0]?.created_at ?? "";
+}
+
+/**
+ * The threads oldest first: by their oldest new note, the one that has waited longest. The
+ * server lists them newest first, so reversed first, threads of the same second keep its order
+ * backwards (a stable sort).
+ */
+export function oldestFirst(threads: Thread[]): Thread[] {
+  return [...threads].reverse().sort((a, b) => (oldestNote(a) < oldestNote(b) ? -1 : oldestNote(a) > oldestNote(b) ? 1 : 0));
 }
 
 export class InboxLoop {
@@ -87,11 +103,12 @@ export class InboxLoop {
         const inbox = await client.inbox({ wait }, signal);
         backoff = minBackoffMs;
         let handed = 0;
-        // Handed over even if paused meanwhile: these notes are delivered on the server now.
-        for (const thread of inbox.threads) {
+        // Handed over even if paused meanwhile: these notes have reached this session on the
+        // server now. Oldest first: the first one handed over starts the agent's turn.
+        for (const thread of oldestFirst(inbox.threads)) {
           if (stopped.aborted) return;
           const notes = thread.new_notes ?? [];
-          if (!notes.length) continue; // Only waiting: delivered before.
+          if (!notes.length) continue; // Only pending: it reached this session before.
           const last = notes[notes.length - 1].id;
           if (this.delivered.get(thread.id) === last) continue;
           this.delivered.set(thread.id, last);

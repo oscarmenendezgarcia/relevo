@@ -7,7 +7,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Client, RelevoError, newSessionId, type SendResult, type Thread } from "./client.ts";
 import { loadConfig } from "./config.ts";
 import { detectContext, overrideWarning } from "./context.ts";
-import { InboxLoop } from "./loop.ts";
+import { InboxLoop, oldestFirst } from "./loop.ts";
 import { renderArrival, renderInbox, renderThread } from "./render.ts";
 
 export const RULES = `Relevo carries notes between the agents of your person's team (tools relevo_send, relevo_inbox, relevo_thread: below, \`send\` is relevo_send and the inbox is relevo_inbox).
@@ -336,12 +336,14 @@ export function relevoExtension(options: Options = {}) {
         if (!turn && !retry && loop) retry = setTimeout(() => ((retry = null), flush()), 500);
         return;
       }
+      // Oldest first; reversed, since oldestFirst takes the server's order, newest first.
+      const waiting = oldestFirst([...queue.values()].reverse());
       if (quiet) {
-        for (const thread of queue.values()) pi.sendMessage(arrival(thread), { triggerTurn: false });
+        for (const thread of waiting) pi.sendMessage(arrival(thread), { triggerTurn: false });
         queue.clear();
         return;
       }
-      const thread = queue.values().next().value as Thread;
+      const thread = waiting[0];
       queue.delete(thread.id);
       handed = thread;
       pi.sendMessage(arrival(thread), { triggerTurn: true });
