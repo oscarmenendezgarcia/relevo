@@ -152,8 +152,9 @@ _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
                                      "questions."},
             "done": {"type": "boolean",
                      "description": "With `thread` and no `text` (and no `claim`): your person has handled "
-                                    "the thread up to its latest note, with nothing to write (\"seen, nothing "
-                                    "to do\": an answer you have now read, a thank-you). It stops being "
+                                    "the thread up to the latest note this session has received, with nothing "
+                                    "to write (\"seen, nothing to do\": an answer you have now read, a "
+                                    "thank-you). A note that arrived since stays pending. It stops being "
                                     "pending for them; nothing is written and nothing claimed. Not for a "
                                     "note that is not for you: leave that one pending."},
         },

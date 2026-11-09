@@ -75,7 +75,7 @@ export interface SendFields {
   close?: boolean;
   /** With `thread`: claims it for this session, as a state, without a note when there is no `text`. */
   claim?: boolean;
-  /** With `thread` and no `text`: the person has handled the thread up to its latest note, writing nothing. */
+  /** With `thread` and no `text`: the person has handled the thread up to the latest note this session has received, writing nothing. */
   done?: boolean;
 }
 
