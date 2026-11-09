@@ -189,9 +189,10 @@ const SCHEMA_VERSION: i64 = 6;
 
 /// Layout 5 to 6: the handled state of each participant. It starts at what their sessions had
 /// reached, or at their own latest note when that is later (writing handles a thread), so nothing
-/// that had reached them becomes pending; when it covers a note by someone else, it was handled
-/// when that reached them (or when they wrote), from that session. Then the flags that depend on
-/// it, as `api::refresh` keeps them. The new columns go last, as in `SCHEMA`.
+/// that had reached them becomes pending. When it covers a note by someone else, it was handled
+/// when they first wrote after the latest such note (from that token; its session's context then
+/// is not known), or else when that note reached them, from that session. Then the flags that
+/// depend on it, as `api::refresh` keeps them. The new columns go last, as in `SCHEMA`.
 const MIGRATE_FROM_5: &str = "
 ALTER TABLE participants ADD COLUMN handled_seq INTEGER;
 ALTER TABLE participants ADD COLUMN handled_at INTEGER;
@@ -203,19 +204,15 @@ UPDATE participants AS p SET handled_seq = nullif(max(
     coalesce((SELECT max(n.seq) FROM notes n
               WHERE n.thread_id = p.thread_id AND n.author_id = p.person_id), 0)), 0);
 UPDATE participants AS p SET
-    handled_at = coalesce(
-        (SELECT n.created_at FROM notes n
-         WHERE n.thread_id = p.thread_id AND n.author_id = p.person_id
-           AND n.seq = p.handled_seq AND n.seq > coalesce(p.delivered_seq, 0)),
-        p.delivered_at),
-    handled_label = coalesce(
-        (SELECT n.via FROM notes n
-         WHERE n.thread_id = p.thread_id AND n.author_id = p.person_id
-           AND n.seq = p.handled_seq AND n.seq > coalesce(p.delivered_seq, 0)),
-        p.delivered_label),
-    handled_context = CASE WHEN p.handled_seq > coalesce(p.delivered_seq, 0) THEN NULL
-                           ELSE p.delivered_context END
-WHERE EXISTS (SELECT 1 FROM notes n
+    handled_at = coalesce(w.created_at, p.delivered_at),
+    handled_label = CASE WHEN w.seq IS NULL THEN p.delivered_label ELSE w.via END,
+    handled_context = CASE WHEN w.seq IS NULL THEN p.delivered_context END
+FROM participants AS q
+LEFT JOIN notes AS w ON w.seq = (
+    SELECT min(n.seq) FROM notes n
+    WHERE n.thread_id = q.thread_id AND n.author_id = q.person_id AND n.seq > q.last_other_seq)
+WHERE q.thread_id = p.thread_id AND q.person_id = p.person_id
+  AND EXISTS (SELECT 1 FROM notes n
               WHERE n.thread_id = p.thread_id AND n.author_id != p.person_id
                 AND n.seq <= p.handled_seq);
 UPDATE participants AS p SET

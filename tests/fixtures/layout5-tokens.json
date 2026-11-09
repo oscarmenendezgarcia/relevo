@@ -1,0 +1,16 @@
+{
+  "tokens": {
+    "ana": "rlv_yVvjNjh44RPTbn7VuVPJUocdQwrWrfcwknhfkJmhAb4",
+    "bob": "rlv_hQRvQ7R28euYCYIacXMYI5m2N9UAHSGM3o03UH-n9is",
+    "carl": "rlv_OuqAetiUdRSVCFRQqRnUhx3Ag12eNC3qFw9fcIYMqro"
+  },
+  "threads": {
+    "fetched": "r_26pub3tz5pth",
+    "replied": "r_n32c26amdtqx",
+    "blind": "r_5unakjhib3jh",
+    "team": "r_ez7oazoqlhmf",
+    "closed": "r_46rw6zx3dft6",
+    "claimed": "r_jvd5vyhw2qhb",
+    "unread": "r_5ilk6yxppojm"
+  }
+}
