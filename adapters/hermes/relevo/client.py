@@ -142,7 +142,7 @@ def _turn_platform() -> str:
 
 def session_id() -> str:
     """The session a tool call acts for. In a turn of the relevo gateway platform, the gateway's: the
-    agent's "On it." and its reply claim for the same session. Anywhere else (CLI, TUI, Telegram…),
+    agent's claim (relevo_send with claim: true) and its reply act for the same session. Anywhere else (CLI, TUI, Telegram…),
     this process's own, so the gateway and those agents can step aside for each other and neither
     takes the other's deliveries."""
     if _turn_platform() == "relevo":
