@@ -18,7 +18,7 @@ use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 use tokio::time::Instant;
 use tower::ServiceExt;
 
@@ -48,6 +48,26 @@ impl Default for Limits {
             request: Duration::from_secs(90),
             connections: 1024,
             per_address: 64,
+        }
+    }
+}
+
+/// Raises this process's soft limit on open files (often 1,024) towards what `connections` at
+/// once need, with room for the database and the listener; never above the hard limit.
+pub fn raise_open_files(connections: usize) {
+    let want = connections as libc::rlim_t + 256;
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit and setrlimit only read and write the struct passed to them.
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 || limit.rlim_cur >= want {
+            return;
+        }
+        limit.rlim_cur = want.min(limit.rlim_max);
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+            tracing::warn!("could not raise the limit on open files");
         }
     }
 }
@@ -128,7 +148,7 @@ async fn connection(
     limits: Arc<Limits>,
 ) {
     // The head's time runs from the connection, the TLS handshake included.
-    let watch = Arc::new(Watch(Mutex::new(Phase::Head(Instant::now() + limits.head))));
+    let watch = Arc::new(Watch::new(Phase::Head(Instant::now() + limits.head)));
     match acceptor {
         None => http(tcp, router, limits, watch).await,
         Some(acceptor) => {
@@ -173,8 +193,10 @@ where
         let deadline = watch.deadline();
         tokio::select! {
             _ = conn.as_mut() => return,
+            // The phase changed: its deadline may be sooner.
+            _ = watch.changed.notified() => {}
             _ = tokio::time::sleep_until(deadline) => {
-                // The deadline may have moved while this slept.
+                // The deadline may have moved later while this slept.
                 if watch.deadline() <= Instant::now() {
                     return;
                 }
@@ -196,15 +218,31 @@ enum Phase {
     Idle(Instant),
 }
 
-struct Watch(Mutex<Phase>);
+struct Watch {
+    phase: Mutex<Phase>,
+    /// Told whenever `phase` changes.
+    changed: Notify,
+}
 
 impl Watch {
+    fn new(phase: Phase) -> Self {
+        Watch {
+            phase: Mutex::new(phase),
+            changed: Notify::new(),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Phase> {
+        self.phase.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn get(&self) -> Phase {
-        *self.0.lock().unwrap_or_else(|e| e.into_inner())
+        *self.lock()
     }
 
     fn set(&self, phase: Phase) {
-        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = phase;
+        *self.lock() = phase;
+        self.changed.notify_one();
     }
 
     fn deadline(&self) -> Instant {
@@ -230,17 +268,19 @@ impl Watch {
 
     /// Bytes came: on an idle connection, they start a request head.
     fn read(&self, head: Duration) {
-        let mut phase = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut phase = self.lock();
         if let Phase::Idle(_) = *phase {
             *phase = Phase::Head(Instant::now() + head);
+            self.changed.notify_one();
         }
     }
 
     /// The request's body is all in.
     fn body_done(&self) {
-        let mut phase = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut phase = self.lock();
         if let Phase::Body { answer, .. } = *phase {
             *phase = Phase::Answer(answer);
+            self.changed.notify_one();
         }
     }
 }

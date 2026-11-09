@@ -851,6 +851,8 @@ async fn without_ca_roots_http_works_and_https_says_why() {
     let (failed, err) = mcp.call("inbox", json!({})).await;
     assert!(failed);
     assert!(err.contains("TLS roots could not be loaded"), "{err}");
+    // connect needs no roots to look at a certificate (it can pin one, tests/tls.rs): here it
+    // finds no server.
     let mut cmd = relevo(&home);
     without_ca_roots(&mut cmd, &s.dir);
     let out = cmd
@@ -860,7 +862,7 @@ async fn without_ca_roots_http_works_and_https_says_why() {
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("TLS roots could not be loaded"), "{err}");
+    assert!(err.contains("could not reach the Relevo server"), "{err}");
 }
 
 /// A server that answers every request at once with 200, `content_type` and `body`, and

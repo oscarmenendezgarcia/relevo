@@ -111,7 +111,8 @@ impl ServerCert {
 
 /// A certificate and key you already have (PEM files), for `serve --tls-cert --tls-key`.
 pub fn load(cert: &Path, key: &Path) -> Result<ServerCert> {
-    let text = std::fs::read_to_string(cert).with_context(|| format!("reading {}", cert.display()))?;
+    let text =
+        std::fs::read_to_string(cert).with_context(|| format!("reading {}", cert.display()))?;
     let chain = certs_from_pem(&text).with_context(|| format!("reading {}", cert.display()))?;
     let key = PrivateKeyDer::from_pem_file(key)
         .map_err(|e| anyhow!("reading the key {}: {e}", key.display()))?;
@@ -142,7 +143,10 @@ pub enum Made {
     /// A first certificate, for these names.
     New(Vec<String>),
     /// A new certificate for these names, because the stored one lacked `missing`.
-    Replaced { names: Vec<String>, missing: Vec<String> },
+    Replaced {
+        names: Vec<String>,
+        missing: Vec<String>,
+    },
 }
 
 /// The certificate `serve --tls` uses: the one stored in `dir`, or a new self-signed one for
@@ -193,7 +197,8 @@ pub fn stored_or_new(
     // The key first: a certificate never sits next to a key that is not its own for longer.
     write_private(&dir.join("key.pem"), &key_pem, 0o600)?;
     write_private(&dir.join("cert.pem"), &cert_pem, 0o644)?;
-    let cert = stored(dir)?.ok_or_else(|| anyhow!("the new certificate is not in {}", dir.display()))?;
+    let cert =
+        stored(dir)?.ok_or_else(|| anyhow!("the new certificate is not in {}", dir.display()))?;
     Ok((cert, made))
 }
 
@@ -398,8 +403,12 @@ pub async fn look(url: &str) -> Result<Seen> {
     let bare = host.trim_start_matches('[').trim_end_matches(']');
     let name = server_name(bare)?;
     let tcp = match bare.parse::<IpAddr>() {
-        Ok(ip) => tokio::time::timeout(LOOK_TIMEOUT, tokio::net::TcpStream::connect((ip, port))).await,
-        Err(_) => tokio::time::timeout(LOOK_TIMEOUT, tokio::net::TcpStream::connect((bare, port))).await,
+        Ok(ip) => {
+            tokio::time::timeout(LOOK_TIMEOUT, tokio::net::TcpStream::connect((ip, port))).await
+        }
+        Err(_) => {
+            tokio::time::timeout(LOOK_TIMEOUT, tokio::net::TcpStream::connect((bare, port))).await
+        }
     };
     let reach = |e: String| anyhow!("could not reach the Relevo server: {e}");
     let tcp = tcp
@@ -582,7 +591,11 @@ mod tests {
     fn default_names_have_loopback_and_no_link_local() {
         let names = default_names();
         assert_eq!(names[..3], strings(&["localhost", "127.0.0.1", "::1"]));
-        assert!(!names.iter().any(|n| n.starts_with("fe80") || n.starts_with("169.254")));
+        assert!(
+            !names
+                .iter()
+                .any(|n| n.starts_with("fe80") || n.starts_with("169.254"))
+        );
         for n in &names {
             server_name(n).unwrap();
         }
