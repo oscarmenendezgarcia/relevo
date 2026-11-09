@@ -259,8 +259,10 @@ def _saved_config() -> dict:
 def gateway_session_id() -> str:
     """The gateway's Relevo-Session: fixed per Hermes profile, derived from the profile's home, and
     never shared by two profiles. A gateway that stops cleanly ends it (DELETE /api/session); one
-    that dies without ending it gets back, when it starts again, the threads it held (claims of a
-    session that is gone would hide them from a new one until they lapse 15 minutes later)."""
+    that dies does not, and the fixed id is what lets it, when it starts again, end the session it
+    left before its first inbox request: its claims go at once (a new id would leave them hiding
+    those threads until they lapse 15 minutes later), and what it fetched without handling comes
+    again, still pending for the person."""
     from hermes_constants import hermes_home_key
 
     digest = hashlib.sha256(hermes_home_key().encode("utf-8")).hexdigest()[:32]

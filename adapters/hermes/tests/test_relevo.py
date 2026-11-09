@@ -1052,8 +1052,9 @@ class Tools(Base):
 
 
 class Sessions(Base):
-    """docs/agents.md: one session per running agent. The gateway keeps one fixed id per profile and
-    ends it when it stops; every other Hermes process has its own."""
+    """docs/agents.md: one session per running agent. The gateway keeps one fixed id per profile, ends
+    it when it stops and, before its first inbox request, when it starts; every other Hermes process
+    has its own."""
 
     async def test_the_gateway_and_a_cli_agent_step_aside_for_each_other(self):
         a = self.make_adapter()
@@ -1184,17 +1185,74 @@ class Sessions(Base):
     async def test_a_replaced_adapter_leaves_the_session_to_its_replacement(self):
         a = self.make_adapter()
         await a.connect()
+        opened = self.ana.send(to=["oscar"], text="Who runs the deploy today?")
+        await self.until(lambda: len(self.events) == 1)
+        self.assertIn("this session has it now", self._gateway_claims(opened["thread"]))
         b = self.make_adapter()  # the gateway connects a new adapter before it drops the old one
         await b.connect()
-        opened = self.ana.send(to=["oscar"], text="Who runs the deploy today?")
-        await self.until(lambda: len(self.events) >= 1)
-        self.assertIn("this session has it now", self._gateway_claims(opened["thread"]))
+        await asyncio.sleep(1.0)
+        # The session is live in this process: the replacement does not end it at its start, so the
+        # claim stands and the note is not handed over again.
+        self.assertIsNotNone(self._oscar(opened["thread"])["claimed_by"])
+        self.assertEqual(len(self.events), 1)
         await a.disconnect()
         self.assertIn(b.settings.session, SERVER.sessions("oscar"))
         self.assertIsNotNone(self._oscar(opened["thread"])["claimed_by"])
         self.assertEqual(client._gateway_session, b.settings.session)  # its tools still act for it
         await b.disconnect()
         self.assertNotIn(b.settings.session, SERVER.sessions("oscar"))
+
+    async def test_a_gateway_that_died_with_a_note_unhandled_gets_it_again_on_the_next_connect(self):
+        """A gateway killed right after a note reached it (and its agent claimed the thread) ends no
+        session. The next start ends it before its first inbox request: the claim goes at once, and
+        the note, still pending for Oscar, is handed over again at once."""
+        log = open(_TMP / "gateway-child.log", "ab")
+        child = subprocess.Popen([sys.executable, str(Path(__file__).with_name("gateway_child.py"))],
+                                 env={**os.environ, "HERMES_SRC": str(_HERMES_SRC), "PYTHONDONTWRITEBYTECODE": "1"},
+                                 stdout=subprocess.PIPE, stderr=log, text=True)
+
+        async def line(prefix: str) -> str:
+            while True:
+                got = await asyncio.wait_for(asyncio.to_thread(child.stdout.readline), 60)
+                self.assertTrue(got, "the gateway child ended (see gateway-child.log)")
+                if got.startswith(prefix):
+                    return got[len(prefix):].strip()
+
+        try:
+            self.assertEqual(await line("session "), new_adapter().settings.session)
+            opened = self.ana.send(to=["oscar"], text="Kill test: is the backup running?")
+            self.assertEqual(await line("received "), opened["thread"])
+        finally:
+            # Dropped mid-turn without a word: no disconnect, no DELETE /api/session.
+            child.kill()
+            child.wait()
+            child.stdout.close()
+            log.close()
+        thread = opened["thread"]
+        # For Ana: it reached Oscar's gateway, which holds it, and nobody has handled it.
+        seen = self._oscar(thread)
+        self.assertEqual(seen["by"]["label"], "Hermes")
+        self.assertEqual(seen["claimed_by"]["label"], "Hermes")
+        self.assertIsNone(seen["handled_at"])
+
+        b = self.make_adapter()
+        started = time.monotonic()
+        await b.connect()
+        await self.until(lambda: len(self.events) == 1)
+        self.assertLess(time.monotonic() - started, 3, "at once")
+        self.assertEqual(self.events[0].source.chat_id, thread)
+        self.assertIn("Kill test: is the backup running?", self.events[0].text)
+        # The dead gateway's claim went with its session: nobody holds the thread.
+        self.assertIn("\nNone of your person's sessions has it.\n", self.events[0].text)
+        self.assertIsNone(self._oscar(thread)["claimed_by"])
+        # This one answers it: handled, and not handed over again after another restart.
+        self.assertTrue((await b.send(thread, "Yes, every night at 3.", metadata=FINAL)).success)
+        self.assertEqual(self._oscar(thread)["handled_by"]["label"], "Hermes")
+        await b.disconnect()
+        c = self.make_adapter()
+        await c.connect()
+        await asyncio.sleep(1.5)
+        self.assertEqual(len(self.events), 1)
 
     async def test_after_a_stop_what_is_still_pending_is_handed_over_again(self):
         """The stop forgot the gateway's session: when it is back it starts, like any new session,
@@ -1301,7 +1359,8 @@ class Loop(Base):
             started = time.monotonic()
             await a.disconnect()
             self.assertLess(time.monotonic() - started, a.end_timeout + 1)
-            self.assertEqual(ended, [a.end_timeout])
+            # The start's DELETE (cut short by the disconnect), then the stop's.
+            self.assertEqual(ended, [a.start_timeout, a.end_timeout])
             self.assertFalse(a.is_connected)
 
     async def test_errors_back_off_and_the_loop_recovers(self):
@@ -1332,13 +1391,14 @@ class Loop(Base):
         a = self.make_adapter(url="http://127.0.0.1:9")
         a.backoff_initial, a.backoff_max = 0.05, 0.2
         calls: list[float] = []
-        real = a.api.ainbox
+        real = a.api.aend_session
 
-        async def counted(http, *, wait=0):
+        async def counted(http, *, timeout):
             calls.append(time.monotonic())
-            return await real(http, wait=wait)
+            return await real(http, timeout=timeout)
 
-        a.api.ainbox = counted
+        # Unreachable, the loop never gets past ending the earlier session: it retries that.
+        a.api.aend_session = counted
         self.assertTrue(await a.connect())
         await asyncio.sleep(1.2)
         self.assertTrue(a.is_connected)
@@ -1552,16 +1612,17 @@ class Tls(Base):
         a = self.make_adapter()
         a.backoff_initial, a.backoff_max = 0.05, 0.2
         errors: list[str] = []
-        real = a.api.ainbox
+        real = a.api.aend_session
 
-        async def counted(http, *, wait=0):
+        async def counted(http, *, timeout):
             try:
-                return await real(http, wait=wait)
+                return await real(http, timeout=timeout)
             except Exception as exc:
                 errors.append(client.describe_error(exc))
                 raise
 
-        a.api.ainbox = counted
+        # The loop's first request, ending the earlier session, is refused: it is retried.
+        a.api.aend_session = counted
         self.assertTrue(await a.connect())
         await self.until(lambda: len(errors) >= 3)
         self.assertTrue(all(client.NOT_PINNED in e for e in errors), errors)
