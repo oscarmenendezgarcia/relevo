@@ -397,6 +397,12 @@ async fn tools_carry_a_conversation_between_sessions() {
         "{other}"
     );
 
+    // Bob's inbox, where the answer is new, says who is on his question without opening it.
+    let inbox = bob.ok("inbox", json!({})).await;
+    assert!(
+        inbox.contains("\n@ana's Claude Code in pagos-api@feat/refunds has it since "),
+        "{inbox}"
+    );
     let thread = bob.ok("thread", json!({ "id": id })).await;
     // The claim wrote nothing: Bob's question and Ana's second session's note only.
     assert_eq!(thread.matches("\n- note n_").count(), 2, "{thread}");

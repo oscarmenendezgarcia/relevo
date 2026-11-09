@@ -187,6 +187,13 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
         }
         _ => out.push_str("Nobody of yours has it.\n"),
     }
+    // Who else in the thread holds it (`held_by`, from `inbox`): `thread`'s delivery says it
+    // for every participant already.
+    if t["delivery"].is_null() {
+        for h in t["held_by"].as_array().into_iter().flatten() {
+            let _ = writeln!(out, "{}.", claim_state(s(&h["handle"]), h));
+        }
+    }
     if s(&t["kind"]) == "team" && s(&t["status"]) == "open" && Some(opener) != me {
         out.push_str(
             "A team question: answer it only from your own work or your person's files \
@@ -650,6 +657,42 @@ mod tests {
             thread(&old, Some("ana")).contains("; @oscar's Claude Code (general) has it\n"),
             "{}",
             thread(&old, Some("ana"))
+        );
+    }
+
+    #[test]
+    fn the_inbox_says_who_else_holds_a_thread() {
+        let mut t = sample();
+        t["held_by"] = json!([
+            { "handle": "ana", "label": "Claude Code", "context": "pagos-api", "since": "2026-11-08T10:47:00Z" },
+            { "handle": "carl", "label": "Codex", "context": null, "since": "2026-11-08T11:02:00Z" }
+        ]);
+        let out = thread(&t, Some("oscar"));
+        assert!(
+            out.contains(
+                "Nobody of yours has it. If it needs work first, claim it with \
+                 send(thread=\"r_1\", claim=true) and no text just before you start.\n\
+                 @ana's Claude Code in pagos-api has it since 10:47 UTC on 2026-11-08.\n\
+                 @carl's Codex (general) has it since 11:02 UTC on 2026-11-08.\n"
+            ),
+            "{out}"
+        );
+        // Nobody else: nothing more.
+        t["held_by"] = json!([]);
+        assert!(!thread(&t, Some("oscar")).contains(" has it since"));
+        // `thread` says it in its delivery, once.
+        let mut whole = sample();
+        whole["held_by"] = json!([{ "handle": "ana", "label": "Claude Code", "context": null, "since": "2026-11-08T10:47:00Z" }]);
+        whole["notes"] = whole["new_notes"].take();
+        whole["delivery"] = json!([
+            { "handle": "ana", "note": null, "delivered_at": null, "by": null, "seen_by": 0,
+              "claimed_by": { "label": "Claude Code", "context": null, "since": "2026-11-08T10:47:00Z" } }
+        ]);
+        let out = thread(&whole, Some("oscar"));
+        assert_eq!(
+            out.matches("@ana's Claude Code (general) has it").count(),
+            1,
+            "{out}"
         );
     }
 
