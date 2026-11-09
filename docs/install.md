@@ -125,6 +125,8 @@ sudo ufw allow from 192.168.1.0/24 to any port 7878 proto tcp
 
 (with `firewalld`: a rich rule for that source and port, in the zone of that network). A VPN such as Tailscale or WireGuard works the same way: allow its range, or its interface.
 
+**Teammates behind one NAT** (a VPN subnet router, a shared office uplink in front of the server) reach it from one address, and share its 64 connections: each running agent keeps one waiting inbox request and sometimes a second connection, so that is room for about 30 agents at once. Beyond it, new connections are closed unanswered.
+
 **Give teammates the address and the fingerprint**: `https://<this machine's address or name>:7878`, and the fingerprint from `relevo tls-fingerprint`, through a channel you trust (in person, or the team's chat). On their first `relevo connect` they compare it with what `connect` shows; from then on their machine trusts that certificate alone for Relevo (part 7).
 
 **Names.** The address teammates use must be one the certificate has. If they use another one (a DNS name the office gives this machine, an address added later), add the names, comma-separated, in the same drop-in:
@@ -148,7 +150,7 @@ The key must be readable by your user. Renewed files are read at the next restar
 
 ### Or a proxy in front (optional)
 
-A proxy that terminates TLS stays possible, and suits a public hostname. Then leave `relevo serve` as installed (plain HTTP on loopback, TLS off) and never open port 7878 itself.
+A proxy that terminates TLS stays possible, and suits a public hostname. Then leave `relevo serve` as installed (plain HTTP on loopback, TLS off) and never open port 7878 itself. Relevo's cap of 64 connections from one address does not count loopback, where all the proxy's connections come from; its cap of 1,024 in all still applies.
 
 **Caddy** (`deploy/proxy/Caddyfile`). Caddy gets and renews the certificate by itself. Install Caddy from your distribution, replace `relevo.example.com` in the example with your name, put it in Caddy's configuration (usually `/etc/caddy/Caddyfile`), and reload Caddy (`sudo systemctl reload caddy`). If that file is still the one the package installed (a `:80` site serving `/usr/share/caddy`), replace it with the example. If Caddy already serves other sites, do not append the whole example: its first block (`{ servers { timeouts … } }`) holds global options, which must come first in the file and can appear only once. Merge its `servers` part into the global block at the top (or put the block there if there is none), and append only the `relevo.example.com { … }` site. Those timeouts then apply to every site of that Caddy; they suit most sites, but check them against the others. The name's DNS must point at the machine and ports 80 and 443 must reach it. The example sets header, body, write and idle timeouts like Relevo's own, lets a waiting inbox request (up to 60 s) through, and refuses bodies over 400 KiB. For a name only the office network knows, the comment in the file explains `tls internal`.
 

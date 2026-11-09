@@ -1,7 +1,7 @@
 //! The server's transport (`relevo::serve`): HTTP/1.1, plain or over TLS, and the limits of
 //! `docs/protocol.md` on what one client can hold. Short limits stand in for the real ones.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -29,6 +29,11 @@ impl Drop for Server {
 /// A server with `ana` (whose token it has) and `bob`, on a random port of loopback; over TLS (a certificate for
 /// `localhost` and `127.0.0.1`) with `with_tls`.
 async fn start(limits: Limits, with_tls: bool) -> Server {
+    start_on(IpAddr::from([127, 0, 0, 1]), limits, with_tls).await
+}
+
+/// The same, listening on `ip`, so that its clients come from `ip` too.
+async fn start_on(ip: IpAddr, limits: Limits, with_tls: bool) -> Server {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let app = App::new(db::open(":memory:").unwrap(), Clock::system(), 5);
     let token = db::invite(&app.db(), "ana", "Ana", None, "test", db::now_unix())
@@ -46,7 +51,7 @@ async fn start(limits: Limits, with_tls: bool) -> Server {
     } else {
         (None, None)
     };
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = tokio::net::TcpListener::bind((ip, 0)).await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(serve(listener, api::router(app), config, limits));
     Server {
@@ -274,35 +279,9 @@ async fn a_slow_body_is_dropped_after_the_body_timeout() {
     assert!(after >= Duration::from_millis(800), "{after:?}");
 }
 
-#[tokio::test]
-async fn one_address_holds_at_most_its_share_of_connections() {
-    let s = start(
-        Limits {
-            per_address: 2,
-            ..Limits::default()
-        },
-        false,
-    )
-    .await;
-    // Two connections, each surely taken (it answered).
-    let mut held = vec![];
-    for _ in 0..2 {
-        let mut c = s.stream().await;
-        c.write_all(HEALTH).await.unwrap();
-        assert!(response(&mut c).await.starts_with("HTTP/1.1 200"));
-        held.push(c);
-    }
-    // A third is closed without an answer.
-    let mut third = s.stream().await;
-    let _ = third.write_all(HEALTH).await;
-    closed_after(&mut third, Duration::from_secs(2)).await;
-    // Those held still work.
-    held[0].write_all(HEALTH).await.unwrap();
-    assert!(response(&mut held[0]).await.starts_with("HTTP/1.1 200"));
-
-    // Once one goes, a new one is taken.
-    drop(held.pop());
-    let deadline = Instant::now() + Duration::from_secs(3);
+/// Opens connections to `s` until one is answered, for at most `within`.
+async fn answered_within(s: &Server, within: Duration) -> Box<dyn Stream> {
+    let deadline = Instant::now() + within;
     loop {
         let mut c = s.stream().await;
         let _ = c.write_all(HEALTH).await;
@@ -310,11 +289,69 @@ async fn one_address_holds_at_most_its_share_of_connections() {
         match tokio::time::timeout(Duration::from_secs(1), c.read(&mut buf)).await {
             Ok(Ok(12)) => {
                 assert_eq!(&buf, b"HTTP/1.1 200");
-                break;
+                return c;
             }
             _ => assert!(Instant::now() < deadline, "no new connection taken"),
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn one_address_holds_at_most_its_share_of_connections() {
+    // Loopback is not counted (see below): the clients must come from another address of this
+    // machine.
+    let Some(ip) = tls::network_addresses().into_iter().next() else {
+        eprintln!("skipped: this machine has no address but loopback");
+        return;
+    };
+    for with_tls in [false, true] {
+        let limits = Limits {
+            per_address: 2,
+            ..Limits::default()
+        };
+        let s = start_on(ip, limits, with_tls).await;
+        // Two connections, each surely taken (it answered).
+        let mut held = vec![];
+        for _ in 0..2 {
+            let mut c = s.stream().await;
+            c.write_all(HEALTH).await.unwrap();
+            assert!(response(&mut c).await.starts_with("HTTP/1.1 200"));
+            held.push(c);
+        }
+        // A third is closed without an answer.
+        let mut third = TcpStream::connect(s.addr).await.unwrap();
+        let _ = third.write_all(HEALTH).await;
+        closed_after(&mut third, Duration::from_secs(2)).await;
+        // Those held still work.
+        held[0].write_all(HEALTH).await.unwrap();
+        assert!(response(&mut held[0]).await.starts_with("HTTP/1.1 200"));
+
+        // Once one goes, a new one is taken.
+        drop(held.pop());
+        answered_within(&s, Duration::from_secs(3)).await;
+    }
+}
+
+/// Behind a proxy on this machine every connection comes from loopback: the whole team's.
+#[tokio::test]
+async fn loopback_is_not_held_to_one_addresss_share() {
+    for with_tls in [false, true] {
+        let limits = Limits {
+            per_address: 2,
+            ..Limits::default()
+        };
+        let s = start(limits, with_tls).await;
+        let mut held = vec![];
+        for _ in 0..5 {
+            let mut c = s.stream().await;
+            c.write_all(HEALTH).await.unwrap();
+            assert!(
+                response(&mut c).await.starts_with("HTTP/1.1 200"),
+                "{with_tls}"
+            );
+            held.push(c);
+        }
     }
 }
 

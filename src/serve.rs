@@ -38,7 +38,7 @@ pub struct Limits {
     pub head_size: usize,
     /// Connections at once; beyond, new ones wait.
     pub connections: usize,
-    /// Connections at once from one address; beyond, new ones are refused.
+    /// Connections at once from one address other than loopback; beyond, new ones are refused.
     pub per_address: usize,
 }
 
@@ -112,14 +112,24 @@ pub async fn serve(
     }
 }
 
-/// One connection's place among those of its address.
+/// One connection's place among those of its address. Loopback is not counted: behind a proxy
+/// on this machine, every connection comes from there, the whole team's.
 struct AddressSlot {
     all: Arc<Mutex<HashMap<IpAddr, usize>>>,
-    ip: IpAddr,
+    /// The address counted, if any.
+    ip: Option<IpAddr>,
 }
 
 impl AddressSlot {
     fn take(all: &Arc<Mutex<HashMap<IpAddr, usize>>>, ip: IpAddr, max: usize) -> Option<Self> {
+        // An IPv4 client of a listener on `[::]` comes as `::ffff:a.b.c.d`: the same address.
+        let ip = ip.to_canonical();
+        if ip.is_loopback() {
+            return Some(AddressSlot {
+                all: all.clone(),
+                ip: None,
+            });
+        }
         let mut map = all.lock().unwrap_or_else(|e| e.into_inner());
         let held = map.entry(ip).or_default();
         if *held >= max {
@@ -128,18 +138,19 @@ impl AddressSlot {
         *held += 1;
         Some(AddressSlot {
             all: all.clone(),
-            ip,
+            ip: Some(ip),
         })
     }
 }
 
 impl Drop for AddressSlot {
     fn drop(&mut self) {
+        let Some(ip) = self.ip else { return };
         let mut map = self.all.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(held) = map.get_mut(&self.ip) {
+        if let Some(held) = map.get_mut(&ip) {
             *held -= 1;
             if *held == 0 {
-                map.remove(&self.ip);
+                map.remove(&ip);
             }
         }
     }
@@ -393,5 +404,27 @@ mod tests {
         assert_eq!(l.head_size, 16 * 1024);
         // A waiting inbox (at most 60 s) fits in a request.
         assert!(l.request > Duration::from_secs(60));
+    }
+
+    #[test]
+    fn each_address_but_loopback_has_its_share() {
+        let all = Arc::new(Mutex::new(HashMap::new()));
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let take = |s: &str| AddressSlot::take(&all, ip(s), 2);
+        let first = take("10.0.0.1").unwrap();
+        // The same address, as an IPv4 client of `[::]` shows it.
+        let second = take("::ffff:10.0.0.1").unwrap();
+        assert!(take("10.0.0.1").is_none());
+        assert!(take("10.0.0.2").is_some(), "another address has its own");
+        drop(first);
+        let third = take("10.0.0.1").unwrap();
+        // Loopback, in every form, is never refused and holds no count.
+        let local: Vec<_> = (0..5)
+            .flat_map(|_| ["127.0.0.1", "127.0.0.2", "::1", "::ffff:127.0.0.1"])
+            .map(|a| take(a).unwrap())
+            .collect();
+        assert_eq!(all.lock().unwrap().len(), 1);
+        drop((second, third, local));
+        assert!(all.lock().unwrap().is_empty());
     }
 }
