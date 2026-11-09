@@ -29,8 +29,8 @@ const RULES: &str = "\
 Relevo carries notes between the people of a team; each person reaches it through their own \
 agent, and you are the agent of the one you work with (\"your person\"). Tools: `inbox` (what is \
 new for this session and what waits for your person, with who you are and the team list), \
-`thread` (a whole thread, with who has seen it and who holds it) and `send` (open a thread with \
-`to`, or write in one with `thread`).
+`thread` (a whole thread, with who has seen it, who has handled it and who holds it) and `send` \
+(open a thread with `to`, write in one with `thread`, or mark one handled with `done`).
 
 Rules:
 1. You speak for one person: `you` in the inbox (and /api/people) is their handle. What your \
@@ -40,7 +40,9 @@ there.
 person did not say whom to ask, use the team's `about` lines to choose; ask `@team` only when \
 you do not know who knows.
 3. When a note arrives, decide from your own context and current work whether it is for you. \
-If not, stay silent: do not reply \"not for me\".
+If not, stay silent and leave it: it stays pending for your person, for another of their sessions \
+or for them. If it is for you but needs nothing (an answer you have now read, a thank-you), mark \
+it handled with `send(thread, done: true)` and no text.
 4. Read what you need first. If you can answer or explain from that reading, just answer: your \
 reply takes the thread. If the note needs work, mark the thread as yours with `send(thread, \
 claim: true)` and no text just before you start changing files or running something long, so \
@@ -67,8 +69,9 @@ This server also pushes new notes to you as <channel source=\"relevo\" thread=\"
 from=\"handle\" kind=\"direct|team\"> events. Each event holds a thread with its new notes, which \
 are already delivered to this session. Treat it like a note from your inbox, under the rules \
 above: if it is for you, answer with send(thread=\"<thread id>\", text=…), or, if it needs work \
-first, claim it with send(thread=\"<thread id>\", claim=true) and no text before you start; if \
-not, stay silent. \
+first, claim it with send(thread=\"<thread id>\", claim=true) and no text before you start, or, \
+if it needs nothing, mark it handled with send(thread=\"<thread id>\", done=true) and no text; if \
+not, stay silent and leave it: it stays pending for your person. \
 Events may not reach you, so still look at your inbox when you start a task and before you \
 finish one: `inbox` also lists what was pushed since you last looked.";
 
@@ -97,8 +100,8 @@ pub struct SendParams {
     /// The note, in Markdown. Self-contained: the reader does not share your context. In the
     /// first person, as your person would write it ("I changed…", not "Ana changed…"). Opening
     /// a thread, its first line is a one-line subject (the title), no greeting and no "Re:".
-    /// Required unless only closing or claiming a thread. Never a note that only says you are
-    /// on it.
+    /// Required unless only closing, claiming or marking done a thread. Never a note that only
+    /// says you are on it.
     #[serde(default)]
     pub text: Option<String>,
     /// `true` marks the thread closed (resolved), after writing `text` if given. Only when your
@@ -110,6 +113,12 @@ pub struct SendParams {
     /// just before you start changing files or running something long. Not for team questions.
     #[serde(default)]
     pub claim: Option<bool>,
+    /// `true`, with `thread` and no `text` (and no `claim`): your person has handled the thread
+    /// up to its latest note, with nothing to write ("seen, nothing to do": an answer you have
+    /// now read, a thank-you). It stops being pending for them; nothing is written and nothing
+    /// claimed. Not for a note that is not for you: leave that one pending.
+    #[serde(default)]
+    pub done: Option<bool>,
 }
 
 /// `to`: one address, or a list of them.
@@ -260,7 +269,9 @@ impl Relevo {
                        `to` (who to ask, to open a thread: \"ana\", \"ana/pagos-api\" or \
                        \"@team\", or a list of addresses) or `thread` (an existing thread's id, \
                        \"r_…\"); `text` (the note); `close` (true to close the thread); `claim` \
-                       (true, with `thread`, to mark the thread as this session's). If your \
+                       (true, with `thread`, to mark the thread as this session's); `done` (true, \
+                       with `thread` and no text, to mark it handled when it needs nothing: an \
+                       answer you have now read, a thank-you). If your \
                        person names whom to ask (a teammate, or the whole team: `@team`), send it \
                        there. Otherwise, before opening one, look at your inbox (an answer may \
                        already be waiting) and use the team's `about` lines to choose whom to \
@@ -276,7 +287,9 @@ impl Relevo {
                        first person, as your person would (\"I changed…\"). A new thread starts \
                        with a one-line subject (its title), no greeting and no \"Re:\". \
                        `close: true` marks it resolved (a close needs no text): only when your \
-                       person asks, or when you asked the question and it is answered."
+                       person asks, or when you asked the question and it is answered. A note \
+                       stays pending for your person until they answer, close it or mark it \
+                       `done`; if it is not for you, write nothing and leave it pending."
     )]
     async fn send(&self, Parameters(p): Parameters<SendParams>) -> Result<String, String> {
         let client = self.client()?;
@@ -299,11 +312,19 @@ impl Relevo {
         if let Some(claim) = p.claim {
             body.insert("claim".into(), claim.into());
         }
+        let done = p.done == Some(true);
+        if let Some(d) = p.done {
+            body.insert("done".into(), d.into());
+        }
         let v = client.send(body).await.map_err(error)?;
         if let Some(id) = v["thread"].as_str() {
             forget(&self.pushed, id);
         }
-        Ok(render::sent(&v))
+        Ok(if done {
+            render::done(&v)
+        } else {
+            render::sent(&v)
+        })
     }
 
     #[tool(
@@ -327,8 +348,8 @@ impl Relevo {
     }
 
     #[tool(
-        description = "A whole thread: every note, who has seen it and which session holds it. \
-                       Does not claim it."
+        description = "A whole thread: every note, who has seen it, who has handled it and \
+                       which session holds it. Does not claim it."
     )]
     async fn thread(&self, Parameters(p): Parameters<ThreadParams>) -> Result<String, String> {
         let client = self.client()?;
@@ -473,7 +494,8 @@ pub fn channel_event(thread: &Value, me: Option<&str>) -> Option<Value> {
         content.push_str(&format!(
             "\nIf it is for you, answer with send(thread=\"{id}\", text=…), or, if it needs work \
              first, claim it with send(thread=\"{id}\", claim=true) and no text before you \
-             start; if not, stay silent."
+             start, or, if it needs nothing, mark it handled with send(thread=\"{id}\", \
+             done=true) and no text; if not, stay silent and leave it pending."
         ));
     }
     Some(json!({
@@ -684,6 +706,12 @@ mod tests {
             content.contains("claim it with send(thread=\"r_1\", claim=true) and no text"),
             "{content}"
         );
+        // Or, if it needs nothing, mark it handled; if it is not for us, leave it pending.
+        assert!(
+            content.contains("mark it handled with send(thread=\"r_1\", done=true) and no text"),
+            "{content}"
+        );
+        assert!(content.contains("leave it pending"), "{content}");
 
         // A team question: answer only with something useful, and do not claim it.
         let mut team = t.clone();
@@ -771,6 +799,11 @@ mod tests {
             assert!(text.contains(&format!("\n{n}. ")), "rule {n}");
         }
         assert!(!text.contains("\n9. "), "{text}");
+        // Rules v7: a note not for you stays pending; one that needs nothing is marked done.
+        assert!(
+            text.contains("mark it handled with `send(thread, done: true)` and no text."),
+            "{text}"
+        );
         // Word for word as in docs/agents.md.
         let doc = include_str!("../docs/agents.md");
         let rules = text.split_once("\nRules:\n").unwrap().1;

@@ -150,8 +150,12 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
         let _ = write!(out, "; addressed to you in {c}");
     }
     out.push('\n');
-    if t["waiting_for_you"] == true {
-        out.push_str("Waiting for a reply from you. ");
+    if pending(t) && s(&t["kind"]) == "direct" {
+        let _ = write!(
+            out,
+            "Pending for your person: they have not handled it yet. If it is for you and needs \
+             nothing, mark it handled with send(thread=\"{id}\", done=true) and no text. "
+        );
     }
     // Who of the person has it, and since when: only `thread`'s delivery says.
     let mine = t["delivery"]
@@ -178,7 +182,7 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
             out.push_str("Another of your sessions has it: leave it to that session.\n")
         }
         // Team questions are not claimed.
-        _ if t["waiting_for_you"] == true && s(&t["kind"]) == "direct" => {
+        _ if pending(t) && s(&t["kind"]) == "direct" => {
             let _ = writeln!(
                 out,
                 "Nobody of yours has it. If it needs work first, claim it with \
@@ -213,7 +217,7 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
             "No new notes (call thread with id \"{id}\" for the history)."
         );
         // What it waits on, which another session of the person may have fetched already.
-        if t["waiting_for_you"] == true && t["last_note"].is_object() {
+        if pending(t) && t["last_note"].is_object() {
             latest(&mut out, id, &t["last_note"], me);
         }
     } else if partial && notes.iter().any(|n| n["pushed"] == true) {
@@ -247,27 +251,70 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
         out.push_str("\nDelivery (the latest note by someone else that each person has):\n");
         for d in delivery {
             let _ = write!(out, "- @{}: ", s(&d["handle"]));
-            if d["note"].is_null() {
-                out.push_str("nothing yet");
-            } else {
-                let _ = write!(
-                    out,
-                    "note {} reached {} at {}; seen by {} of their sessions",
-                    s(&d["note"]),
-                    session(&d["by"]),
-                    s(&d["delivered_at"]),
-                    d["seen_by"]
-                );
-            }
-            if d["claimed_by"].is_object() {
-                let _ = write!(out, "; {}", claim_state(s(&d["handle"]), &d["claimed_by"]));
-            } else if d["seen_by"].as_i64().unwrap_or(0) > 0 {
-                out.push_str("; nobody of theirs has it");
-            }
+            delivered(&mut out, d, s(&t["kind"]) == "direct");
             out.push('\n');
         }
     }
     out
+}
+
+/// Whether a thread is pending for the person: `pending`, or `waiting_for_you` from a server
+/// that does not say `pending`.
+fn pending(t: &Value) -> bool {
+    t.get("pending").unwrap_or(&t["waiting_for_you"]) == true
+}
+
+/// One participant's delivery: the latest note by someone else they have, who saw it first,
+/// whether they handled it (when and from where), how many of their live sessions have it, and
+/// who of theirs holds the thread. A session that has ended still saw it: `seen_by` counts live
+/// ones only, so "seen by pi" with none live says that pi's session has ended, not "seen by 0".
+fn delivered(out: &mut String, d: &Value, direct: bool) {
+    let handle = s(&d["handle"]);
+    let live = d["seen_by"].as_i64().unwrap_or(0);
+    let handled = d["handled_at"].is_string();
+    if d["note"].is_null() {
+        out.push_str("nothing yet");
+    } else if d.get("handled_at").is_none() {
+        // A server that does not say whether it was handled.
+        let _ = write!(
+            out,
+            "note {} reached {} at {}; seen by {live} of their sessions",
+            s(&d["note"]),
+            session(&d["by"]),
+            s(&d["delivered_at"]),
+        );
+    } else {
+        let _ = write!(
+            out,
+            "note {} seen by {} at {}",
+            s(&d["note"]),
+            session(&d["by"]),
+            since(s(&d["delivered_at"]))
+        );
+        if handled {
+            out.push_str("; handled");
+            if d["handled_by"].is_object() {
+                let _ = write!(out, " by {}", session(&d["handled_by"]));
+            }
+            let _ = write!(out, " at {}", since(s(&d["handled_at"])));
+        } else {
+            if direct {
+                out.push_str(", not handled yet");
+            }
+            match live {
+                0 => out.push_str("; no live session of theirs has it now"),
+                1 => {}
+                n => {
+                    let _ = write!(out, "; {n} of their live sessions have it");
+                }
+            }
+        }
+    }
+    if d["claimed_by"].is_object() {
+        let _ = write!(out, "; {}", claim_state(handle, &d["claimed_by"]));
+    } else if live > 0 && !handled {
+        out.push_str("; nobody of theirs has it");
+    }
 }
 
 /// A note's text, fenced unless it is `me`'s, and a line when it was cut.
@@ -318,7 +365,7 @@ pub fn inbox(v: &Value, me: Option<&str>) -> String {
         .map(Vec::as_slice)
         .unwrap_or_default();
     if threads.is_empty() {
-        out.push_str("\nNothing new and nothing waiting for you.\n");
+        out.push_str("\nNothing new and nothing pending for you.\n");
     }
     for t in threads {
         out.push('\n');
@@ -338,11 +385,12 @@ pub fn inbox(v: &Value, me: Option<&str>) -> String {
             "\n{more} more thread(s) not shown: call inbox again to see them.\n"
         );
     } else if more > 0 {
-        // Only waiting threads, which stay until answered: another call shows the same ones.
+        // Only pending threads, which stay until handled: another call shows the same ones.
         let _ = write!(
             out,
-            "\n{more} more thread(s) not shown: older ones, also waiting for a reply. Calling \
-             inbox again shows the same threads; replying to or closing those above makes room.\n"
+            "\n{more} more thread(s) not shown: older ones, also pending for your person. Calling \
+             inbox again shows the same threads; answering, closing or marking done those above \
+             makes room.\n"
         );
     }
     out
@@ -361,6 +409,19 @@ pub fn pushed(threads: &[Value], me: Option<&str>) -> String {
     for t in threads {
         out.push('\n');
         out.push_str(&thread(t, me));
+    }
+    out
+}
+
+/// What `send` with `done` did.
+pub fn done(v: &Value) -> String {
+    let id = s(&v["thread"]);
+    let mut out = format!(
+        "Marked thread {id} handled: it is no longer pending for your person (a new note by \
+         someone else makes it pending again). Nothing was written, and nothing claimed."
+    );
+    if v["claimed"] == "other-session" {
+        out.push_str(" Another of your person's sessions still holds it.");
     }
     out
 }
@@ -462,7 +523,7 @@ mod tests {
         let v = json!({ "team": [], "session": { "label": "x", "context": null },
                         "threads": [t], "more": 2 });
         let out = inbox(&v, Some("oscar"));
-        assert!(out.contains("older ones, also waiting"), "{out}");
+        assert!(out.contains("older ones, also pending"), "{out}");
     }
 
     #[test]
@@ -560,7 +621,17 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("addressed to you in pagos-api"), "{out}");
-        assert!(out.contains("Waiting for a reply from you."), "{out}");
+        assert!(
+            out.contains(
+                "Pending for your person: they have not handled it yet. If it is for you and \
+                 needs nothing, mark it handled with send(thread=\"r_1\", done=true) and no text. "
+            ),
+            "{out}"
+        );
+        // A server that says `pending` is believed over `waiting_for_you`.
+        let mut handled = sample();
+        handled["pending"] = false.into();
+        assert!(!thread(&handled, None).contains("Pending"));
         // Waiting for a reply: how to claim it, as a state, if it needs work.
         assert!(
             out.contains(
@@ -611,6 +682,66 @@ mod tests {
             out.contains("- @ana: note n_1 reached \"Claude Code\" in pagos-api at t2; seen by 2 of their sessions; nobody of theirs has it"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn delivery_tells_seen_from_handled_without_seen_by_0() {
+        let pi = json!({ "label": "pi", "context": "embeddings" });
+        let cc = json!({ "label": "Claude Code", "context": "producto" });
+        let mut t = sample();
+        t["notes"] = t["new_notes"].take();
+        let entry = |seen_by: i64, handled: Option<&Value>| {
+            json!({ "handle": "oscar", "note": "n_1", "delivered_at": "2026-11-08T10:46:00Z",
+                    "by": pi, "claimed_by": null, "seen_by": seen_by,
+                    "handled_at": handled.map(|_| "2026-11-08T19:30:00Z"),
+                    "handled_by": handled })
+        };
+        let line = |d: Value, kind: &str| {
+            let mut t = t.clone();
+            t["kind"] = kind.into();
+            t["delivery"] = json!([d]);
+            let out = thread(&t, Some("ana"));
+            out.lines()
+                .find(|l| l.starts_with("- @oscar: "))
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(
+            line(entry(1, None), "direct"),
+            "- @oscar: note n_1 seen by \"pi\" in embeddings at 10:46 UTC on 2026-11-08, not \
+             handled yet; nobody of theirs has it"
+        );
+        // The session that saw it has ended: said so, never "seen by 0".
+        let ended = line(entry(0, None), "direct");
+        assert_eq!(
+            ended,
+            "- @oscar: note n_1 seen by \"pi\" in embeddings at 10:46 UTC on 2026-11-08, not \
+             handled yet; no live session of theirs has it now"
+        );
+        assert!(!ended.contains("seen by 0"), "{ended}");
+        assert!(line(entry(3, None), "direct").contains("; 3 of their live sessions have it"));
+        assert_eq!(
+            line(entry(0, Some(&cc)), "direct"),
+            "- @oscar: note n_1 seen by \"pi\" in embeddings at 10:46 UTC on 2026-11-08; handled \
+             by \"Claude Code\" in producto at 19:30 UTC on 2026-11-08"
+        );
+        // Answering a team question is optional: nothing is "not handled" there.
+        assert!(!line(entry(1, None), "team").contains("not handled"));
+    }
+
+    #[test]
+    fn done_says_nothing_was_written() {
+        let v = json!({ "thread": "r_1", "note": null, "status": "open", "claimed": null });
+        let out = done(&v);
+        assert!(out.starts_with("Marked thread r_1 handled"), "{out}");
+        assert!(
+            out.contains("Nothing was written, and nothing claimed."),
+            "{out}"
+        );
+        assert!(!out.contains("still holds"), "{out}");
+        let held =
+            json!({ "thread": "r_1", "note": null, "status": "open", "claimed": "other-session" });
+        assert!(done(&held).contains("Another of your person's sessions still holds it."));
     }
 
     #[test]
@@ -730,7 +861,7 @@ mod tests {
         let out = inbox(&waiting, Some("oscar"));
         assert!(!out.contains("call inbox again"), "{out}");
         assert!(
-            out.contains("3 more thread(s) not shown: older ones, also waiting"),
+            out.contains("3 more thread(s) not shown: older ones, also pending"),
             "{out}"
         );
         let empty = json!({ "team": [], "session": { "label": "x", "context": "a" }, "threads": [], "more": 0 });
