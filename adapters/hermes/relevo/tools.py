@@ -73,6 +73,9 @@ def relevo_send(args: dict, **_: Any) -> str:
             payload["close"] = True
         if args.get("claim"):
             payload["claim"] = True
+        if args.get("done"):
+            payload["done"] = True
+            return client.describe_done(_api().send(payload))
         return client.describe_send(_api().send(payload))
 
     return _run("relevo_send", go)
@@ -118,8 +121,11 @@ _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
         "The note must be self-contained: the reader does not share your context. Write in the first "
         "person, as your person would (\"I changed…\"). A new thread starts with a one-line subject "
         "(its title), no greeting and no \"Re:\". `close: true` closes the thread after writing: only "
-        "when your person asks, or when you asked the question and it is answered. Says who has the "
-        "thread.\n\n"
+        "when your person asks, or when you asked the question and it is answered. `done: true` with "
+        "`thread` and no text marks the thread handled when it needs nothing (an answer you have now "
+        "read, a thank-you): nothing is written or claimed. A note stays pending for your person until "
+        "they answer, close it or mark it done; if it is not for you, write nothing and leave it "
+        "pending. Says who has the thread.\n\n"
         + client.TOOL_RULES,
         {
             "to": {"anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}],
@@ -132,7 +138,8 @@ _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
                                                       "person would write it (\"I changed…\", not \"Ana "
                                                       "changed…\"). Opening a thread, its first line is a "
                                                       "one-line subject (the title), no greeting and no "
-                                                      "\"Re:\". Optional only when closing or claiming. "
+                                                      "\"Re:\". Optional only when closing, claiming or "
+                                                      "marking done. "
                                                       "Never a note that only says you are on it."},
             "close": {"type": "boolean", "description": "Close the thread after writing. Only when your "
                                                         "person asks, or when you asked the question and it "
@@ -143,6 +150,12 @@ _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
                                      "writing a note when there is no `text`. Use it just before you "
                                      "start changing files or running something long. Not for team "
                                      "questions."},
+            "done": {"type": "boolean",
+                     "description": "With `thread` and no `text` (and no `claim`): your person has handled "
+                                    "the thread up to its latest note, with nothing to write (\"seen, nothing "
+                                    "to do\": an answer you have now read, a thank-you). It stops being "
+                                    "pending for them; nothing is written and nothing claimed. Not for a "
+                                    "note that is not for you: leave that one pending."},
         },
         [],
     ),
@@ -157,7 +170,7 @@ _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
     ),
     "relevo_thread": (
         relevo_thread,
-        "A whole Relevo thread: every note in full, who has seen it and who holds it.",
+        "A whole Relevo thread: every note in full, who has seen it, who has handled it and who holds it.",
         {"id": {"type": "string", "description": "Thread id (r_…)."}},
         ["id"],
     ),

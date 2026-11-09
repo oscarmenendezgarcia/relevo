@@ -843,7 +843,17 @@ class Tools(Base):
         schema = next(d["function"]["parameters"] for d in registry.get_definitions({"relevo_send"}, quiet=True))
         self.assertEqual(schema["properties"]["claim"]["type"], "boolean")
         self.assertIn("Not for team questions", schema["properties"]["claim"]["description"])
-        self.assertIn("Optional only when closing or claiming", schema["properties"]["text"]["description"])
+        self.assertIn("Optional only when closing, claiming or marking done.", schema["properties"]["text"]["description"])
+        self.assertEqual(schema["properties"]["done"]["type"], "boolean")
+        self.assertTrue(schema["properties"]["done"]["description"].startswith(
+            "With `thread` and no `text` (and no `claim`): your person has handled the thread"))
+        self.assertTrue(schema["properties"]["done"]["description"].endswith(
+            "Not for a note that is not for you: leave that one pending."))
+        for phrase in ("`done: true` with `thread` and no text marks the thread handled when it needs nothing (an "
+                       "answer you have now read, a thank-you): nothing is written or claimed.",
+                       "A note stays pending for your person until they answer, close it or mark it done; if it "
+                       "is not for you, write nothing and leave it pending."):
+            self.assertIn(phrase, send)
         self.assertIn('In the first person, as your person would write it ("I changed…", not "Ana changed…")',
                       schema["properties"]["text"]["description"])
         self.assertIn('no greeting and no "Re:"', schema["properties"]["text"]["description"])
@@ -1009,6 +1019,34 @@ class Sessions(Base):
         done = tools.relevo_send({"thread": opened["thread"], "text": "Done: the export is in the bucket."})
         self.assertIn("You hold this thread.", done)
 
+    async def test_done_marks_the_thread_handled_writing_and_claiming_nothing(self):
+        opened = self.ana.send(to=["oscar"], text="Thanks, the fix works.")
+        self.assertIn("Thanks, the fix works.", tools.relevo_inbox({}))
+        out = tools.relevo_send({"thread": opened["thread"], "done": True})
+        self.assertEqual(out, f"Marked thread {opened['thread']} handled: it is no longer pending for your person "
+                              "(a new note by someone else makes it pending again). Nothing was written, and "
+                              "nothing claimed.")
+        self.assertEqual(len(self.ana.thread(opened["thread"])["notes"]), 1)
+        oscar = self._oscar(opened["thread"])
+        self.assertIsNone(oscar["claimed_by"])
+        self.assertRegex(oscar["handled_at"], r"^\d{4}-\d\d-\d\dT")
+        self.assertEqual(oscar["handled_by"]["label"], "Hermes")
+        # Pending for no session of Oscar's, a new one included.
+        fresh = Person(SERVER, "oscar", session="test-oscar-new").inbox(all_=True)
+        self.assertNotIn(opened["thread"], [t["id"] for t in fresh["threads"]])
+        # A new note by someone else makes it pending again.
+        self.ana.send(thread=opened["thread"], text="One more thing: the logs?")
+        self.assertTrue(next(t for t in Person(SERVER, "oscar", session="test-oscar-new").inbox()["threads"]
+                             if t["id"] == opened["thread"])["pending"])
+        # Done while another of Oscar's sessions (the gateway's) holds it: said so.
+        self._gateway_claims(opened["thread"])
+        held = tools.relevo_send({"thread": opened["thread"], "done": True})
+        self.assertTrue(held.endswith("Nothing was written, and nothing claimed. Another of your person's sessions "
+                                      "still holds it."), held)
+        # Not with text: the server refuses it, and the tool says so.
+        refused = tools.relevo_send({"thread": opened["thread"], "done": True, "text": "ok"})
+        self.assertTrue(refused.startswith("Error: Relevo refused it: BAD_REQUEST"), refused)
+
     async def test_a_cli_agent_sees_what_a_thread_the_gateway_fetched_waits_on(self):
         a = self.make_adapter()
         await a.connect()
@@ -1094,7 +1132,7 @@ class Sessions(Base):
         self.assertIn("read by the CLI", tools.relevo_inbox({}))
         done = self.ana.send(to=["oscar"], text="Thanks for yesterday!")
         self.assertIn("Thanks for yesterday!", tools.relevo_inbox({}))
-        Person(SERVER, "oscar", session="test-oscar-phone").send(thread=done["thread"], done=True)
+        tools.relevo_send({"thread": done["thread"], "done": True})
         unread = self.ana.send(to=["oscar"], text="Also sent while it was away, read by nobody")
         b = self.make_adapter()
         await b.connect()

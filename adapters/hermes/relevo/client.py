@@ -751,6 +751,15 @@ def describe_send(result: dict) -> str:
     return text
 
 
+def describe_done(result: dict) -> str:
+    """What the agent reads after `send` with `done`, as relevo mcp says it (src/render.rs)."""
+    text = (f"Marked thread {result.get('thread')} handled: it is no longer pending for your person (a new "
+            "note by someone else makes it pending again). Nothing was written, and nothing claimed.")
+    if result.get("claimed") == "other-session":
+        text += " Another of your person's sessions still holds it."
+    return text
+
+
 def describe_refusal(exc: RelevoError) -> str:
     """A refusal the agent can act on, with the team list when a handle was unknown."""
     text = f"Relevo refused it: {exc.code}: {exc.message}"
