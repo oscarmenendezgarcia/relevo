@@ -321,9 +321,15 @@ struct Pinned {
     algorithms: WebPkiSupportedAlgorithms,
 }
 
-/// Why a pinned certificate refused the server's.
-#[derive(Debug)]
+/// Why a pinned certificate refused the server's. rustls shows it with `Debug`, so that says
+/// the same as `Display`.
 struct NotPinned;
+
+impl std::fmt::Debug for NotPinned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
 
 impl std::fmt::Display for NotPinned {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -68,6 +68,7 @@ fn relevo(home: &Path) -> Command {
         .env("RELEVO_CONFIG", home.join("config.json"))
         .env_remove("RELEVO_URL")
         .env_remove("RELEVO_TOKEN")
+        .env_remove("RELEVO_CERT")
         .env_remove("RELEVO_CONTEXT")
         .kill_on_drop(true);
     cmd
@@ -1204,5 +1205,299 @@ async fn plain_http_to_another_host_warns_before_the_token_goes_out() {
         .unwrap();
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("relevo mcp: warning: plain http"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------------------------
+// HTTPS in `relevo serve` itself, and the certificate `connect` pins.
+
+/// `relevo serve --tls …` run as the binary on a free port of loopback, until dropped.
+struct Served {
+    _child: Child,
+    port: u16,
+    /// What it printed before it listened.
+    out: String,
+    fingerprint: String,
+}
+
+async fn serve_tls(db: &Path, port: Option<u16>, args: &[&str]) -> Served {
+    let port = port.unwrap_or_else(|| {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    });
+    let mut child = Command::new(env!("CARGO_BIN_EXE_relevo"))
+        .arg("--db")
+        .arg(db)
+        .args(["serve", "--tls", "--addr", &format!("127.0.0.1:{port}")])
+        .args(args)
+        .env("NO_COLOR", "1")
+        .env("RUST_LOG", "info")
+        .env_remove("RELEVO_TLS")
+        .env_remove("RELEVO_TLS_NAME")
+        .stdout(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut out = String::new();
+    loop {
+        let line = tokio::time::timeout(WAIT, lines.next_line())
+            .await
+            .expect("relevo serve starts in time")
+            .unwrap()
+            .unwrap_or_else(|| panic!("relevo serve ended: {out}"));
+        out.push_str(&line);
+        out.push('\n');
+        if line.contains("relevo listening") {
+            break;
+        }
+    }
+    // Keep reading what it logs, so it never blocks on a full pipe.
+    tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
+    let fingerprint = out
+        .lines()
+        .find_map(|l| l.strip_prefix("TLS certificate SHA-256 fingerprint: "))
+        .unwrap_or_else(|| panic!("no fingerprint in {out}"))
+        .to_string();
+    Served {
+        _child: child,
+        port,
+        out,
+        fingerprint,
+    }
+}
+
+impl Served {
+    fn url(&self, host: &str) -> String {
+        format!("https://{host}:{}", self.port)
+    }
+}
+
+/// Runs the admin CLI on `db`; its stdout.
+fn admin(db: &Path, args: &[&str]) -> String {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_relevo"))
+        .arg("--db")
+        .arg(db)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// A new person's token on `db`.
+fn invite(db: &Path, handle: &str) -> String {
+    let out = admin(db, &["invite", handle, "--name", handle]);
+    out.lines().nth(1).unwrap().to_string()
+}
+
+/// `relevo connect <url> --fingerprint …` (when given) with the token on stdin.
+async fn connect_tls(home: &Path, url: &str, token: &str, fingerprint: Option<&str>) -> Output {
+    let mut cmd = relevo(home);
+    cmd.args(["connect", url]);
+    if let Some(fp) = fingerprint {
+        cmd.args(["--fingerprint", fp]);
+    }
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin
+        .write_all(format!("{token}\n").as_bytes())
+        .await
+        .unwrap();
+    drop(stdin);
+    let out = tokio::time::timeout(WAIT, child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    Output {
+        ok: out.status.success(),
+        stdout: String::from_utf8_lossy(&out.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+    }
+}
+
+struct Output {
+    ok: bool,
+    stdout: String,
+    stderr: String,
+}
+
+fn tls_dir() -> PathBuf {
+    let dir = std::env::temp_dir().join(db::random_id("relevo-tls-"));
+    std::fs::create_dir(&dir).unwrap();
+    dir
+}
+
+fn mode(p: &Path) -> u32 {
+    std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn over_tls_connect_pins_the_certificate_and_mcp_uses_it() {
+    let dir = tls_dir();
+    let db = dir.join("relevo.db");
+    let ana = invite(&db, "ana");
+    let bob = invite(&db, "bob");
+    let served = serve_tls(&db, None, &[]).await;
+    assert!(
+        served
+            .out
+            .contains("made a certificate for localhost, 127.0.0.1, ::1"),
+        "{}",
+        served.out
+    );
+
+    // Kept next to the database, privately; `tls-fingerprint` says what serve printed.
+    let certs = dir.join("relevo.db.tls");
+    assert_eq!(mode(&certs), 0o700);
+    assert_eq!(mode(&certs.join("key.pem")), 0o600);
+    assert_eq!(admin(&db, &["tls-fingerprint"]).trim(), served.fingerprint);
+
+    let home = dir.join("home");
+    let file = home.join("config.json");
+    let url = served.url("127.0.0.1");
+
+    // No terminal and no --fingerprint: shown, refused, nothing saved.
+    let out = connect_tls(&home, &url, &ana, None).await;
+    assert!(!out.ok);
+    assert!(out.stderr.contains(&served.fingerprint), "{}", out.stderr);
+    assert!(out.stderr.contains("--fingerprint"), "{}", out.stderr);
+    assert!(!file.exists());
+
+    // A wrong fingerprint: refused, nothing saved.
+    let wrong = "00".repeat(32);
+    let out = connect_tls(&home, &url, &ana, Some(&wrong)).await;
+    assert!(!out.ok);
+    assert!(out.stderr.contains("not trusted"), "{}", out.stderr);
+    assert!(!file.exists());
+
+    // The right one, however it is written: the certificate is saved with the token.
+    let loose = served.fingerprint.replace(':', "").to_lowercase();
+    let out = connect_tls(&home, &url, &ana, Some(&loose)).await;
+    assert!(out.ok, "{}", out.stderr);
+    assert!(
+        out.stdout.contains("with its certificate"),
+        "{}",
+        out.stdout
+    );
+    assert!(!out.stdout.contains(&ana));
+    assert_eq!(mode(&file), 0o600);
+    let saved: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(
+        (saved["url"].as_str(), saved["token"].as_str()),
+        (Some(url.as_str()), Some(ana.as_str()))
+    );
+    assert_eq!(
+        saved["cert"].as_str(),
+        Some(
+            std::fs::read_to_string(certs.join("cert.pem"))
+                .unwrap()
+                .as_str()
+        )
+    );
+
+    // `relevo mcp` over https with the saved certificate; Bob's with RELEVO_CERT instead.
+    let mut cmd = relevo(&home);
+    cmd.arg("mcp").env("RELEVO_CONTEXT", "");
+    let mut ana_mcp = Mcp::spawn(cmd).await;
+    let sent = ana_mcp
+        .ok("send", json!({ "to": "bob", "text": "over TLS" }))
+        .await;
+    let id = thread_id(&sent);
+    let bob_home = dir.join("bob");
+    let mut cmd = relevo(&bob_home);
+    cmd.arg("mcp")
+        .env("RELEVO_URL", served.url("localhost"))
+        .env("RELEVO_TOKEN", &bob)
+        .env("RELEVO_CERT", certs.join("cert.pem"))
+        .env("RELEVO_CONTEXT", "");
+    let mut bob_mcp = Mcp::spawn(cmd).await;
+    let thread = bob_mcp.ok("thread", json!({ "id": id })).await;
+    assert!(thread.contains("over TLS"), "{thread}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pinned_certificate_refuses_another_and_new_names_make_a_new_one() {
+    let dir = tls_dir();
+    let db = dir.join("relevo.db");
+    let ana = invite(&db, "ana");
+    let first = serve_tls(&db, None, &[]).await;
+    let home = dir.join("home");
+    let url = first.url("127.0.0.1");
+    let out = connect_tls(&home, &url, &ana, Some(&first.fingerprint)).await;
+    assert!(out.ok, "{}", out.stderr);
+    let port = first.port;
+
+    // Started again: the same certificate, and names it has already change nothing.
+    drop(first);
+    let again = serve_tls(&db, Some(port), &["--tls-name", "127.0.0.1"]).await;
+    assert!(!again.out.contains("made"), "{}", again.out);
+    let fingerprint = again.fingerprint.clone();
+    drop(again);
+
+    // A name it lacks: a new certificate, for the names asked, and it says so.
+    let names = ["--tls-name", "relevo.test", "--tls-name", "127.0.0.1"];
+    let new = serve_tls(&db, Some(port), &names).await;
+    assert!(
+        new.out
+            .contains("made a new certificate for relevo.test, 127.0.0.1"),
+        "{}",
+        new.out
+    );
+    assert!(new.out.contains("lacked relevo.test"), "{}", new.out);
+    assert_ne!(new.fingerprint, fingerprint);
+    assert_eq!(admin(&db, &["tls-fingerprint"]).trim(), new.fingerprint);
+    assert_eq!(mode(&dir.join("relevo.db.tls/key.pem")), 0o600);
+
+    // The client pinned the old one: refused, even though the new one is for the same address.
+    let mut cmd = relevo(&home);
+    cmd.arg("mcp").env("RELEVO_CONTEXT", "");
+    let mut mcp = Mcp::spawn(cmd).await;
+    let (failed, err) = mcp.call("inbox", json!({})).await;
+    assert!(failed);
+    assert!(err.contains("not the one `relevo connect` saved"), "{err}");
+
+    // A certificate pinned is checked for the host too: this one is not for `localhost`.
+    let mut cmd = relevo(&home);
+    cmd.arg("mcp")
+        .env("RELEVO_URL", new.url("localhost"))
+        .env("RELEVO_TOKEN", &ana)
+        .env("RELEVO_CERT", dir.join("relevo.db.tls/cert.pem"))
+        .env("RELEVO_CONTEXT", "");
+    let mut mcp = Mcp::spawn(cmd).await;
+    let (failed, err) = mcp.call("inbox", json!({})).await;
+    assert!(failed);
+    assert!(
+        err.contains("NotValidForName") || err.contains("not valid for"),
+        "{err}"
+    );
+    let out = connect_tls(&home, &new.url("localhost"), &ana, Some(&new.fingerprint)).await;
+    assert!(!out.ok);
+    assert!(out.stderr.contains("not for the host"), "{}", out.stderr);
+
+    // connect again, with the new fingerprint: trusted from then on.
+    let out = connect_tls(&home, &url, &ana, Some(&new.fingerprint)).await;
+    assert!(out.ok, "{}", out.stderr);
+    let mut cmd = relevo(&home);
+    cmd.arg("mcp").env("RELEVO_CONTEXT", "");
+    let mut mcp = Mcp::spawn(cmd).await;
+    mcp.ok("inbox", json!({})).await;
+
+    // Without CA certificates on the client, the pinned one is all it needs.
+    let mut cmd = relevo(&home);
+    without_ca_roots(&mut cmd, &dir);
+    cmd.arg("mcp").env("RELEVO_CONTEXT", "");
+    let mut mcp = Mcp::spawn(cmd).await;
+    mcp.ok("inbox", json!({})).await;
     let _ = std::fs::remove_dir_all(&dir);
 }
