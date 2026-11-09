@@ -583,6 +583,57 @@ async fn a_session_that_exits_hands_its_threads_to_the_next_at_once() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_session_killed_by_sigterm_or_sigint_ends_and_releases_its_claims() {
+    let s = server(&["ana", "bob"]).await;
+    for (signal, args) in [("TERM", &[][..]), ("INT", &["--channel"][..])] {
+        let mut bob = Mcp::start(&s, "bob", &s.dir, Some("pagos-api"), args).await;
+        let id = {
+            let mut asker = Mcp::start(&s, "ana", &s.dir, Some(""), &[]).await;
+            let id = thread_id(
+                &asker
+                    .ok("send", json!({ "to": ["bob"], "text": "Q?" }))
+                    .await,
+            );
+            assert!(asker.close().await.success());
+            id
+        };
+        let sent = bob.ok("send", json!({ "thread": id, "claim": true })).await;
+        assert!(sent.contains("this session has it now"), "{sent}");
+        assert_eq!(sessions(&s, "bob"), 1);
+        // Whether a session of Bob's holds the thread.
+        let held = || -> bool {
+            s.app
+                .db()
+                .query_row(
+                    "SELECT claimed_by IS NOT NULL FROM participants p JOIN people pe
+                     ON pe.id = p.person_id WHERE p.thread_id = ?1 AND pe.handle = 'bob'",
+                    [&id],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert!(held());
+        // Killed as Claude Code kills its MCP servers when it exits, stdin still open.
+        let pid = bob.child.id().unwrap().to_string();
+        let started = std::time::Instant::now();
+        let killed = std::process::Command::new("kill")
+            .args([&format!("-{signal}"), &pid])
+            .status()
+            .unwrap();
+        assert!(killed.success());
+        let status = tokio::time::timeout(WAIT, bob.child.wait())
+            .await
+            .expect("relevo mcp ends on the signal")
+            .unwrap();
+        assert!(status.success(), "{signal}: {status}");
+        assert!(started.elapsed() < Duration::from_secs(5), "{signal}");
+        // It ended its session on the way out: the claim is gone at once.
+        assert_eq!(sessions(&s, "bob"), 0, "{signal}");
+        assert!(!held(), "{signal}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_server_that_does_not_answer_holds_up_the_exit_only_briefly() {
     // Takes connections and never answers.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

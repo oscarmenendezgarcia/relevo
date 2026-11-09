@@ -326,10 +326,13 @@ impl ServerHandler for Relevo {
     }
 }
 
-/// Serves MCP on stdin and stdout until stdin closes, then ends the session on the server (best
-/// effort, for `END_TIMEOUT` at most), so the threads it holds go back to the person's other
-/// sessions at once instead of after the claims lapse.
+/// Serves MCP on stdin and stdout until stdin closes or SIGTERM or SIGINT comes (Claude Code
+/// kills its MCP servers when it exits), then ends the session on the server (best effort, for
+/// `END_TIMEOUT` at most), so the threads it holds go back to the person's other sessions at once
+/// instead of after the claims lapse.
 pub async fn run(channel: bool) -> anyhow::Result<()> {
+    // Listening from the start, so a signal that comes early is not lost.
+    let stop = stop_signal()?;
     let client = config::load(config::env).and_then(|c| {
         if let Some(warning) = config::plain_http_warning(&c.url) {
             eprintln!("relevo mcp: {warning}");
@@ -359,7 +362,10 @@ pub async fn run(channel: bool) -> anyhow::Result<()> {
             Err(e) => eprintln!("relevo mcp: no channel events: {e:#}"),
         }
     }
-    let served = service.waiting().await;
+    let served = tokio::select! {
+        served = service.waiting() => Some(served),
+        _ = stop => None,
+    };
     // The background request first, so it does not answer for the session once it is ended.
     if let Some(news) = news {
         news.abort();
@@ -371,8 +377,37 @@ pub async fn run(channel: bool) -> anyhow::Result<()> {
         // The code and message only: never the token.
         eprintln!("relevo mcp: ending the session: {e}");
     }
-    served?;
-    Ok(())
+    match served {
+        Some(served) => {
+            served?;
+            Ok(())
+        }
+        // Stopped by a signal: stdin may still be open, and the blocking read on it would hold
+        // up the runtime's shutdown, so exit here.
+        None => std::process::exit(0),
+    }
+}
+
+/// Resolves when SIGTERM or SIGINT comes.
+#[cfg(unix)]
+fn stop_signal() -> std::io::Result<impl Future<Output = ()>> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut term = signal(SignalKind::terminate())?;
+    let mut int = signal(SignalKind::interrupt())?;
+    Ok(async move {
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = int.recv() => {}
+        }
+    })
+}
+
+/// Resolves on Ctrl-C.
+#[cfg(not(unix))]
+fn stop_signal() -> std::io::Result<impl Future<Output = ()>> {
+    Ok(async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
 }
 
 /// The channel event for a thread with notes by others that are new for this session.
