@@ -239,7 +239,7 @@ fn write_private(file: &Path, text: &str, mode: u32) -> Result<()> {
 }
 
 /// The names a new certificate gets when `--tls-name` gives none: `localhost`, `127.0.0.1`,
-/// `::1`, this machine's host name and its addresses other than loopback and link-local.
+/// `::1`, this machine's host name and its network addresses.
 pub fn default_names() -> Vec<String> {
     let mut names = vec!["localhost".to_string(), "127.0.0.1".into(), "::1".into()];
     if let Ok(host) = std::fs::read_to_string("/proc/sys/kernel/hostname") {
@@ -248,6 +248,17 @@ pub fn default_names() -> Vec<String> {
             names.push(host.to_string());
         }
     }
+    for ip in network_addresses() {
+        if !names.contains(&ip.to_string()) {
+            names.push(ip.to_string());
+        }
+    }
+    names
+}
+
+/// This machine's addresses other than loopback and link-local (none if they cannot be read).
+pub fn network_addresses() -> Vec<IpAddr> {
+    let mut out: Vec<IpAddr> = vec![];
     for ip in interface_addresses() {
         let local = match ip {
             IpAddr::V4(v4) => v4.is_loopback() || v4.is_link_local() || v4.is_unspecified(),
@@ -255,11 +266,40 @@ pub fn default_names() -> Vec<String> {
                 v6.is_loopback() || v6.is_unspecified() || (v6.segments()[0] & 0xffc0) == 0xfe80
             }
         };
-        if !local && !names.contains(&ip.to_string()) {
-            names.push(ip.to_string());
+        if !local && !out.contains(&ip) {
+            out.push(ip);
         }
     }
-    names
+    out
+}
+
+/// What `serve --tls` warns about its own certificate, which `--tls-name` did not name: that it
+/// has none of this machine's network `addresses`, or that there are none to have (they could
+/// not be read). Teammates who connect by address are then refused.
+pub fn address_warning(cert: &CertificateDer, addresses: &[IpAddr]) -> Option<String> {
+    let fix = "teammates who connect by address are refused; name the addresses and names they \
+               use with --tls-name or RELEVO_TLS_NAME (comma-separated)";
+    if addresses.is_empty() {
+        return Some(format!(
+            "found no network address of this machine (under systemd, RestrictAddressFamilies= \
+             must allow AF_NETLINK), so the certificate has none: {fix}"
+        ));
+    }
+    if addresses
+        .iter()
+        .any(|ip| names(cert, &ServerName::IpAddress((*ip).into())))
+    {
+        return None;
+    }
+    let list = addresses
+        .iter()
+        .map(IpAddr::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "the certificate has none of this machine's network addresses ({list}): {fix}; that \
+         makes a new certificate, and every client runs `relevo connect` again"
+    ))
 }
 
 /// The addresses of this machine's network interfaces (none if they cannot be read).
@@ -591,6 +631,37 @@ mod tests {
         let der = certs_from_pem(&cert).unwrap().swap_remove(0);
         assert_eq!(certs_from_pem(&pem(&der)).unwrap()[0], der);
         assert!(certs_from_pem("nothing").is_err());
+    }
+
+    #[test]
+    fn a_certificate_without_the_machines_addresses_is_warned_about() {
+        let lan: IpAddr = "192.168.1.50".parse().unwrap();
+        let vpn: IpAddr = "100.69.148.45".parse().unwrap();
+        let der = |names: &[&str]| {
+            let (cert, _) = self_signed(&strings(names)).unwrap();
+            certs_from_pem(&cert).unwrap().swap_remove(0)
+        };
+        let local = der(&["localhost", "127.0.0.1", "::1", "box"]);
+        // None could be read (getifaddrs failed): said, with why it may have.
+        let none = address_warning(&local, &[]).unwrap();
+        assert!(
+            none.contains("AF_NETLINK") && none.contains("RELEVO_TLS_NAME"),
+            "{none}"
+        );
+        // There are some, and it has none of them.
+        let lacks = address_warning(&local, &[lan, vpn]).unwrap();
+        assert!(lacks.contains("192.168.1.50, 100.69.148.45"), "{lacks}");
+        assert!(lacks.contains("--tls-name"), "{lacks}");
+        // It has one of them: nothing to say.
+        let with_lan = der(&["localhost", "192.168.1.50"]);
+        assert_eq!(address_warning(&with_lan, &[lan, vpn]), None);
+        // The machine's own, as found here, are the ones default_names gives it.
+        let found = network_addresses();
+        let made = der(&default_names()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>());
+        assert_eq!(address_warning(&made, &found).is_some(), found.is_empty());
     }
 
     #[test]

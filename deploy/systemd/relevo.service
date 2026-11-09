@@ -34,8 +34,9 @@ ProtectSystem=strict
 ReadWritePaths=%h/.local/share/relevo
 PrivateTmp=yes
 # These need no namespaces, so they hold even where the mount sandbox above cannot be set up
-# (see "Sandbox" in docs/install.md).
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# (see "Sandbox" in docs/install.md). AF_NETLINK only reads the machine's addresses (glibc's
+# getifaddrs() needs it): without it, the certificate `serve --tls` makes has none of them.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 RestrictNamespaces=yes
 RestrictRealtime=yes
 LockPersonality=yes

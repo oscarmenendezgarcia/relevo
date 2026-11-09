@@ -287,6 +287,13 @@ fn server_tls(
                     missing.join(", ")
                 ),
             }
+            // Only for the names it chose itself: --tls-name says which the owner wants.
+            if names.is_empty()
+                && let Some(warning) =
+                    tls::address_warning(&cert.chain[0], &tls::network_addresses())
+            {
+                tracing::warn!("{warning}");
+            }
             cert
         }
         _ => return Ok(None),

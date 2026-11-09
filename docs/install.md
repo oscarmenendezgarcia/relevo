@@ -108,7 +108,7 @@ Environment=RELEVO_TLS=true
 Environment=RELEVO_ADDR=0.0.0.0:7878
 ```
 
-and restart it: `systemctl --user restart relevo`. The first start makes a self-signed certificate (valid 10 years) for `localhost`, the loopback addresses, this machine's host name and its network addresses, and keeps it next to the database in `~/.local/share/relevo/relevo.db.tls/` (the key readable by you only). Later starts reuse it. At every start the server prints the certificate's SHA-256 fingerprint; see it again with
+and restart it: `systemctl --user restart relevo`. The first start makes a self-signed certificate (valid 10 years) for `localhost`, the loopback addresses, this machine's host name and its network addresses, and keeps it next to the database in `~/.local/share/relevo/relevo.db.tls/` (the key readable by you only). Later starts reuse it. (The unit allows `AF_NETLINK` sockets for this: reading the machine's addresses needs one.) When the certificate, made without `RELEVO_TLS_NAME`, has none of the machine's network addresses, or none could be read, every start logs a warning saying so; then set the names as in **Names** below. At every start the server prints the certificate's SHA-256 fingerprint; see it again with
 
 ```
 relevo tls-fingerprint                             # with RELEVO_DB set, as in part 2
