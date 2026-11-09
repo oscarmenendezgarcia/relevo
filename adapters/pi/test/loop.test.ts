@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, before, test } from "node:test";
+import { after, afterEach, before, test } from "node:test";
 import { RULES, systemSection } from "../src/index.ts";
 import { loadExtension, until } from "./mock-pi.ts";
 import { api, startServer, type TestServer } from "./server.ts";
@@ -23,6 +23,17 @@ before(async () => {
 after(async () => {
   await server?.stop();
   rmSync(home, { recursive: true, force: true });
+});
+
+// A note stays pending for oscar until one of his sessions handles it, and every new session
+// gets it: each test starts with nothing pending, so earlier tests' notes do not arrive in it.
+afterEach(async () => {
+  for (let i = 0; i < 10; i++) {
+    const inbox = await api(server, oscar, "GET", "/api/inbox?all=1", undefined, "cleanup-session");
+    const pending = inbox.threads.filter((t: any) => t.pending);
+    if (!pending.length && !inbox.more) return;
+    for (const t of pending) await api(server, oscar, "POST", "/api/send", { thread: t.id, done: true }, "cleanup-session");
+  }
 });
 
 function extension(extra: Record<string, unknown> = {}) {
