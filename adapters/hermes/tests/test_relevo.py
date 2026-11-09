@@ -1275,6 +1275,37 @@ class Sessions(Base):
         await asyncio.sleep(0.5)
         self.assertEqual(sorted(e.source.chat_id for e in self.events), sorted([read["thread"], unread["thread"]]))
 
+    async def test_a_note_hermes_may_resume_after_a_restart_says_to_check_before_acting_again(self):
+        """A restart that hit the drain timeout leaves the relevo chat working on a note
+        `resume_pending`: Hermes resumes that turn, and the fresh session's first inbox hands the
+        same note over again, queued behind it. That copy says so, and to check the thread first.
+        Other chats, and notes after the first batch, come as usual."""
+        resumed = self.ana.send(to=["oscar"], text="Restart test: rotate the staging key?")
+        other = self.ana.send(to=["oscar"], text="Restart test: a chat Hermes does not resume")
+
+        class Store:  # Hermes' session store, as the gateway sets it on every adapter
+            def lookup_by_session_key(self, key):
+                return types.SimpleNamespace(resume_pending=resumed["thread"] in key)
+
+        a = self.make_adapter()
+        a.set_session_store(Store())
+        await a.connect()
+        await self.until(lambda: len(self.events) == 2)
+        by_chat = {e.source.chat_id: e.text for e in self.events}
+        again = by_chat[resumed["thread"]]
+        self.assertTrue(again.startswith(
+            f"Handed over again: before the gateway restarted, this chat was already working on Relevo thread "
+            f"{resumed['thread']}, and Hermes may resume that interrupted turn."), again)
+        self.assertIn("First read the thread with relevo_thread: if it is no longer pending for your person, or "
+                      "this chat already answered it or is working on it, answer exactly [SILENT] and do "
+                      "nothing else.", again)
+        self.assertIn("Restart test: rotate the staging key?", again)
+        self.assertNotIn("Handed over again", by_chat[other["thread"]])
+        # Later notes in that chat are new ones: as usual.
+        self.ana.send(thread=resumed["thread"], text="Restart test: and the prod one?")
+        await self.until(lambda: len(self.events) == 3)
+        self.assertNotIn("Handed over again", self.events[2].text)
+
     @staticmethod
     def _gateway_claims(thread_id: str) -> str:
         """The agent of the relevo chat claims the thread, as its rules say, before longer work."""

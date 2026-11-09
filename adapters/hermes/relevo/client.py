@@ -642,9 +642,15 @@ def render_thread_head(thread: dict, me: Optional[str] = None, *, hints: bool = 
     return "\n".join(lines)
 
 
-def render_event(thread: dict, notes: list, me: Optional[str]) -> str:
-    """The text of the inbound message the gateway hands to the agent for new notes in a thread."""
+def render_event(thread: dict, notes: list, me: Optional[str], resumed: bool = False) -> str:
+    """The text of the inbound message the gateway hands to the agent for new notes in a thread.
+    `resumed`: handed over again after a restart, in a chat whose interrupted turn Hermes may resume."""
     head = f"New in Relevo thread {thread.get('id')}. Your reply in this chat is written in the thread"
+    if resumed:
+        head = (f"Handed over again: before the gateway restarted, this chat was already working on Relevo thread "
+                f"{thread.get('id')}, and Hermes may resume that interrupted turn. First read the thread with "
+                "relevo_thread: if it is no longer pending for your person, or this chat already answered it or "
+                "is working on it, answer exactly [SILENT] and do nothing else. Otherwise: " + head)
     pending = is_pending(thread)
     if pending:
         head += ". If it is not for you, answer exactly [SILENT] and leave it: it stays pending for your person."

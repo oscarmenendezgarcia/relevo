@@ -257,6 +257,9 @@ class RelevoAdapter(BasePlatformAdapter):
         self._holding_batch = False
         # Whether the session an earlier start may have left still has to be ended (see _poll_loop).
         self._end_first = True
+        # True for the first batch after the session started anew: what it holds may have reached
+        # the previous gateway process already (see _resumable).
+        self._first_batch = False
 
     # -- lifecycle ------------------------------------------------------------------------------
 
@@ -370,6 +373,7 @@ class RelevoAdapter(BasePlatformAdapter):
         anew with the first inbox: what is still pending for the person is new for it, at once."""
         await self.api.aend_session(self._ensure_http(), timeout=self.start_timeout)
         self._end_first = False
+        self._first_batch = True
         logger.info("[relevo] session %s starts anew: what is pending for this person comes in",
                     self.settings.session)
 
@@ -417,6 +421,7 @@ class RelevoAdapter(BasePlatformAdapter):
                                            client.describe_error(exc))
                 finally:
                     self._holding_batch = False
+                    self._first_batch = False
                 continue
             if await self._pause(delay):
                 return
@@ -449,6 +454,22 @@ class RelevoAdapter(BasePlatformAdapter):
         while len(self._seen) > _SEEN_LIMIT:
             self._seen.popitem(last=False)
 
+    def _resumable(self, source: Any) -> bool:
+        """Whether Hermes keeps this chat's session `resume_pending`: a restart interrupted its turn
+        (the drain timed out, or the process died mid-turn), and Hermes may resume that turn now.
+        The first batch after a fresh start hands such a chat its note again, queued behind the
+        resumed turn: that copy says so (client.render_event). It is not dropped, since Hermes may
+        not resume it after all (a stale mark, its restart-loop guard), and the note would then
+        not come again before the next start."""
+        store = getattr(self, "_session_store", None)
+        if store is None:
+            return False
+        try:
+            entry = store.lookup_by_session_key(self._source_session_key(source))
+        except Exception:
+            return False
+        return getattr(entry, "resume_pending", False) is True
+
     async def _dispatch(self, thread: dict, team: dict) -> None:
         thread_id = str(thread.get("id") or "")
         notes = [n for n in thread.get("new_notes") or [] if n.get("id") not in self._seen]
@@ -477,8 +498,9 @@ class RelevoAdapter(BasePlatformAdapter):
         name = f"{person.get('name')} (@{author})" if person.get("name") else f"@{author}"
         source = self.build_source(chat_id=thread_id, chat_name=self._titles[thread_id], chat_type="dm",
                                    user_id=author, user_name=name)
+        resumed = self._first_batch and self._resumable(source)
         event = MessageEvent(
-            text=client.render_event(thread, notes, self._me),
+            text=client.render_event(thread, notes, self._me, resumed),
             message_type=MessageType.TEXT,
             source=source,
             user_id=author,
