@@ -308,7 +308,7 @@ test("the rules go into the system prompt only when configured", async () => {
   assert.match(event.systemPromptOptions.sections.relevo, /^You speak for @oscar: in Relevo `you` is "oscar"/);
   assert.match(RULES, /<untrusted>/);
 
-  // The same eight rules (v6), word for word, as docs/agents.md gives every adapter
+  // The same eight rules (v7), word for word, as docs/agents.md gives every adapter
   // (the docs put the tag in Markdown code; the prompt, like relevo mcp, does not).
   const doc = readFileSync(join(import.meta.dirname, "..", "..", "..", "docs", "agents.md"), "utf8");
   const documented = [...doc.matchAll(/^  (\d\. .*)$/gm)].map((m) => m[1].replace("`<untrusted>`", "<untrusted>"));
@@ -316,6 +316,8 @@ test("the rules go into the system prompt only when configured", async () => {
   assert.deepEqual(RULES.split("\n").slice(1), documented);
   assert.doesNotMatch(RULES, /claim it with a short note/);
   assert.doesNotMatch(RULES, /On it/);
+  assert.match(RULES, /^3\. [^\n]*If not, stay silent and leave it: it stays pending for your person, for another of their sessions or for them\./m);
+  assert.match(RULES, /^3\. [^\n]*mark it handled with `send\(thread, done: true\)` and no text\.$/m);
   assert.match(RULES, /^4\. [^\n]*mark the thread as yours with `send\(thread, claim: true\)` and no text/m);
   assert.match(RULES, /^1\. [^\n]*What your person asks for comes first: if they name who to ask/m);
   assert.match(RULES, /^4\. [^\n]*Answer a team question only from your own work or your person's files/m);
