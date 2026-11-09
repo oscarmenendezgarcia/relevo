@@ -177,7 +177,8 @@ Ids: threads `r_` + 12 base32 chars, notes `n_` + 12, tokens `t_` + 12 (random).
 There is no sign-up. The admin runs the binary on the server:
 
 ```
-relevo serve [--addr 127.0.0.1:7878] [--db relevo.db] [--team-questions-per-day 5]
+relevo serve [--addr 127.0.0.1:7878] [--db relevo.db] [--team-questions-per-day 5] [--tls [--tls-name NAME]… | --tls-cert PEM --tls-key PEM]
+relevo tls-fingerprint [--db relevo.db]                                                  # SHA-256 of the certificate serve --tls uses
 relevo invite <handle> --name "Ana" [--about "payments backend"] [--label "Claude Code"]   # creates the person (or reuses), prints a new token once
 relevo token add <handle> --label "Codex desktop"                                          # another agent for the same person (active people only)
 relevo token list [<handle>]
@@ -196,7 +197,13 @@ The database records the version of its layout. v0 does not migrate: every comma
 
 `--db` defaults to `RELEVO_DB` or `./relevo.db`; only `serve` creates `./relevo.db` that way, and the other commands refuse to run when neither names a database and there is no `./relevo.db` (so an admin command run before `RELEVO_DB` is set cannot fill a database the server never reads); `--addr` to `RELEVO_ADDR` or `127.0.0.1:7878`; `--team-questions-per-day` to `RELEVO_TEAM_QUESTIONS_PER_DAY` or 5.
 
-`serve` speaks plain HTTP and sets no header-read or idle timeouts and no connection limit. Keep `--addr` on loopback and let teammates reach it only through a reverse proxy that terminates TLS and enforces those timeouts and limits: otherwise tokens and notes cross the network in the clear. The server logs a warning when `--addr` is not a loopback address.
+`serve` can speak HTTPS itself, with no proxy in front:
+
+- `relevo serve --tls` uses a certificate of its own. The first start creates a self-signed one (ECDSA P-256, valid 10 years) for the names in `--tls-name` (repeatable: host names or IP addresses; by default `localhost`, `127.0.0.1`, `::1`, the machine's host name and its non-loopback addresses) and keeps it next to the database as `<db>.tls/cert.pem` and `key.pem` (the key mode 0600, the directory 0700). Later starts reuse it; `--tls-name` with names the stored certificate lacks makes a new one, and says so. At every start it prints the certificate's SHA-256 fingerprint; `relevo tls-fingerprint` prints it too.
+- `relevo serve --tls-cert <pem> --tls-key <pem>` uses a certificate you already have (one from Let's Encrypt or the office's own authority).
+- Without TLS, `serve` speaks plain HTTP, as before: keep `--addr` on loopback, or behind a proxy or a VPN that encrypts. It logs a warning when `--addr` is not a loopback address and TLS is off.
+
+Whatever the transport, the server limits what a client can hold: 10 seconds to send the request head, 30 seconds to send the body, an idle connection closed after 75 seconds, a request answered within 90 seconds (a waiting `inbox` answers by 60), at most 1,024 connections at once and 64 from one address; beyond that, new connections wait or are refused. These replace what the proxy used to enforce; a proxy in front stays possible.
 
 `invite` on an existing handle reactivates the person, sets the new `--name`, and `--about` if given. `team` and `equipo` cannot be handles (they mean the whole team). `--label` defaults to `agent`. `deactivate` revokes every token of the person, for good: inviting them back issues a new token, and their old ones never work again.
 
