@@ -36,7 +36,7 @@ inbox() { req "$1" "$2" "$3" GET /api/inbox >/dev/null; }
 
 # Bob's second session is seen first, so the first one's reads give it rows of its own.
 req "$bob" bob-term-02 "" GET /api/people >/dev/null
-# Fetched by Bob, not answered: waiting in layout 5, handled once migrated.
+# Fetched by Bob, not answered: waiting in layout 5, still pending once migrated.
 fetched=$(send "$ana" ana-cc-0001 pagos-api '{"to":["bob"],"text":"Fetched, not answered"}')
 inbox "$bob" bob-term-01 pagos-api
 # Answered after reading.
@@ -55,7 +55,7 @@ inbox "$ana" ana-cc-0001 pagos-api
 closed=$(send "$ana" ana-cc-0001 pagos-api '{"to":["bob"],"text":"Closing"}')
 inbox "$bob" bob-term-01 pagos-api
 send "$ana" ana-cc-0001 pagos-api "{\"thread\":\"$closed\",\"text\":\"Done, closing.\",\"close\":true}" >/dev/null
-# Read and claimed by Bob's first session.
+# Read and claimed by Bob's first session, not answered: still pending once migrated.
 claimed=$(send "$carl" carl-hermes1 "" '{"to":["bob"],"text":"Claim me"}')
 inbox "$bob" bob-term-01 pagos-api
 send "$bob" bob-term-01 pagos-api "{\"thread\":\"$claimed\",\"claim\":true}" >/dev/null

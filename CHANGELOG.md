@@ -2,7 +2,7 @@
 
 ## 0.3.0 (unreleased)
 
-Upgrading from 0.2.x: the protocol changes, and the database moves to layout 6. The server migrates a 0.1.0 to 0.2.x database in place the first time it opens it (take a `relevo backup` first): what had reached a person counts as handled, so only notes that had reached none of their sessions are pending.
+Upgrading from 0.2.x: the protocol changes, and the database moves to layout 6. The server migrates a 0.1.0 to 0.2.x database in place the first time it opens it (take a `relevo backup` first). What 0.2.x showed as waiting for a reply (an open direct thread whose latest note is not yours) stays pending, whether or not it had reached you; everything else counts as handled. Delivery is never taken as handling: a thread is shown as handled (`handled_at`) only when you wrote after the other person's latest note. So after the upgrade, each person's first new session gets once, as new notes, those threads that still wait for them, including ones their agents had fetched and never answered; that is the point, but a person with many old open threads should reply, close them or mark them `done`.
 
 **A note stays pending until the person handles it**, not until it is fetched:
 - A person handles a direct thread by writing in it, closing it, or with the new `send(thread, done: true)` and no text ("seen, nothing to do": nothing written, nothing claimed, never limited), up to the latest note that had reached the session that acted: a note that lands between a fetch and the reply or `done` stays pending, and so does everything when a session answers without having fetched it. Claiming does not handle. Inbox threads say `pending` (`waiting_for_you` stays, the same).

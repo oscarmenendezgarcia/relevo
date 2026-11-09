@@ -187,40 +187,41 @@ pub const CLAIM_LAPSE_SECS: i64 = 15 * 60;
 /// columns).
 const SCHEMA_VERSION: i64 = 6;
 
-/// Layout 5 to 6: the handled state of each participant. It starts at what their sessions had
-/// reached, or at their own latest note when that is later (writing handles a thread), so nothing
-/// that had reached them becomes pending. When it covers a note by someone else, it was handled
-/// when they first wrote after the latest such note (from that token; its session's context then
-/// is not known), or else when that note reached them, from that session. Then the flags that
-/// depend on it, as `api::refresh` keeps them. The new columns go last, as in `SCHEMA`.
+/// Layout 5 to 6: the handled state of each participant, from what layout 5 recorded as handling.
+/// A thread that was `waiting` there (open, direct, its latest note not theirs) waited for their
+/// reply, whether or not it had reached a session: it is handled up to their own latest note in
+/// it, so it stays pending. Any other thread is handled up to its latest note. Reaching a session
+/// is never taken as handling: `handled_at` and its session are set only when the person wrote
+/// after the latest note by someone else, as when they first did so (from that token; its
+/// session's context then is not known), and stay `NULL` otherwise. Then the flags that depend
+/// on it, as `api::refresh` keeps them, `fresh` included: a new session gets the threads still
+/// pending once, like a note that reached a session which died before handling it. The new
+/// columns go last, as in `SCHEMA`.
 const MIGRATE_FROM_5: &str = "
 ALTER TABLE participants ADD COLUMN handled_seq INTEGER;
 ALTER TABLE participants ADD COLUMN handled_at INTEGER;
 ALTER TABLE participants ADD COLUMN handled_label TEXT;
 ALTER TABLE participants ADD COLUMN handled_context TEXT;
 ALTER TABLE participants ADD COLUMN fresh INTEGER NOT NULL DEFAULT 0;
-UPDATE participants AS p SET handled_seq = nullif(max(
-    coalesce(p.delivered_seq, 0),
-    coalesce((SELECT max(n.seq) FROM notes n
-              WHERE n.thread_id = p.thread_id AND n.author_id = p.person_id), 0)), 0);
-UPDATE participants AS p SET
-    handled_at = coalesce(w.created_at, p.delivered_at),
-    handled_label = CASE WHEN w.seq IS NULL THEN p.delivered_label ELSE w.via END,
-    handled_context = CASE WHEN w.seq IS NULL THEN p.delivered_context END
-FROM participants AS q
-LEFT JOIN notes AS w ON w.seq = (
-    SELECT min(n.seq) FROM notes n
-    WHERE n.thread_id = q.thread_id AND n.author_id = q.person_id AND n.seq > q.last_other_seq)
-WHERE q.thread_id = p.thread_id AND q.person_id = p.person_id
-  AND EXISTS (SELECT 1 FROM notes n
-              WHERE n.thread_id = p.thread_id AND n.author_id != p.person_id
-                AND n.seq <= p.handled_seq);
+UPDATE participants AS p SET handled_seq = nullif(CASE WHEN p.waiting
+    THEN coalesce((SELECT max(n.seq) FROM notes n
+                   WHERE n.thread_id = p.thread_id AND n.author_id = p.person_id), 0)
+    ELSE p.last_seq END, 0);
+UPDATE participants AS p SET handled_at = w.created_at, handled_label = w.via
+FROM notes AS w
+WHERE p.last_other_seq > 0
+  AND w.seq = (SELECT min(n.seq) FROM notes n
+               WHERE n.thread_id = p.thread_id AND n.author_id = p.person_id
+                 AND n.seq > p.last_other_seq);
 UPDATE participants AS p SET
     waiting = t.kind = 'direct' AND t.status = 'open'
               AND coalesce(p.handled_seq, 0) < p.last_other_seq,
     inbox = coalesce(p.delivered_seq, 0) < p.last_other_seq
             OR (t.kind = 'direct' AND t.status = 'open'
-                AND coalesce(p.handled_seq, 0) < p.last_other_seq)
+                AND coalesce(p.handled_seq, 0) < p.last_other_seq),
+    fresh = t.kind = 'direct' AND t.status = 'open'
+            AND coalesce(p.handled_seq, 0) < p.last_other_seq
+            AND coalesce(p.handled_seq, 0) < coalesce(p.delivered_seq, 0)
 FROM threads t WHERE t.id = p.thread_id;
 UPDATE session_threads AS s SET waiting = p.waiting, person_inbox = p.inbox
 FROM participants p WHERE p.thread_id = s.thread_id AND p.person_id = s.person_id;

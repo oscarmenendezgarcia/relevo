@@ -152,7 +152,7 @@ fn delivery_of(th: &Value, who: &str) -> Value {
 }
 
 #[tokio::test]
-async fn a_layout_5_database_migrates_and_only_notes_that_reached_nobody_are_pending() {
+async fn a_layout_5_database_migrates_and_what_waited_for_a_reply_stays_pending() {
     let dir = TempDir::new();
     let path = dir.db();
     let seen = layout5(&path);
@@ -166,14 +166,15 @@ async fn a_layout_5_database_migrates_and_only_notes_that_reached_nobody_are_pen
     let term1 = f.agent("bob", "bob-term-01", "pagos-api");
     let term2 = f.agent("bob", "bob-term-02", "");
 
-    // Read by Bob, not answered: it waited for him in layout 5; now it reached him, so it is
-    // handled, when and where it reached him.
+    // Read by Bob, not answered: it waited for his reply in layout 5, so it still does. It
+    // reached him (seen by pi), but reaching is not handling: Ana is not told it was handled.
     let th = ana.thread(&f.thread("fetched")).await;
     let bob = delivery_of(&th, "bob");
     assert_eq!(bob["by"], json!({ "label": "pi", "context": "pagos-api" }));
-    assert_eq!(bob["handled_at"], bob["delivered_at"]);
-    assert_eq!(bob["handled_by"], bob["by"]);
-    assert_eq!(term1.thread(&f.thread("fetched")).await["pending"], false);
+    assert!(bob["delivered_at"].is_string(), "{bob}");
+    assert_eq!(bob["handled_at"], Value::Null);
+    assert_eq!(bob["handled_by"], Value::Null);
+    assert_eq!(term1.thread(&f.thread("fetched")).await["pending"], true);
     // Answered: handled when Bob wrote, through that token (its session's context then is not
     // known).
     let th = ana.thread(&f.thread("replied")).await;
@@ -181,32 +182,45 @@ async fn a_layout_5_database_migrates_and_only_notes_that_reached_nobody_are_pen
     assert_eq!(bob["handled_at"], th["notes"][1]["created_at"]);
     assert_eq!(bob["handled_by"], json!({ "label": "pi", "context": null }));
     // Answered without reading: nothing by Ana reached him, so there is nothing to tell Ana, but
-    // the answer handled it.
+    // in layout 5 the answer ended the wait, so it is not pending.
     let bob = delivery_of(&ana.thread(&f.thread("blind")).await, "bob");
     assert_eq!(bob["note"], Value::Null);
     let th = term2.thread(&f.thread("blind")).await;
     assert_eq!(th["pending"], false);
-    // Claimed and read: handled, and still claimed.
+    // Closed by Ana after Bob read it: never pending, and nobody of Bob's handled it.
+    let th = ana.thread(&f.thread("closed")).await;
+    let bob = delivery_of(&th, "bob");
+    assert!(bob["delivered_at"].is_string(), "{bob}");
+    assert_eq!(bob["handled_at"], Value::Null);
+    assert_eq!(term1.thread(&f.thread("closed")).await["pending"], false);
+    // Claimed and read, not answered: still pending, and still claimed.
     let th = f
         .agent("carl", "carl-hermes1", "")
         .thread(&f.thread("claimed"))
         .await;
     let bob = delivery_of(&th, "bob");
-    assert!(bob["handled_at"].is_string(), "{bob}");
+    assert_eq!(bob["handled_at"], Value::Null);
     assert_eq!(bob["claimed_by"]["label"], "pi");
 
-    // Only the note that reached no session of Bob's is pending, in every session of his.
+    // What waited for Bob in layout 5 is pending in his sessions: the note that reached none
+    // (new), and the two read but not answered.
     let v = term1.inbox().await;
-    let pending: Vec<&str> = v["threads"]
+    let mut pending: Vec<&str> = v["threads"]
         .as_array()
         .unwrap()
         .iter()
         .filter(|t| t["pending"] == true)
         .map(|t| t["id"].as_str().unwrap())
         .collect();
-    assert_eq!(pending, vec![f.thread("unread")], "{v}");
+    pending.sort();
+    let mut expected = vec![f.thread("unread"), f.thread("fetched"), f.thread("claimed")];
+    expected.sort();
+    assert_eq!(pending, expected, "{v}");
     assert_eq!(new_count(&v, &f.thread("unread")), 1);
-    // A new session of Bob's starts with what he had: only that note is new for it.
+    assert_eq!(new_count(&v, &f.thread("fetched")), 0);
+    // A new session of Bob's gets the notes still pending as new, once: the read one too, as a
+    // note that reached a session which never handled it. The claimed one stays with the
+    // session that holds it.
     let fresh = f.agent("bob", "bob-term-03", "");
     let v = fresh.inbox().await;
     let ids: Vec<&str> = v["threads"]
@@ -215,21 +229,37 @@ async fn a_layout_5_database_migrates_and_only_notes_that_reached_nobody_are_pen
         .iter()
         .map(|t| t["id"].as_str().unwrap())
         .collect();
-    assert_eq!(ids, vec![f.thread("unread")], "{v}");
-    // Ana's team question is never pending; neither is anything of hers.
+    assert_eq!(ids, vec![f.thread("unread"), f.thread("fetched")], "{v}");
+    assert_eq!(new_count(&v, &f.thread("fetched")), 1);
+    let v = fresh.inbox().await;
+    assert_eq!(new_count(&v, &f.thread("fetched")), 0);
+    assert_eq!(listed(&v, &f.thread("fetched")).unwrap()["pending"], true);
+    // Bob's answers waited for Ana in layout 5 (they reached her, and she did nothing about
+    // them), so they still do; her team question is never pending.
     let v = ana.inbox().await;
-    assert!(
-        v["threads"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|t| t["pending"] == false),
-        "{v}"
-    );
+    let mut pending: Vec<&str> = v["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["pending"] == true)
+        .map(|t| t["id"].as_str().unwrap())
+        .collect();
+    pending.sort();
+    let mut expected = vec![f.thread("replied"), f.thread("blind")];
+    expected.sort();
+    assert_eq!(pending, expected, "{v}");
+    assert_eq!(ana.thread(&f.thread("team")).await["pending"], false);
 
-    // And it works on: a new note by Ana in a handled thread is pending again, and Bob's
-    // `done` handles it.
+    // And it works on: Bob's `done` handles a thread he had read, and a new note by Ana makes
+    // it pending again.
     let fetched = f.thread("fetched");
+    term1.send(json!({ "thread": fetched, "done": true })).await;
+    assert!(listed(&term1.inbox().await, &fetched).is_none());
+    let bob = delivery_of(&ana.thread(&fetched).await, "bob");
+    assert_eq!(
+        bob["handled_by"],
+        json!({ "label": "pi", "context": "pagos-api" })
+    );
     ana.send(json!({ "thread": fetched, "text": "Any news?" }))
         .await;
     let v = term1.inbox().await;
@@ -237,7 +267,8 @@ async fn a_layout_5_database_migrates_and_only_notes_that_reached_nobody_are_pen
     term1.send(json!({ "thread": fetched, "done": true })).await;
     assert!(listed(&term1.inbox().await, &fetched).is_none());
 
-    // Opening it again changes nothing.
+    // Opening it again changes nothing: Bob's unread and claimed threads, and Ana's two answers,
+    // still wait.
     drop(f);
     let conn = db::open(&path).unwrap();
     let pending: i64 = conn
@@ -247,7 +278,7 @@ async fn a_layout_5_database_migrates_and_only_notes_that_reached_nobody_are_pen
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(pending, 1);
+    assert_eq!(pending, 4);
     assert_eq!(user_version(&path), 6);
 }
 
