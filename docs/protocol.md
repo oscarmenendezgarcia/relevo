@@ -75,7 +75,7 @@ Rules:
 - Writing a note in an existing thread claims it for the session that wrote it, unless another session of your person holds it; opening a thread claims nothing (see [Claiming](#sessions-and-routing)).
 - Writing in a thread you are not a participant of fails with `NOT_FOUND` (the thread's existence is not revealed).
 - Writing in a closed thread fails with `THREAD_CLOSED`. Open a new thread instead.
-- Closing: in a `direct` thread any participant may close it; in a `team` thread only the person who asked.
+- Closing: in a `direct` thread any participant may close it; in a `team` thread only the person who asked. Closing releases every claim on the thread: a closed thread is nobody's work any more.
 - Text over 64 KiB (counted once decoded from JSON) fails with `TOO_LARGE` (400); empty or blank text with `BAD_REQUEST`. The whole request body may be up to 400 KiB, so a note of 64 KiB fits however the client escapes it.
 - Loop guard: a thread accepts at most 20 notes in any rolling hour. The 21st fails with `THREAD_BUSY`, whose message tells the agent to check with its person before going on. (The server cannot tell a person from an agent, so this caps speed, not authorship.)
 - A person may send at most 60 notes per rolling minute: beyond that, `RATE_LIMITED`.
@@ -110,6 +110,7 @@ Returns:
       "last_note": { "id": "n_…", "author": "ana", "via": "Claude Code laptop", "created_at": "…", "text": "…", "truncated": false },
       "context": "pagos-api",
       "claimed": "this-session",
+      "held_by": [ { "handle": "ana", "label": "Claude Code laptop", "context": "pagos-api", "since": "2026-11-08T10:47:00Z" } ],
       "new_notes": [
         { "id": "n_…", "author": "oscar", "via": "Claude Code laptop", "created_at": "2026-11-08T10:41:00Z",
           "text": "…", "truncated": false }
@@ -122,6 +123,7 @@ Returns:
 
 - `team` lists every active person, you included, so the agent knows whom to ask. `contexts` are the distinct contexts of their sessions seen in the last 15 minutes, sorted.
 - `session` is the session this request counts as; `you` is the handle of its person, so an agent knows which member of `team` it speaks for.
+- `held_by` lists the other participants who hold the thread now (live claims only), with the session's label, context and since when, so whoever asked sees who is on it without opening the thread; empty when nobody else holds it.
 - A thread's `context` is the context it was addressed to for you, or `null`. `claimed` is `null` (unclaimed), `"this-session"`, or, only with `all` (and in `thread`, which also shows any thread of the person), `"other-session"`.
 - At most 20 threads: first those with new notes (waiting ones first among them), then waiting ones with nothing new; within each group, by latest note, newest first. `more` counts the rest. So threads that are only waiting, which stay until someone replies, never keep new notes out.
 - `new_notes` holds the notes that have not reached this session, oldest first. That may include the person's own (written without reading, or by another session of theirs), for context: they never make a thread new, but they are part of what this session has not seen. A note's `text` is cut to 4,000 characters with `truncated: true`; the agent reads it whole with `thread`.
@@ -147,7 +149,7 @@ Every route needs `Authorization: Bearer <token>`, and takes the optional `Relev
 ```
 GET  /api/inbox?all=1&wait=30
 GET  /api/threads/:id
-POST /api/send            { to | thread, text, close?, key? }
+POST /api/send            { to | thread, text, close?, claim?, key? }
 GET  /api/people          { "team": [...], "you": "ana" }  (same list as inbox)
 DELETE /api/session        forget this session (the one the headers name) and release its claims; { "ok": true }
 GET  /health              no token; { "ok": true }
