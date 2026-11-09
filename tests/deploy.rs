@@ -83,3 +83,36 @@ fn under_the_units_sandbox_serve_tls_names_the_machines_addresses() {
     assert_eq!(names, relevo::tls::default_names(), "{stdout}");
     assert!(!stdout.contains("no network address"), "{stdout}");
 }
+
+/// Seconds in a duration as the proxies write it: `90s`, `2m`.
+fn seconds(text: &str) -> u64 {
+    let text = text.trim();
+    match text.strip_suffix('m') {
+        Some(m) => m.parse::<u64>().unwrap() * 60,
+        None => text.strip_suffix('s').unwrap().parse().unwrap(),
+    }
+}
+
+/// A proxy that reuses an idle connection to Relevo just as Relevo closes it gets a reset and,
+/// for a send it cannot replay, answers 502: its idle connections must close first.
+#[test]
+fn the_proxies_close_idle_connections_to_relevo_before_relevo_does() {
+    let idle = relevo::serve::Limits::default().idle.as_secs();
+    let cloudflared = read("deploy/proxy/cloudflared.yml");
+    let keep = cloudflared
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("keepAliveTimeout:"))
+        .expect("cloudflared.yml sets keepAliveTimeout");
+    assert!(seconds(keep) < idle, "cloudflared keepAliveTimeout: {keep}");
+
+    let caddy = read("deploy/proxy/Caddyfile");
+    let transport = &caddy[caddy
+        .find("transport http")
+        .expect("a transport http block")..];
+    let transport = &transport[..transport.find('}').unwrap()];
+    let keep = transport
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("keepalive "))
+        .expect("the Caddyfile's transport sets keepalive (2 minutes by default)");
+    assert!(seconds(keep) < idle, "Caddy keepalive: {keep}");
+}

@@ -30,7 +30,9 @@ ingress:
     service: http://127.0.0.1:7878
     originRequest:
       connectTimeout: 10s
-      # Keep idle connections to Relevo open longer than one waiting inbox request.
-      keepAliveTimeout: 90s
+      # Close idle connections to Relevo before Relevo does (75 s): one reused just as Relevo
+      # closes it fails, and a send that cannot be replayed comes back as a 502. Idle time does
+      # not count a request in flight, so a waiting inbox (up to 60 s) is not cut.
+      keepAliveTimeout: 60s
   # Anything else that reaches this tunnel.
   - service: http_status:404
