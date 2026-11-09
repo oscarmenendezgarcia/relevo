@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+**HTTPS in `relevo serve` itself**, no proxy needed:
+- `relevo serve --tls` makes a self-signed certificate (ECDSA P-256, 10 years) for this machine's names and addresses (or `--tls-name`), keeps it next to the database (`<db>.tls/`, key 0600) and prints its SHA-256 fingerprint; `relevo tls-fingerprint` prints it too. New names make a new certificate. `--tls-cert`/`--tls-key` use one you have. `RELEVO_TLS` and `RELEVO_TLS_NAME` turn it on from a systemd drop-in.
+- `relevo connect` to an `https://` server trusts the system's authorities first; otherwise it shows the fingerprint and asks (or takes `--fingerprint`), and saves the certificate in the config. Every client then trusts that certificate alone for the server (`RELEVO_CERT` names another).
+- The server enforces its own limits, with or without TLS: 10 s for the request head, 30 s for the body, 75 s idle, 90 s per request, 1,024 connections and 64 per address.
+
 ## 0.1.0
 
 The first version for a team to try.

@@ -1,6 +1,6 @@
-# Caddy in front of Relevo: HTTPS with a certificate Caddy gets and renews by itself, the
-# timeouts and the body limit `relevo serve` does not enforce, and plain HTTP to Relevo on
-# loopback. Replace relevo.example.com with your name; its DNS must point at this machine, and
+# Caddy in front of Relevo (optional: `relevo serve --tls` speaks HTTPS itself, see
+# docs/install.md): HTTPS with a certificate Caddy gets and renews by itself, timeouts like
+# Relevo's own and its body limit, and plain HTTP to Relevo on loopback. Replace relevo.example.com with your name; its DNS must point at this machine, and
 # ports 80 and 443 must reach it (for the certificate). For a name only your office network
 # resolves, add `tls internal` inside the site block: Caddy then uses its own CA, which each
 # teammate's machine must trust.

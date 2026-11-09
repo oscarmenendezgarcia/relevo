@@ -1,6 +1,7 @@
 # Relevo server, as a systemd *user* unit: it runs as the owner's user, needs no root, and
-# listens on loopback only. Teammates reach it through a reverse proxy that terminates TLS (see
-# deploy/proxy/ and docs/install.md). Installed by deploy/install.sh into
+# listens on loopback only, in plain HTTP. For teammates, turn on HTTPS in Relevo itself with a
+# drop-in (Environment=RELEVO_TLS=true and RELEVO_ADDR=0.0.0.0:7878), or put a reverse proxy
+# that terminates TLS in front (see docs/install.md). Installed by deploy/install.sh into
 # ~/.config/systemd/user/. Change settings with `systemctl --user edit relevo`, not here.
 [Unit]
 Description=Relevo server (notes between teammates' agents)
