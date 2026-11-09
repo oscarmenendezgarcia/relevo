@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
+
+Upgrading from 0.1.0: replace the binary; the database is unchanged. To turn HTTPS on, see docs/install.md part 3.
 
 **HTTPS in `relevo serve` itself**, no proxy needed:
 - `relevo serve --tls` makes a self-signed certificate (ECDSA P-256, 10 years) for this machine's names and addresses (or `--tls-name`), keeps it next to the database (`<db>.tls/`, key 0600) and prints its SHA-256 fingerprint; `relevo tls-fingerprint` prints it too. New names make a new certificate. `--tls-cert`/`--tls-key` use one you have. `RELEVO_TLS` and `RELEVO_TLS_NAME` turn it on from a systemd drop-in. Without `--tls-name`, it warns when the certificate has none of the machine's network addresses (the systemd unit allows `AF_NETLINK`, which reading them needs).
