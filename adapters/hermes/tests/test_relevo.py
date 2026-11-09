@@ -672,11 +672,18 @@ class Tools(Base):
         inbox, send = defs["relevo_inbox"], defs["relevo_send"]
         self.assertIn("Look here before opening a thread", inbox)
         for phrase in ("If your person names whom to ask", "Otherwise, before opening one, look at your inbox",
-                       "Read what you need first", "no \"On it.\" first",
-                       "Send \"On it.\" only just before you start changing files",
+                       "Read what you need first", "just answer: the answer claims it",
+                       "claim the thread with `thread`, `claim: true` and no text just before you start "
+                       "changing files or running something long: a state the others see, not a note",
+                       "Never write a note that only says you are on it",
                        "a one-line subject (its title), no greeting",
-                       "never to a team question", "answer a team question only from your own work"):
+                       "Do not claim team questions", "answer a team question only from your own work"):
             self.assertIn(phrase, send)
+        schema = next(d["function"]["parameters"] for d in registry.get_definitions({"relevo_send"}, quiet=True))
+        self.assertEqual(schema["properties"]["claim"]["type"], "boolean")
+        self.assertIn("Not for team questions", schema["properties"]["claim"]["description"])
+        self.assertIn("Optional only when closing or claiming", schema["properties"]["text"]["description"])
+        self.assertNotIn("On it.", send.split("\n\nRules for Relevo")[0])
         for description in (inbox, send):
             self.assertIn(client.RULES, description)
             for phrase in ("`you` in the inbox", "Before opening a new thread, look at your inbox",
@@ -802,12 +809,34 @@ class Sessions(Base):
 
         opened = self.ana.send(to=["oscar"], text="Who owns the refunds cron?")
         await self.until(lambda: len(self.events) == 1)
-        claimed = await a.send(opened["thread"], "On it.", metadata=FINAL)
-        self.assertEqual(claimed.raw_response["claimed"], "this-session")
+        self.assertIn("this session has it now", self._gateway_claims(opened["thread"]))
         # Oscar's Hermes CLI agent saw it too (relevo_inbox all=true) and would also take it.
         self.assertIn("Who owns the refunds cron?", tools.relevo_inbox({"all": True}))
-        cli = tools.relevo_send({"thread": opened["thread"], "text": "On it."})
-        self.assertIn("Another of your person's sessions holds this thread: step aside", cli)
+        cli = tools.relevo_send({"thread": opened["thread"], "claim": True})
+        self.assertEqual(cli, f"Another of your person's sessions already has thread {opened['thread']}: step "
+                              "aside and leave it to that session (nothing was written).")
+        answer = tools.relevo_send({"thread": opened["thread"], "text": "Bob does."})
+        self.assertIn("Another of your person's sessions holds this thread: step aside", answer)
+
+    async def test_a_claim_is_a_state_not_a_note(self):
+        """send(thread, claim: true) with no text: the thread is this session's, nothing is written."""
+        opened = self.ana.send(to=["oscar"], text="Can you rerun the refunds export?")
+        claimed = tools.relevo_send({"thread": opened["thread"], "claim": True})
+        self.assertEqual(claimed, f"Claimed thread {opened['thread']}: this session has it now, and the others "
+                                  "in the thread see that. No note was written.")
+        self.assertEqual([n["text"] for n in self.ana.thread(opened["thread"])["notes"]],
+                         ["Can you rerun the refunds export?"])
+        held = self._oscar(opened["thread"])["claimed_by"]
+        self.assertEqual(held["label"], "Hermes")
+        self.assertRegex(held["since"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d")
+        # Claiming again is the same state.
+        self.assertIn("this session has it now", tools.relevo_send({"thread": opened["thread"], "claim": True}))
+        # Not with `to`: there is no thread to claim yet.
+        refused = tools.relevo_send({"to": ["ana"], "text": "New", "claim": True})
+        self.assertTrue(refused.startswith("Error: Relevo refused it:"), refused)
+        # The answer, later, is the note.
+        done = tools.relevo_send({"thread": opened["thread"], "text": "Done: the export is in the bucket."})
+        self.assertIn("You hold this thread.", done)
 
     async def test_a_cli_agent_sees_what_a_thread_the_gateway_fetched_waits_on(self):
         a = self.make_adapter()
@@ -838,34 +867,34 @@ class Sessions(Base):
         await self.until(lambda: len(self.events) == 1)
         tokens = set_session_vars(platform="relevo", chat_id=opened["thread"])
         try:
-            on_it = tools.relevo_send({"thread": opened["thread"], "text": "On it."})
+            claimed = tools.relevo_send({"thread": opened["thread"], "claim": True})
         finally:
             clear_session_vars(tokens)
-        self.assertIn("You hold this thread.", on_it)
+        self.assertIn("this session has it now", claimed)
         done = await a.send(opened["thread"], "Done: the export is in the bucket.", metadata=FINAL)
         self.assertEqual(done.raw_response["claimed"], "this-session")
+        self.assertEqual(len(self.ana.thread(opened["thread"])["notes"]), 2)  # the claim wrote nothing
         # The same tool in a Telegram turn of the same gateway is not the relevo chat's agent.
         tokens = set_session_vars(platform="telegram", chat_id="12345")
         try:
-            elsewhere = tools.relevo_send({"thread": opened["thread"], "text": "Also on it."})
+            elsewhere = tools.relevo_send({"thread": opened["thread"], "claim": True})
         finally:
             clear_session_vars(tokens)
-        self.assertIn("Another of your person's sessions holds this thread", elsewhere)
+        self.assertIn("Another of your person's sessions already has thread", elsewhere)
 
     async def test_a_stop_ends_the_gateway_session_and_frees_its_threads(self):
         a = self.make_adapter()
         await a.connect()
         opened = self.ana.send(to=["oscar"], text="Can you look at the refunds cron?")
         await self.until(lambda: len(self.events) == 1)
-        claimed = await a.send(opened["thread"], "On it.", metadata=FINAL)
-        self.assertEqual(claimed.raw_response["claimed"], "this-session")
+        self.assertIn("this session has it now", self._gateway_claims(opened["thread"]))
         self.assertIsNotNone(self._oscar(opened["thread"])["claimed_by"])
 
         await a.disconnect()  # a gateway stop or restart
         self.assertNotIn(a.settings.session, SERVER.sessions("oscar"))
         self.assertIsNone(self._oscar(opened["thread"])["claimed_by"])
         # At once, not 15 minutes later: Oscar's CLI agent takes the thread.
-        self.assertIn("You hold this thread.", tools.relevo_send({"thread": opened["thread"], "text": "On it."}))
+        self.assertIn("this session has it now", tools.relevo_send({"thread": opened["thread"], "claim": True}))
 
     async def test_a_replaced_adapter_leaves_the_session_to_its_replacement(self):
         a = self.make_adapter()
@@ -874,7 +903,7 @@ class Sessions(Base):
         await b.connect()
         opened = self.ana.send(to=["oscar"], text="Who runs the deploy today?")
         await self.until(lambda: len(self.events) >= 1)
-        await b.send(opened["thread"], "On it.", metadata=FINAL)
+        self.assertIn("this session has it now", self._gateway_claims(opened["thread"]))
         await a.disconnect()
         self.assertIn(b.settings.session, SERVER.sessions("oscar"))
         self.assertIsNotNone(self._oscar(opened["thread"])["claimed_by"])
@@ -898,6 +927,17 @@ class Sessions(Base):
         await asyncio.sleep(0.5)
         self.assertEqual([e.source.chat_id for e in self.events], [unread["thread"]])
         self.assertNotEqual(read["thread"], unread["thread"])
+
+    @staticmethod
+    def _gateway_claims(thread_id: str) -> str:
+        """The agent of the relevo chat claims the thread, as its rules say, before longer work."""
+        from gateway.session_context import clear_session_vars, set_session_vars
+
+        tokens = set_session_vars(platform="relevo", chat_id=thread_id)
+        try:
+            return tools.relevo_send({"thread": thread_id, "claim": True})
+        finally:
+            clear_session_vars(tokens)
 
     def _oscar(self, thread_id: str) -> dict:
         return next(d for d in self.ana.thread(thread_id)["delivery"] if d["handle"] == "oscar")

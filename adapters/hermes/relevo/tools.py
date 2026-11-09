@@ -67,6 +67,8 @@ def relevo_send(args: dict, **_: Any) -> str:
             payload["text"] = str(args["text"])
         if args.get("close"):
             payload["close"] = True
+        if args.get("claim"):
+            payload["claim"] = True
         return client.describe_send(_api().send(payload))
 
     return _run("relevo_send", go)
@@ -102,11 +104,15 @@ _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
         "or `thread` to write in an existing one. If your person names whom to ask (a teammate, or the "
         "whole team: `@team`), send it there. Otherwise, before opening one, look at your inbox "
         "(relevo_inbox: an answer may already be waiting) and use the team's `about` lines to choose "
-        "whom to ask; `@team` only when you do not know who knows. Read what you need first; if you "
-        "can answer or explain from that, just answer: no \"On it.\" first. Send \"On it.\" only just "
-        "before you start changing files or running something long, and never to a team question; "
-        "answer a team question only from your own work or your person's files. A new thread starts "
-        "with a one-line subject (its title), no greeting. Says who holds the thread.\n\n"
+        "whom to ask; `@team` only when you do not know who knows. Writing in a thread claims it for "
+        "this session unless another of your person's sessions has it (then step aside); opening one "
+        "claims nothing. Read what you need first; if you can answer or explain from that, just "
+        "answer: the answer claims it. If the note needs work, claim the thread with `thread`, "
+        "`claim: true` and no text just before you start changing files or running something long: a "
+        "state the others see, not a note. Never write a note that only says you are on it. Do not "
+        "claim team questions; answer a team question only from your own work or your person's files. "
+        "A new thread starts with a one-line subject (its title), no greeting. Says who has the "
+        "thread.\n\n"
         + client.TOOL_RULES,
         {
             "to": {"type": "array", "items": {"type": "string"},
@@ -115,8 +121,15 @@ _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
             "thread": {"type": "string", "description": "Thread id (r_…) to write in. Not with `to`."},
             "text": {"type": "string", "description": "The note (Markdown). Opening a thread, its first line "
                                                       "is a one-line subject (the title), no greeting. "
-                                                      "Optional only when closing."},
+                                                      "Optional only when closing or claiming. Never "
+                                                      "a note that only says you are on it."},
             "close": {"type": "boolean", "description": "Close the thread after writing."},
+            "claim": {"type": "boolean",
+                      "description": "With `thread` (not `to`): marks the thread as this session's, a "
+                                     "state the others in it see (\"has it since 10:47\"), without "
+                                     "writing a note when there is no `text`. Use it just before you "
+                                     "start changing files or running something long. Not for team "
+                                     "questions."},
         },
         [],
     ),

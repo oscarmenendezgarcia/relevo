@@ -495,10 +495,21 @@ def render_thread(data: dict, me: Optional[str]) -> str:
 
 def describe_send(result: dict) -> str:
     """What the agent reads after a send: where it went and who holds the thread."""
+    thread = result.get("thread")
     if result.get("note"):
-        text = f"Wrote note {result['note']} in thread {result.get('thread')} ({result.get('status')})."
+        text = f"Wrote note {result['note']} in thread {thread} ({result.get('status')})."
+    elif result.get("status") == "closed":
+        text = f"Closed thread {thread}."
     else:
-        text = f"Closed thread {result.get('thread')}."
+        # A claim without text: a state, nothing written.
+        claimed = result.get("claimed")
+        if claimed == "this-session":
+            return (f"Claimed thread {thread}: this session has it now, and the others in the thread see "
+                    "that. No note was written.")
+        if claimed == "other-session":
+            return (f"Another of your person's sessions already has thread {thread}: step aside and leave "
+                    "it to that session (nothing was written).")
+        return f"Nothing was written in thread {thread}, and none of your person's sessions has it."
     claimed = result.get("claimed")
     if claimed == "this-session":
         text += " You hold this thread."
