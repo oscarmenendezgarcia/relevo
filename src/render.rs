@@ -361,16 +361,16 @@ pub fn pushed(threads: &[Value], me: Option<&str>) -> String {
 /// What `send` did.
 pub fn sent(v: &Value) -> String {
     let id = s(&v["thread"]);
+    // Closing releases every claim: a closed thread is nobody's, so there is nothing to hold or
+    // step aside from.
+    if s(&v["status"]) == "closed" {
+        return match v["note"].as_str() {
+            Some(note) => format!("Written: note {note} in thread {id}, which is closed."),
+            None => format!("Closed thread {id}."),
+        };
+    }
     let mut out = match v["note"].as_str() {
-        Some(note) => format!(
-            "Written: note {note} in thread {id}, which is {}.",
-            s(&v["status"])
-        ),
-        // A close without text took nothing: another session holding it changes nothing here.
-        None if s(&v["status"]) == "closed" && v["claimed"] == "other-session" => {
-            return format!("Closed thread {id}.");
-        }
-        None if s(&v["status"]) == "closed" => format!("Closed thread {id}."),
+        Some(note) => format!("Written: note {note} in thread {id}, which is open."),
         // A claim without text: a state, nothing written.
         None => {
             return match v["claimed"].as_str() {
@@ -700,14 +700,17 @@ mod tests {
         let out = sent(&other);
         assert!(out.contains("claimed: other-session"), "{out}");
         assert!(out.contains("step aside"), "{out}");
+        // Closing releases every claim: nothing to hold or step aside from (an older server may
+        // still say another session holds it).
         let closed = json!({ "thread": "r_1", "note": null, "status": "closed", "claimed": null });
-        assert_eq!(
-            sent(&closed),
-            "Closed thread r_1. Nobody of yours holds the thread."
-        );
-        // Closed while another session holds it: nothing to step aside from, no note written.
+        assert_eq!(sent(&closed), "Closed thread r_1.");
         let held = json!({ "thread": "r_1", "note": null, "status": "closed", "claimed": "other-session" });
         assert_eq!(sent(&held), "Closed thread r_1.");
+        let last = json!({ "thread": "r_1", "note": "n_3", "status": "closed", "claimed": "this-session" });
+        assert_eq!(
+            sent(&last),
+            "Written: note n_3 in thread r_1, which is closed."
+        );
         // Claimed without a note: a state, nothing written.
         let claimed =
             json!({ "thread": "r_1", "note": null, "status": "open", "claimed": "this-session" });

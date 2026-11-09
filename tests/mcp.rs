@@ -435,8 +435,8 @@ async fn tools_carry_a_conversation_between_sessions() {
     let (failed, err) = bob.call("thread", json!({ "id": "../people" })).await;
     assert!(failed && err.starts_with("NOT_FOUND: "), "{err}");
 
-    // Ana's other session closes it while the first holds it: it only says it closed it, not to
-    // step aside nor that a note was written.
+    // Ana's other session closes it while the first holds it: closing releases the claim, so it
+    // only says it closed it, not to step aside nor that a note was written.
     let closed = ana2
         .ok("send", json!({ "thread": id, "close": true }))
         .await;

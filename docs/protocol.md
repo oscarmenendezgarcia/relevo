@@ -81,7 +81,7 @@ Rules:
 - A person may send at most 60 notes per rolling minute: beyond that, `RATE_LIMITED`.
 - The limits count notes only: a close or a claim without text is never limited.
 
-Returns `{ "thread": "<id>", "note": "<id>", "status": "open" | "closed", "claimed": "this-session" | "other-session" | null }`. `note` is `null` when the `send` only closed the thread. `claimed` is who holds the thread for your person after this `send`: `"other-session"` means another of your sessions had it first, so this one should step aside; `null` after opening a thread, and after a close without text in a thread nobody of yours holds. A replayed `send` returns who held the thread after its first result, named for the session that replays: `"this-session"` only when that session is the one that held it, so a retry from another session (an agent restarted under a new id, say) is not told it holds a thread it does not.
+Returns `{ "thread": "<id>", "note": "<id>", "status": "open" | "closed", "claimed": "this-session" | "other-session" | null }`. `note` is `null` when the `send` only closed the thread. `claimed` is who holds the thread for your person after this `send`: `"other-session"` means another of your sessions had it first, so this one should step aside; `null` after opening a thread, and after any close, which releases every claim. A replayed `send` returns who held the thread after its first result, named for the session that replays: `"this-session"` only when that session is the one that held it, so a retry from another session (an agent restarted under a new id, say) is not told it holds a thread it does not.
 
 ### `inbox`
 

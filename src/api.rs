@@ -908,7 +908,8 @@ async fn send(
 }
 
 /// The whole of `send`, in one transaction so that idempotency and the limits cannot race.
-/// Returns the result and the people to wake: the other participants, when a note was written.
+/// Returns the result and the people to wake: the other participants, when a note was written,
+/// and whoever held the thread, when it was closed.
 fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<(SendResult, Vec<i64>), ApiError> {
     if let Some(key) = &req.key
         && (key.is_empty() || key.chars().count() > MAX_KEY_CHARS)
@@ -1070,11 +1071,23 @@ fn write_as(
         take_claim(tx, caller, session, &thread_id, now)?;
     }
 
+    // A closed thread is nobody's work any more: closing releases every claim on it, for every
+    // participant (`refresh` copies that to the sessions' rows). Their other sessions may see it
+    // now (a closed direct thread with notes they have not fetched), so they are woken.
+    let mut released: Vec<i64> = Vec::new();
     if req.close {
         tx.execute(
             "UPDATE threads SET status = 'closed' WHERE id = ?1",
             [&thread_id],
         )?;
+        released = tx
+            .prepare(
+                "UPDATE participants SET claimed_by = NULL, claimed_context = NULL, claimed_at = NULL
+                 WHERE thread_id = ?1 AND claimed_by IS NOT NULL
+                 RETURNING person_id",
+            )?
+            .query_map([&thread_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
     }
     refresh(tx, &thread_id)?;
     let claimed_by: Option<i64> = tx.query_row(
@@ -1103,13 +1116,18 @@ fn write_as(
             ],
         )?;
     }
-    let woken: Vec<i64> = match result.note {
+    let mut woken: Vec<i64> = match result.note {
         Some(_) => tx
             .prepare("SELECT person_id FROM participants WHERE thread_id = ?1 AND person_id != ?2")?
             .query_map(params![result.thread, caller.person_id], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?,
         None => Vec::new(),
     };
+    for person in released {
+        if !woken.contains(&person) {
+            woken.push(person);
+        }
+    }
     Ok((result, woken))
 }
 

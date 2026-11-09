@@ -2046,7 +2046,7 @@ async fn a_second_session_writing_gets_other_session_and_the_claim_stays() {
 }
 
 #[tokio::test]
-async fn send_says_who_holds_the_thread_after_a_close_without_text() {
+async fn send_says_nobody_holds_a_thread_once_closed() {
     let t = team(&["ana", "bob"]);
     let pagos = t.agent("bob", "term-pagos", "pagos-api");
     let front = t.agent("bob", "term-front", "frontend");
@@ -2058,24 +2058,27 @@ async fn send_says_who_holds_the_thread_after_a_close_without_text() {
         v,
         json!({ "thread": id, "note": null, "status": "closed", "claimed": null })
     );
-    // Another session holds it: other-session.
+    // Another session held it: closing released it, so null too.
     let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
     pagos.ok(json!({ "thread": id, "text": "mine" })).await;
     let (_, v) = front
         .send(json!({ "thread": id, "close": true, "key": "c-1" }))
         .await;
     assert_eq!(v["note"], Value::Null);
-    assert_eq!(v["claimed"], "other-session");
+    assert_eq!(v["claimed"], Value::Null);
     // A replay returns the first result, claim included.
     let (_, again) = front
         .send(json!({ "thread": id, "close": true, "key": "c-1" }))
         .await;
     assert_eq!(again, v);
-    // This session holds it: this-session.
+    // This session held it: null, and with a closing note too.
     let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
     pagos.ok(json!({ "thread": id, "text": "mine" })).await;
-    let (_, v) = pagos.send(json!({ "thread": id, "close": true })).await;
-    assert_eq!(v["claimed"], "this-session");
+    let (_, v) = pagos
+        .send(json!({ "thread": id, "text": "done", "close": true }))
+        .await;
+    assert_eq!(v["claimed"], Value::Null);
+    assert!(v["note"].is_string(), "{v}");
 }
 
 #[tokio::test]
@@ -2154,6 +2157,89 @@ async fn inbox_threads_say_who_else_holds_them() {
     let inbox = ana.inbox().await;
     assert_eq!(inbox["threads"], json!([]), "{inbox}");
     assert_eq!(ana.thread(&id).await["held_by"], json!([bob_holds]));
+}
+
+#[tokio::test]
+async fn closing_releases_every_claim_on_the_thread() {
+    let t = team(&["ana", "bob", "carl"]);
+    let ana = t.agent("ana", "term-ana", "web");
+    let pagos = t.agent("bob", "term-pagos", "pagos-api");
+    let front = t.agent("bob", "term-front", "frontend");
+    let carl = t.agent("carl", "term-carl", "");
+    for agent in [&pagos, &front] {
+        agent.inbox().await;
+    }
+    let id = ana.ok(json!({ "to": ["bob", "carl"], "text": "q" })).await;
+    // Bob's pagos session reads it (so his frontend session keeps a row of its own) and
+    // answers, Carl claims it, Ana writes again: each of them holds it.
+    pagos.inbox().await;
+    pagos.ok(json!({ "thread": id, "text": "mine" })).await;
+    carl.ok(json!({ "thread": id, "claim": true })).await;
+    ana.ok(json!({ "thread": id, "text": "and?" })).await;
+    assert!(thread_ids(&front.inbox().await).is_empty());
+    let delivery = &t.thread("ana", &id).await["delivery"];
+    for d in delivery.as_array().unwrap() {
+        assert!(d["claimed_by"].is_object(), "{delivery}");
+    }
+    // Carl closes it, with a last note: nobody holds it any more, for any participant.
+    t.app.clock.advance(60);
+    let (_, v) = carl
+        .send(json!({ "thread": id, "text": "Done here.", "close": true }))
+        .await;
+    assert_eq!(v["claimed"], Value::Null, "{v}");
+    let th = ana.thread(&id).await;
+    assert_eq!(th["status"], "closed");
+    assert_eq!(th["claimed"], Value::Null);
+    assert_eq!(th["held_by"], json!([]));
+    for d in th["delivery"].as_array().unwrap() {
+        assert_eq!(d["claimed_by"], Value::Null, "{d}");
+    }
+    assert_eq!(pagos.thread(&id).await["claimed"], Value::Null);
+    // Bob's other session, which the claim kept it from, now gets its closing notes.
+    assert_eq!(
+        new_texts(&front.inbox().await, &id),
+        Some(vec![
+            "q".to_string(),
+            "mine".to_string(),
+            "and?".to_string(),
+            "Done here.".to_string()
+        ])
+    );
+    assert_eq!(front.thread(&id).await["claimed"], Value::Null);
+}
+
+#[tokio::test]
+async fn closing_without_text_releases_the_claims_too_and_wakes_who_held_it() {
+    let t = team(&["ana", "bob"]);
+    let pagos = t.agent("bob", "term-pagos", "pagos-api");
+    let front = t.agent("bob", "term-front", "frontend");
+    front.inbox().await;
+    pagos.inbox().await;
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
+    pagos.inbox().await;
+    pagos.ok(json!({ "thread": id, "claim": true })).await;
+    t.ok("ana", json!({ "thread": id, "text": "more" })).await;
+    // Bob's frontend session waits; the thread is pagos's, so nothing there is new for it.
+    let waiter = tokio::spawn({
+        let front = front.clone();
+        async move { front.inbox_at("/api/inbox?wait=30").await }
+    });
+    until_waiting(&t.app, 1).await;
+    // Ana closes it without a note: the claim is released, and the waiting request gets it.
+    t.ok("ana", json!({ "thread": id, "close": true })).await;
+    let v = tokio::time::timeout(std::time::Duration::from_secs(10), waiter)
+        .await
+        .expect("closing wakes the sessions of whoever held the thread")
+        .unwrap();
+    assert_eq!(
+        new_texts(&v, &id),
+        Some(vec!["q".to_string(), "more".to_string()]),
+        "{v}"
+    );
+    assert_eq!(
+        t.thread("ana", &id).await["delivery"][1]["claimed_by"],
+        Value::Null
+    );
 }
 
 // ---------- claiming without a note ----------
@@ -2315,13 +2401,13 @@ async fn claim_without_text_follows_the_rules_of_writing_in_a_thread() {
     // Not a participant: not found.
     let (status, v) = t.send("carl", json!({ "thread": id, "claim": true })).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{v}");
-    // Claiming and closing together, without text, claims and closes.
+    // Claiming and closing together, without text, closes: and closing releases the claim.
     let (_, v) = t
         .send("bob", json!({ "thread": id, "claim": true, "close": true }))
         .await;
     assert_eq!(
         v,
-        json!({ "thread": id, "note": null, "status": "closed", "claimed": "this-session" })
+        json!({ "thread": id, "note": null, "status": "closed", "claimed": null })
     );
     // A closed thread cannot be claimed.
     let (status, v) = t.send("bob", json!({ "thread": id, "claim": true })).await;
@@ -3281,6 +3367,10 @@ async fn session_inboxes_hold_order_and_more_over_hundreds_of_routed_threads() {
                 th.last_other = order;
                 th.last_is_bobs = false;
                 th.open = !close;
+                // Closing releases every claim on the thread.
+                if close {
+                    th.claimed = None;
+                }
             }
             // A session reads one thread whole.
             _ => {
