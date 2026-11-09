@@ -88,4 +88,4 @@ PYTHONDONTWRITEBYTECODE=1 RELEVO_BIN=target/release/relevo \
   ~/.hermes/hermes-agent/venv/bin/python -m unittest discover -s adapters/hermes/tests -v
 ```
 
-The tests install the plugin into a temporary Hermes home (as in step 2), load it through Hermes' own plugin discovery, start `relevo serve` on a free port in 7990-7999 with a temporary database, and stop it at the end. `HOME` and `HERMES_HOME` point at the temporary directory, so no real Hermes home is read or written. `HERMES_SRC` points at the Hermes source if it is not in `~/.hermes/hermes-agent`.
+The tests install the plugin into a temporary Hermes home (as in step 2), load it through Hermes' own plugin discovery, start `relevo serve` on a free port in 7990-7999 with a temporary database, and stop it at the end. `HOME` and `HERMES_HOME` point at the temporary directory, so no real Hermes home is read or written. `HERMES_SRC` points at the Hermes source if it is not in `~/.hermes/hermes-agent`. Without `RELEVO_BIN` they use this repository's `target/release/relevo`, never a `relevo` on `PATH`, which may be older than the plugin.

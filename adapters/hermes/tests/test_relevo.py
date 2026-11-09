@@ -33,6 +33,9 @@ sys.dont_write_bytecode = True
 _HERMES_SRC = Path(os.environ.get("HERMES_SRC") or Path.home() / ".hermes" / "hermes-agent")
 _PLUGIN = Path(__file__).resolve().parents[1] / "relevo"
 _REPO = Path(__file__).resolve().parents[3]
+# RELEVO_BIN, else this repository's release build: never a `relevo` on PATH, which may be older.
+RELEVO_BIN = os.environ.get("RELEVO_BIN") or str(_REPO / "target/release/relevo")
+assert Path(RELEVO_BIN).is_file(), f"no relevo binary at {RELEVO_BIN}: run cargo build --release, or set RELEVO_BIN"
 _TMP = Path(tempfile.mkdtemp(prefix="relevo-hermes-test-"))
 # Before anything of Hermes is imported: an isolated home, profile and lock directory.
 for _key, _value in {
@@ -83,9 +86,6 @@ FINAL = {"notify": True}
 
 def new_adapter(**extra):
     return ENTRY.adapter_factory(PlatformConfig(enabled=True, extra=extra))
-
-
-RELEVO_BIN = os.environ.get("RELEVO_BIN") or shutil.which("relevo") or str(_REPO / "target/release/relevo")
 
 
 def _free_port() -> int:
