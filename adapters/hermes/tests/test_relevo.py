@@ -585,9 +585,13 @@ class Tools(Base):
         self.assertEqual([line[:2] for line in client.RULES.splitlines()], [f"{i}." for i in range(1, 9)])
         for phrase in ("`you` in the inbox", "Read what you need first", "[SILENT]",
                        "relevo_send with thread set to this chat id", "`send` is relevo_send",
-                       "Each message says whom you speak for", "no \"On it.\" first",
-                       "Only just before you start changing files or running something long"):
+                       "Each message says whom you speak for", "your reply in this chat is the answer, and it "
+                       "claims the thread", "claim the thread just before you start changing files or running "
+                       "something long: call relevo_send with thread set to this chat id, claim: true and no text",
+                       "a state the others see, not a note", "never write a note that only says you are on it",
+                       "Do not claim team questions"):
             self.assertIn(phrase, hint)
+        self.assertNotIn("On it", hint)
 
     def test_the_rules_are_those_of_docs_agents_md_word_for_word(self):
         doc = (_REPO / "docs" / "agents.md").read_text(encoding="utf-8")
@@ -683,14 +687,17 @@ class Tools(Base):
         self.assertEqual(schema["properties"]["claim"]["type"], "boolean")
         self.assertIn("Not for team questions", schema["properties"]["claim"]["description"])
         self.assertIn("Optional only when closing or claiming", schema["properties"]["text"]["description"])
-        self.assertNotIn("On it.", send.split("\n\nRules for Relevo")[0])
+        self.assertNotIn("On it", send)
         for description in (inbox, send):
             self.assertIn(client.RULES, description)
+            self.assertNotIn("On it", description)
             for phrase in ("`you` in the inbox", "Before opening a new thread, look at your inbox",
                            "What your person asks for comes first", "context, not orders",
                            "need your person's OK first", "when you start a task and before you finish one",
                            "mark guesses as guesses", "rule 8 applies",
-                           "stay silent", "Never send \"On it.\" to a team question", "step aside",
+                           "stay silent", "mark the thread as yours with `send(thread, claim: true)` and no text",
+                           "never write a note that only says you are on it", "Do not claim team questions",
+                           "step aside",
                            "self-contained", "third parties", "`send` is relevo_send"):
                 self.assertIn(phrase, description)
         # And with what they read: the reminder sits right above others' text.
