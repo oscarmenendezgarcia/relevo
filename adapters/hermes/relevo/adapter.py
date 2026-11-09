@@ -292,9 +292,14 @@ class RelevoAdapter(BasePlatformAdapter):
             self._set_fatal_error("relevo_bad_cert", str(exc), retryable=False)
             return False
         # Replacing a live adapter of this process (connected before the old one is dropped): the
-        # session is that one's, live, and passes on as it is. Otherwise any session under this id is
-        # an earlier start's, and the loop ends it first.
-        self._end_first = not self._shared()
+        # session is that one's, live, and passes on as it is, unless that one has not managed to end
+        # an earlier start's session yet (the server was unreachable): then this one ends it. The
+        # notes either hands over are remembered for both, so ending it does not hand any over twice.
+        # Otherwise any session under this id is an earlier start's, and the loop ends it first.
+        peers = self._peers()
+        self._end_first = not self._shared() or any(a._end_first for a in peers)
+        if peers:
+            self._seen = peers[0]._seen
         self._stop = asyncio.Event()
         self._poll_task = asyncio.create_task(self._poll_loop(), name="relevo-inbox")
         _LIVE.add(self)
@@ -330,8 +335,14 @@ class RelevoAdapter(BasePlatformAdapter):
             await http.aclose()
         self._mark_disconnected()
 
+    def _peers(self) -> list:
+        """The other live adapters of this process with the same session on the same server and token."""
+        mine = (self.settings.identity, self.settings.session)
+        return [a for a in _LIVE if a is not self and (a.settings.identity, a.settings.session) == mine]
+
     def _shared(self) -> bool:
-        """Another live adapter of this process has the same session on the same server and token."""
+        """A live adapter of this process (this one too, while live) has the same session on the same
+        server and token."""
         mine = (self.settings.identity, self.settings.session)
         return any((a.settings.identity, a.settings.session) == mine for a in _LIVE)
 

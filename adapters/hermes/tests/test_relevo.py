@@ -1203,6 +1203,30 @@ class Sessions(Base):
         await b.disconnect()
         self.assertNotIn(b.settings.session, SERVER.sessions("oscar"))
 
+    async def test_a_replacement_ends_the_session_its_predecessor_could_not_end_yet(self):
+        """The gateway starts after a crash while the server cannot be reached: the first adapter
+        has not ended the dead process's session yet when the gateway connects a replacement. The
+        replacement ends it before its first inbox, so the note the dead gateway fetched comes at
+        once, and only once."""
+        opened = self.bob.send(to=["oscar"], text="Replacement test: is the backup running?")
+        new_adapter().api.inbox()  # the dead gateway fetched it, and never handled it
+        a = self.make_adapter()
+
+        async def unreachable(*_args, **_kwargs):
+            raise httpx.ConnectError("connection refused")
+
+        a.api.aend_session = unreachable
+        await a.connect()
+        await asyncio.sleep(0.3)
+        b = self.make_adapter()
+        await b.connect()
+        await self.until(lambda: len(self.events) == 1, timeout=5)
+        self.assertEqual(self.events[0].source.chat_id, opened["thread"])
+        await a.disconnect()
+        await asyncio.sleep(1.0)
+        self.assertEqual(len(self.events), 1)
+        self.assertIn(b.settings.session, SERVER.sessions("oscar"))
+
     async def test_a_gateway_that_died_with_a_note_unhandled_gets_it_again_on_the_next_connect(self):
         """A gateway killed right after a note reached it (and its agent claimed the thread) ends no
         session. The next start ends it before its first inbox request: the claim goes at once, and
@@ -1280,8 +1304,8 @@ class Sessions(Base):
         `resume_pending`: Hermes resumes that turn, and the fresh session's first inbox hands the
         same note over again, queued behind it. That copy says so, and to check the thread first.
         Other chats, and notes after the first batch, come as usual."""
-        resumed = self.ana.send(to=["oscar"], text="Restart test: rotate the staging key?")
-        other = self.ana.send(to=["oscar"], text="Restart test: a chat Hermes does not resume")
+        resumed = self.bob.send(to=["oscar"], text="Restart test: rotate the staging key?")
+        other = self.bob.send(to=["oscar"], text="Restart test: a chat Hermes does not resume")
 
         class Store:  # Hermes' session store, as the gateway sets it on every adapter
             def lookup_by_session_key(self, key):
@@ -1302,7 +1326,7 @@ class Sessions(Base):
         self.assertIn("Restart test: rotate the staging key?", again)
         self.assertNotIn("Handed over again", by_chat[other["thread"]])
         # Later notes in that chat are new ones: as usual.
-        self.ana.send(thread=resumed["thread"], text="Restart test: and the prod one?")
+        self.bob.send(thread=resumed["thread"], text="Restart test: and the prod one?")
         await self.until(lambda: len(self.events) == 3)
         self.assertNotIn("Handed over again", self.events[2].text)
 
