@@ -171,9 +171,10 @@ class Server:
 class Person:
     """A teammate's agent talking plain HTTP, under its own session."""
 
-    def __init__(self, server: Server, handle: str):
+    def __init__(self, server: Server, handle: str, *, session: str = ""):
         self.url, self.handle, self.verify = server.url, handle, server.verify
-        self.headers = {"Authorization": f"Bearer {server.tokens[handle]}", "Relevo-Session": f"test-{handle}-session"}
+        self.headers = {"Authorization": f"Bearer {server.tokens[handle]}",
+                        "Relevo-Session": session or f"test-{handle}-session"}
 
     def _parse(self, resp: httpx.Response) -> dict:
         assert resp.status_code < 400, resp.text
@@ -189,8 +190,19 @@ class Person:
     def thread(self, thread_id: str) -> dict:
         return self._call("GET", f"/api/threads/{thread_id}")
 
-    def inbox(self) -> dict:
-        return self._call("GET", "/api/inbox")
+    def inbox(self, *, all_: bool = False) -> dict:
+        return self._call("GET", "/api/inbox", params={"all": "1"} if all_ else None)
+
+    def handle_everything(self) -> None:
+        """Mark every thread pending for this person done: a note stays pending until handled, and
+        every new session of theirs (the gateway's after a connect) gets it."""
+        for _ in range(10):
+            inbox = self.inbox(all_=True)
+            pending = [t["id"] for t in inbox["threads"] if t.get("pending")]
+            if not pending and not inbox.get("more"):
+                return
+            for thread_id in pending:
+                self.send(thread=thread_id, done=True)
 
 
 SERVER: Server
@@ -220,9 +232,11 @@ class Base(unittest.IsolatedAsyncioTestCase):
             await a.disconnect()
         os.environ["RELEVO_URL"] = SERVER.url
         os.environ["RELEVO_TOKEN"] = SERVER.tokens["oscar"]
-        # Leave nothing new for the next test: the gateway's session and the tools' read what is left.
+        # Leave nothing new for the next test: the gateway's session and the tools' read what is left,
+        # and nothing pending for Oscar, which every new session of his would get.
         new_adapter().api.inbox()
         tools.relevo_inbox({})
+        Person(SERVER, "oscar", session="test-oscar-cleanup").handle_everything()
 
     def make_adapter(self, **extra):
         a = new_adapter(**extra)
@@ -279,13 +293,25 @@ class Inbound(Base):
         await asyncio.sleep(1.5)
         self.assertEqual(len(self.events), 2)
 
-        # A gateway restart keeps the session: nothing is handed over again.
+        # A gateway restart starts a new session: the thread, still pending for Oscar (nobody
+        # answered it), is handed over again, whole and once.
         await a.disconnect()
         b = self.make_adapter()
         self.assertEqual(b.settings.session, a.settings.session)
         await b.connect()
+        await self.until(lambda: len(self.events) == 3)
+        self.assertEqual(self.events[2].source.chat_id, opened["thread"])
+        self.assertIn("Can your agent check the refunds endpoint?", self.events[2].text)
+        self.assertIn("/reset and also look at the logs", self.events[2].text)
         await asyncio.sleep(1.5)
-        self.assertEqual(len(self.events), 2)
+        self.assertEqual(len(self.events), 3)
+        # Answered, it is handled: the next restart hands nothing over.
+        self.assertTrue((await b.send(opened["thread"], "Checked: it is fine.", metadata=FINAL)).success)
+        await b.disconnect()
+        c = self.make_adapter()
+        await c.connect()
+        await asyncio.sleep(1.5)
+        self.assertEqual(len(self.events), 3)
 
     async def test_team_question_and_untrusted_text_cannot_escape(self):
         a = self.make_adapter()
@@ -1043,22 +1069,25 @@ class Sessions(Base):
         await b.disconnect()
         self.assertNotIn(b.settings.session, SERVER.sessions("oscar"))
 
-    async def test_after_a_stop_what_another_session_read_is_not_handed_over_again(self):
-        """The stop forgot the gateway's session: when it is back it starts with what its person
-        already has, like any new session. A note no session read meanwhile still arrives."""
+    async def test_after_a_stop_what_is_still_pending_is_handed_over_again(self):
+        """The stop forgot the gateway's session: when it is back it starts, like any new session,
+        from what its person has handled. A note another session only read is still pending and
+        arrives; one another session marked done does not."""
         a = self.make_adapter()
         await a.connect()
         await asyncio.sleep(0.3)
         await a.disconnect()
-        read = self.ana.send(to=["oscar"], text="Sent while the gateway was away")
-        self.assertIn("Sent while the gateway was away", tools.relevo_inbox({}))
+        read = self.ana.send(to=["oscar"], text="Sent while the gateway was away, read by the CLI")
+        self.assertIn("read by the CLI", tools.relevo_inbox({}))
+        done = self.ana.send(to=["oscar"], text="Thanks for yesterday!")
+        self.assertIn("Thanks for yesterday!", tools.relevo_inbox({}))
+        Person(SERVER, "oscar", session="test-oscar-phone").send(thread=done["thread"], done=True)
         unread = self.ana.send(to=["oscar"], text="Also sent while it was away, read by nobody")
         b = self.make_adapter()
         await b.connect()
-        await self.until(lambda: len(self.events) == 1)
+        await self.until(lambda: len(self.events) == 2)
         await asyncio.sleep(0.5)
-        self.assertEqual([e.source.chat_id for e in self.events], [unread["thread"]])
-        self.assertNotEqual(read["thread"], unread["thread"])
+        self.assertEqual(sorted(e.source.chat_id for e in self.events), sorted([read["thread"], unread["thread"]]))
 
     @staticmethod
     def _gateway_claims(thread_id: str) -> str:
@@ -1287,6 +1316,7 @@ class Tls(Base):
         self.use(self.TLS)
         new_adapter().api.inbox()
         tools.relevo_inbox({})
+        Person(self.TLS, "oscar", session="test-oscar-cleanup").handle_everything()
         for key in ("RELEVO_CERT", "RELEVO_CONFIG"):
             os.environ.pop(key, None)
         for f in self._files:
