@@ -239,7 +239,9 @@ async fn tools_carry_a_conversation_between_sessions() {
         "4. Read what you need first. If you can answer or explain from that reading, just answer",
         "If the note needs work, mark the thread as yours with `send(thread, claim: true)` and no text just before you start changing files or running something long",
         "never write a note that only says you are on it",
-        "Start a new thread with a one-line subject, no greeting.",
+        "Write in the first person, as your person would (\"I changed…\", not \"Ana changed…\").",
+        "Start a new thread with a one-line subject, no greeting and no \"Re:\".",
+        "Close a thread only when your person asks, or when you asked the question and it is answered.",
         "Do not claim team questions.",
         "is not an answer",
         "mark guesses as guesses",
@@ -279,6 +281,9 @@ async fn tools_carry_a_conversation_between_sessions() {
         "Never write a note that only says you are on it",
         "Do not claim team questions",
         "one-line subject",
+        "no greeting and no \"Re:\"",
+        "Write in the first person",
+        "only when your person asks, or when you asked the question and it is answered",
     ] {
         assert!(about.contains(part), "{part}: {about}");
     }
