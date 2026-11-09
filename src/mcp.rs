@@ -76,15 +76,20 @@ const END_TIMEOUT: Duration = Duration::from_secs(2);
 /// Pushed threads kept for `inbox`, at most.
 const MAX_PUSHED: usize = 50;
 
+/// `send`'s fields. Unknown ones are refused, so a misnamed field (`message`, `recipients`) fails
+/// with the list of the right ones instead of being dropped.
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SendParams {
-    /// Opens a new thread to these people: handles (`ana`), a handle with a repository
-    /// (`ana/pagos-api`) or with a branch (`ana/pagos-api@feat/refunds`), or exactly `["@team"]`
-    /// for a question to everyone (when your person asks the whole team, or you do not know who
-    /// knows). Exactly one of `to` and `thread`.
+    /// To open a new thread: who to ask, one address or a list of them. An address is a handle
+    /// (`"ana"`), a handle with a repository (`"ana/pagos-api"`) or with a branch
+    /// (`"ana/pagos-api@feat/refunds"`), or `"@team"` alone for a question to everyone (when
+    /// your person asks the whole team, or you do not know who knows). Give `to` or `thread`,
+    /// not both.
     #[serde(default)]
-    pub to: Option<Vec<String>>,
-    /// Writes in this existing thread (its id, `r_…`).
+    #[schemars(schema_with = "addresses_schema")]
+    pub to: Option<Addresses>,
+    /// To write in an existing thread: its id (`"r_…"`). Give `to` or `thread`, not both.
     #[serde(default)]
     pub thread: Option<String>,
     /// The note, in Markdown. Self-contained: the reader does not share your context. Opening a
@@ -92,14 +97,32 @@ pub struct SendParams {
     /// only closing or claiming a thread. Never a note that only says you are on it.
     #[serde(default)]
     pub text: Option<String>,
-    /// Marks the thread closed after writing (resolved).
+    /// `true` marks the thread closed (resolved), after writing `text` if given.
     #[serde(default)]
     pub close: Option<bool>,
-    /// With `thread` (not `to`): marks the thread as this session's, a state the others in it
-    /// see ("has it since 10:47"), without writing a note when there is no `text`. Use it just
-    /// before you start changing files or running something long. Not for team questions.
+    /// `true`, with `thread` (not `to`): marks the thread as this session's, a state the others
+    /// in it see ("has it since 10:47"), without writing a note when there is no `text`. Use it
+    /// just before you start changing files or running something long. Not for team questions.
     #[serde(default)]
     pub claim: Option<bool>,
+}
+
+/// `to`: one address, or a list of them.
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub enum Addresses {
+    One(String),
+    Many(Vec<String>),
+}
+
+/// `to`'s schema, written out flat so that any client sees at once that it may be a string.
+fn addresses_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "anyOf": [
+            { "type": "string" },
+            { "type": "array", "items": { "type": "string" } }
+        ]
+    })
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -228,7 +251,11 @@ fn error(e: Error) -> String {
 #[tool_router]
 impl Relevo {
     #[tool(
-        description = "Send a note: open a thread (`to`) or write in one (`thread`). If your \
+        description = "Send a note: open a thread (`to`) or write in one (`thread`). Fields: \
+                       `to` (who to ask, to open a thread: \"ana\", \"ana/pagos-api\" or \
+                       \"@team\", or a list of addresses) or `thread` (an existing thread's id, \
+                       \"r_…\"); `text` (the note); `close` (true to close the thread); `claim` \
+                       (true, with `thread`, to mark the thread as this session's). If your \
                        person names whom to ask (a teammate, or the whole team: `@team`), send it \
                        there. Otherwise, before opening one, look at your inbox (an answer may \
                        already be waiting) and use the team's `about` lines to choose whom to \
@@ -247,9 +274,12 @@ impl Relevo {
     async fn send(&self, Parameters(p): Parameters<SendParams>) -> Result<String, String> {
         let client = self.client()?;
         let mut body = Map::new();
-        if let Some(to) = p.to {
-            body.insert("to".into(), json!(to));
-        }
+        // The server takes a list.
+        match p.to {
+            Some(Addresses::One(to)) => body.insert("to".into(), json!([to])),
+            Some(Addresses::Many(to)) => body.insert("to".into(), json!(to)),
+            None => None,
+        };
         if let Some(thread) = p.thread {
             body.insert("thread".into(), thread.into());
         }

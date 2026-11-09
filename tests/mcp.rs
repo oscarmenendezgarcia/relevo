@@ -543,6 +543,77 @@ async fn channel_pushes_notes_from_others() {
     assert!(ana.close().await.success());
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn send_takes_one_address_or_a_list_and_names_its_fields() {
+    let s = server(&["ana", "bob", "carl"]).await;
+    let mut ana = Mcp::start(&s, "ana", &s.dir, Some(""), &[]).await;
+    let tools = ana.request("tools/list", json!({})).await;
+    let send = tools["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "send")
+        .unwrap()
+        .clone();
+    // The description names every field, and the schema takes no other.
+    let about = send["description"].as_str().unwrap();
+    for field in ["`to`", "`thread`", "`text`", "`close`", "`claim`"] {
+        assert!(about.contains(field), "{field}: {about}");
+    }
+    let schema = &send["inputSchema"];
+    assert_eq!(schema["additionalProperties"], false, "{schema}");
+    let mut props: Vec<&String> = schema["properties"].as_object().unwrap().keys().collect();
+    props.sort();
+    assert_eq!(props, ["claim", "close", "text", "thread", "to"]);
+    assert!(schema["required"].is_null(), "{schema}");
+    // `to` may be one address or a list, and the schema says so without a `$ref`.
+    assert_eq!(
+        schema["properties"]["to"]["anyOf"],
+        json!([{ "type": "string" }, { "type": "array", "items": { "type": "string" } }])
+    );
+
+    // One address as a string.
+    let sent = ana.ok("send", json!({ "to": "bob", "text": "One?" })).await;
+    assert!(sent.contains("Written: note n_"), "{sent}");
+    // Or a list.
+    let sent = ana
+        .ok(
+            "send",
+            json!({ "to": ["bob", "carl/pagos-api"], "text": "Both?" }),
+        )
+        .await;
+    assert!(sent.contains("Written: note n_"), "{sent}");
+    let sent = ana
+        .ok("send", json!({ "to": "@team", "text": "Anyone?" }))
+        .await;
+    assert!(sent.contains("Written: note n_"), "{sent}");
+    let mut bob = Mcp::start(&s, "bob", &s.dir, Some(""), &[]).await;
+    let inbox = bob.ok("inbox", json!({})).await;
+    for text in ["One?", "Both?", "Anyone?"] {
+        assert!(inbox.contains(text), "{text}: {inbox}");
+    }
+    // A misnamed field fails, naming the right ones.
+    ana.write(json!({ "jsonrpc": "2.0", "id": 900, "method": "tools/call",
+        "params": { "name": "send", "arguments": { "to": "bob", "message": "Misnamed?" } } }))
+        .await;
+    let answer = loop {
+        let msg = ana.read().await;
+        if msg["id"] == 900 {
+            break msg;
+        }
+    };
+    assert_eq!(answer["result"]["isError"], true, "{answer}");
+    let err = answer["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        err.contains(
+            "unknown field `message`, expected one of `to`, `thread`, `text`, `close`, `claim`"
+        ),
+        "{err}"
+    );
+    // Nothing was sent.
+    assert!(!bob.ok("inbox", json!({})).await.contains("Misnamed?"));
+}
+
 /// The sessions of `who` the server keeps.
 fn sessions(s: &Server, who: &str) -> usize {
     db::list_sessions(&s.app.db(), Some(who), db::now_unix())
