@@ -150,6 +150,8 @@ async fn connect(url: &str, token: &str) -> Result<()> {
         .people()
         .await
         .map_err(|e| anyhow::anyhow!("checking the token with {}: {e}", config.url))?;
+    // The check is a session of its own: end it, or it stays listed until it is forgotten.
+    let _ = client.end(std::time::Duration::from_secs(2)).await;
     let path = config::path(config::env)?;
     config::save(&path, &config)?;
     let team = people["team"].as_array().map(Vec::len).unwrap_or(0);
