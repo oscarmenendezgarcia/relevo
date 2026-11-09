@@ -700,6 +700,24 @@ class Tools(Base):
         self.assertIn("@oscar's Hermes (general) has it since", client.render_thread(
             self.ana.thread(opened["thread"]), "ana"))
 
+    def test_send_takes_one_address_or_a_list(self):
+        """As relevo mcp's send: agents write `to: "ana"`."""
+        schema = next(d["function"]["parameters"] for d in registry.get_definitions({"relevo_send"}, quiet=True))
+        to = schema["properties"]["to"]
+        self.assertEqual(to["anyOf"], [{"type": "string"}, {"type": "array", "items": {"type": "string"}}])
+        self.assertIn("one address or a list of them", to["description"])
+        self.assertIn('"@team" alone', to["description"])
+        self.assertIn("Give `to` or `thread`, not both.", to["description"])
+        self.assertNotIn('["@team"]', registry.get_definitions({"relevo_send"}, quiet=True)[0]["function"]["description"])
+        one = tools.relevo_send({"to": "ana", "text": "# Staging\nIs the refunds flag on?"})
+        self.assertRegex(one, r"^Wrote note n_\w+ in thread r_\w+ \(open\)\.$")
+        self.assertEqual(sorted(self.ana.thread(one.split(" in thread ")[1].split(" ")[0])["participants"]), ["ana", "oscar"])
+        both = tools.relevo_send({"to": ["ana", "bob"], "text": "# Release\nWho cuts it this week?"})
+        self.assertEqual(sorted(self.bob.thread(both.split(" in thread ")[1].split(" ")[0])["participants"]),
+                         ["ana", "bob", "oscar"])
+        team = tools.relevo_send({"to": "@team", "text": "Who knows the staging DNS?"})
+        self.assertEqual(self.ana.thread(team.split(" in thread ")[1].split(" ")[0])["kind"], "team")
+
     def test_the_inbox_says_who_else_holds_each_thread(self):
         """`held_by`: one line per teammate who holds it, as a state, as relevo mcp's inbox says it."""
         sent = tools.relevo_send({"to": ["ana", "bob"], "text": "# Refunds export\nCan one of you rerun it?"})

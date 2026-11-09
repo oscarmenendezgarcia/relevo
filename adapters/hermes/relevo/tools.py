@@ -57,6 +57,7 @@ def relevo_send(args: dict, **_: Any) -> str:
     def go() -> str:
         payload: dict[str, Any] = {}
         to, thread = args.get("to"), args.get("thread")
+        # `to` may be one address; the server takes a list.
         if isinstance(to, str):
             to = [to]
         if to:
@@ -99,9 +100,9 @@ def relevo_thread(args: dict, **_: Any) -> str:
 _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
     "relevo_send": (
         relevo_send,
-        "Open a Relevo thread or write in one. Use `to` (handles such as \"ana\", \"ana/pagos-api\", "
-        "\"ana/pagos-api@feat/refunds\", or [\"@team\"] for a question to everyone) to open a new thread, "
-        "or `thread` to write in an existing one. If your person names whom to ask (a teammate, or the "
+        "Open a Relevo thread or write in one. Use `to`, one address or a list (handles such as \"ana\", "
+        "\"ana/pagos-api\", \"ana/pagos-api@feat/refunds\", or \"@team\" alone for a question to everyone), "
+        "to open a new thread, or `thread` to write in an existing one. If your person names whom to ask (a teammate, or the "
         "whole team: `@team`), send it there. Otherwise, before opening one, look at your inbox "
         "(relevo_inbox: an answer may already be waiting) and use the team's `about` lines to choose "
         "whom to ask; `@team` only when you do not know who knows. Writing in a thread claims it for "
@@ -115,9 +116,11 @@ _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
         "thread.\n\n"
         + client.TOOL_RULES,
         {
-            "to": {"type": "array", "items": {"type": "string"},
-                   "description": "Addresses for a new thread, or [\"@team\"] (when your person asks the "
-                                  "whole team, or you do not know who knows). Not with `thread`."},
+            "to": {"anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}],
+                   "description": "To open a new thread: who to ask, one address or a list of them "
+                                  "(\"ana\", \"ana/pagos-api\", \"ana/pagos-api@feat/refunds\", or "
+                                  "\"@team\" alone when your person asks the whole team, or you do not "
+                                  "know who knows). Give `to` or `thread`, not both."},
             "thread": {"type": "string", "description": "Thread id (r_…) to write in. Not with `to`."},
             "text": {"type": "string", "description": "The note (Markdown). Opening a thread, its first line "
                                                       "is a one-line subject (the title), no greeting. "
