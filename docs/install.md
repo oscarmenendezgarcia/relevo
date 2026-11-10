@@ -210,7 +210,7 @@ relevo backup ~/relevo-before-change.db
 
 `relevo backup` uses SQLite's `VACUUM INTO`: a consistent copy, without stopping the server. Do not copy `relevo.db` with `cp` or `rsync` while the server runs: the latest changes may still be in `relevo.db-wal`, and the copy can be missing them or broken. Copy the *backups* elsewhere instead (another disk, another machine), encrypted if they leave the office.
 
-**Restore** a backup with the same version of relevo that made it (a backup has the layout of its version; see part 6):
+**Restore** a backup with the version of relevo that made it, or a later one whose server migrates its layout (a backup has the layout of its version; see part 6):
 
 ```
 systemctl --user stop relevo
@@ -226,21 +226,23 @@ The `-wal` and `-shm` files of the old database must not stay next to the restor
 ## 6. Upgrades
 
 ```
-relevo backup ~/.local/share/relevo/backups/before-upgrade-$(date +%Y%m%d-%H%M%S).db   # --keep never removes it
 deploy/install.sh --enable ./relevo-<new>          # from the deploy files of the new version
 ```
 
-The script replaces the binary and the units, then restarts the server. Before it changes anything, it checks that the new binary runs on this machine and accepts the existing database; if not, it stops and says why.
+Before it changes anything, the script checks that the new binary runs on this machine and accepts the existing database, as it is or once the server migrates it (`relevo check-db`, which only reads it); if not, it stops and says why. Then, when the binary differs from the installed one, it copies the database with `relevo backup` into `~/.local/share/relevo/backups/before-upgrade-<UTC date and time>.db` (the daily backups' `--keep` never removes it: it is not named like them), puts the new binary and units in place, and restarts the server if it was running. It never migrates the database itself.
 
-**The database layout.** The database records the version of its layout (`SCHEMA_VERSION` in `src/db.rs`, kept in SQLite's `user_version`). v0 does not migrate: a relevo with another layout refuses the database ("made by an older version of relevo") in every command, `serve` included, except `backup`, which copies any version's. The release notes say when a version changes the layout. Moving to such a version means starting with a new, empty database:
+**The database layout.** The database records the version of its layout (`SCHEMA_VERSION` in `src/db.rs`, kept in SQLite's `user_version`); the release notes say when a version changes it. Only `relevo serve` migrates an older layout it knows, in place, when it starts. Every other command (`invite`, `people`, …) refuses such a database, writing nothing, and says to start the server first; `relevo backup` copies a database of any version. A layout the binary does not know (a newer version's, or one from before 0.1.0) is refused by every command, `serve` included: if the server is started on it anyway, it stops at once, systemd tries 5 times and then leaves it failed, and `journalctl --user -u relevo` shows the reason.
 
-1. Keep a backup: `relevo backup ~/relevo-old-$(date +%Y%m%d).db`. It stays readable by the old version.
-2. Write down the team: `relevo people` (handles, names, abouts) and `relevo token list` (who has which agents).
-3. Move the old database aside: `systemctl --user stop relevo`, then move `relevo.db`, `relevo.db-wal` and `relevo.db-shm` out of `~/.local/share/relevo`.
-4. Install the new version: `deploy/install.sh --enable ./relevo-<new>`. The server starts with an empty database.
-5. Invite everyone again (part 4). Each teammate runs `relevo connect` again with their new token (part 7). Old threads are not carried over; they are still in the old backup.
+**From 0.2.x to 0.3.0.** 0.3.0 moves the database from layout 5 to 6, in place: people, tokens, threads and notes stay, so there is nobody to invite again, and nobody runs `relevo connect` again.
 
-To go back, install the old binary again and put the old database back (as in a restore). If the server is started on a database it refuses anyway, it stops at once; systemd tries 5 times, then leaves it failed, and `journalctl --user -u relevo` shows the reason.
+1. Back up, with the server running: `relevo backup ~/relevo-before-0.3.0.db`. (The script takes one too; this one you name and keep where you like.) It stays readable by 0.2.x.
+2. Stop the server: `systemctl --user stop relevo`.
+3. Replace the binary, from the 0.3.0 deploy files: `deploy/install.sh --enable ./relevo-<0.3.0>`. It says the database has "the layout of relevo 0.1.0 to 0.2.x", backs it up, installs, and starts the server.
+4. The server migrates the database as it starts. Check: `systemctl --user status relevo`, then `relevo people` (until the server has started, admin commands refuse the old layout).
+
+After the migration, an open direct thread that 0.2.x showed as waiting for someone's reply stays pending for them, including notes their agents fetched and never answered under 0.2.x; each person's first new session gets those once as new notes. Everything else counts as handled. Teammates then update their own `relevo` binary and adapters (part 7): 0.2.x clients keep working against 0.3.0, but do not show what is pending and cannot mark a thread done.
+
+To go back to 0.2.x, the backup first, then the binary (0.2.x refuses the migrated database, and 0.3.0 would migrate the backup again): `systemctl --user stop relevo`; in `~/.local/share/relevo`, move `relevo.db`, `relevo.db-wal` and `relevo.db-shm` aside and put the backup from step 1 in their place (`install -m 0600 ~/relevo-before-0.3.0.db relevo.db`); then run `deploy/install.sh --enable ./relevo-<0.2.x>` from the 0.2.x deploy files, which starts the server. Notes written since the backup are lost.
 
 ## 7. Each teammate: connect your agent
 

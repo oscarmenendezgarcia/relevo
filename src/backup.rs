@@ -48,12 +48,7 @@ pub fn backup(db: &str, dest: &Path, keep: Option<usize>, now: OffsetDateTime) -
     }
 
     // Read-only, and never created: a missing database is an error, not an empty backup.
-    let source = Connection::open_with_flags(
-        db,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| format!("opening database {db}"))?;
-    source.busy_timeout(std::time::Duration::from_secs(10))?;
+    let source = crate::db::read_only(db).with_context(|| format!("opening database {db}"))?;
     let tables: i64 = source
         .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))
         .with_context(|| format!("reading database {db}"))?;

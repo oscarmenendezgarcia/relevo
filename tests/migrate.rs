@@ -156,7 +156,11 @@ async fn a_layout_5_database_migrates_and_what_waited_for_a_reply_stays_pending(
     let dir = TempDir::new();
     let path = dir.db();
     let seen = layout5(&path);
-    let app = App::new(db::open(&path).unwrap(), Clock::fixed(seen + 60), 5);
+    let app = App::new(
+        db::open_migrating(&path).unwrap(),
+        Clock::fixed(seen + 60),
+        5,
+    );
     assert_eq!(user_version(&path), 6);
     let f = Fixture {
         app,
@@ -332,7 +336,7 @@ fn a_migrated_database_has_the_layout_of_a_new_one() {
     let dir = TempDir::new();
     let migrated = dir.db();
     layout5(&migrated);
-    db::open(&migrated).unwrap();
+    db::open_migrating(&migrated).unwrap();
     let new = dir.0.join("new.db");
     let new = new.to_str().unwrap();
     db::open(new).unwrap();
@@ -352,7 +356,11 @@ fn other_layouts_are_refused_and_left_as_they_are() {
             .unwrap()
             .pragma_update(None, "user_version", version)
             .unwrap();
-        let err = format!("{:#}", db::open(&path).unwrap_err());
+        for open in [db::open, db::open_migrating] {
+            let err = format!("{:#}", open(&path).unwrap_err());
+            assert!(err.contains(says), "{err}");
+        }
+        let err = format!("{:#}", db::check(&path).unwrap_err());
         assert!(err.contains(says), "{err}");
         assert_eq!(user_version(&path), version);
         let conn = rusqlite::Connection::open(&path).unwrap();
@@ -365,4 +373,56 @@ fn other_layouts_are_refused_and_left_as_they_are() {
             .unwrap();
         assert_eq!(columns, 0);
     }
+}
+
+/// The files of the database at `path` (with its `-wal` and `-shm`), with their contents.
+fn files(path: &str) -> Vec<(String, Option<Vec<u8>>)> {
+    ["", "-wal", "-shm"]
+        .iter()
+        .map(|ext| (ext.to_string(), std::fs::read(format!("{path}{ext}")).ok()))
+        .collect()
+}
+
+#[test]
+fn only_serve_migrates_and_checking_writes_nothing() {
+    let dir = TempDir::new();
+    let path = dir.db();
+    layout5(&path);
+    // As the server leaves it once stopped: no -wal, no -shm.
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .pragma_update(None, "journal_mode", "WAL")
+        .unwrap();
+    let before = files(&path);
+    assert_eq!(before[1].1, None);
+    assert_eq!(before[2].1, None);
+
+    // Checking says serve migrates it, and changes nothing, leaving no -wal or -shm behind.
+    assert_eq!(db::check(&path).unwrap(), db::Layout::Migrates);
+    assert_eq!(files(&path), before);
+    // An admin command refuses it, says what to do, and changes nothing.
+    let err = format!("{:#}", db::open(&path).unwrap_err());
+    for says in ["only `relevo serve`", "relevo backup", "start the server"] {
+        assert!(err.contains(says), "{says}: {err}");
+    }
+    assert_eq!(user_version(&path), 5);
+    assert_eq!(files(&path)[0], before[0]);
+
+    // The server migrates it; then everything opens it, and checking says so, also while it is
+    // open (read-only, through its -wal and -shm).
+    let conn = db::open_migrating(&path).unwrap();
+    assert_eq!(user_version(&path), 6);
+    assert_eq!(db::check(&path).unwrap(), db::Layout::Current);
+    db::open(&path).unwrap();
+    drop(conn);
+    assert_eq!(db::check(&path).unwrap(), db::Layout::Current);
+
+    // A new file: empty. No file: an error, and none is made.
+    let empty = dir.0.join("empty.db");
+    std::fs::write(&empty, b"").unwrap();
+    assert_eq!(db::check(empty.to_str().unwrap()).unwrap(), db::Layout::New);
+    let missing = dir.0.join("missing.db");
+    let missing = missing.to_str().unwrap();
+    assert!(format!("{:#}", db::check(missing).unwrap_err()).contains("no database"));
+    assert!(!std::path::Path::new(missing).exists());
 }

@@ -91,6 +91,9 @@ enum Command {
         #[arg(long)]
         channel: bool,
     },
+    /// Say whether this relevo can use the database, without changing it: as it is, or once
+    /// `serve` migrates it (exit 0), or not (exit 1). deploy/install.sh asks before an upgrade.
+    CheckDb,
     /// Copy the database consistently (SQLite VACUUM INTO), safe while the server runs.
     Backup {
         /// A new file (never overwritten), or a directory to write YYYYMMDD-HHMMSS.db (UTC) into.
@@ -348,7 +351,25 @@ async fn main() -> Result<()> {
         println!("{}", cert.fingerprint());
         return Ok(());
     }
-    let conn = db::open(&db_file)?;
+    // Nor does checking it.
+    if let Command::CheckDb = &cli.command {
+        let says = match db::check(&db_file)? {
+            db::Layout::Current => "this version's layout",
+            db::Layout::New => "empty: `relevo serve` sets it up",
+            db::Layout::Migrates => {
+                "the layout of relevo 0.1.0 to 0.2.x: `relevo serve` migrates it in place when it \
+                 starts (keep a `relevo backup` first)"
+            }
+        };
+        println!("{db_file}: {says}");
+        return Ok(());
+    }
+    // Only the server migrates an older layout: an admin command refuses it.
+    let conn = if matches!(cli.command, Command::Serve { .. }) {
+        db::open_migrating(&db_file)?
+    } else {
+        db::open(&db_file)?
+    };
     let now = db::now_unix();
     match cli.command {
         Command::Serve {
@@ -453,6 +474,7 @@ async fn main() -> Result<()> {
         Command::Connect { .. }
         | Command::Mcp { .. }
         | Command::Backup { .. }
+        | Command::CheckDb
         | Command::TlsFingerprint => {
             unreachable!("handled above")
         }

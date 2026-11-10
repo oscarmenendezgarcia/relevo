@@ -146,3 +146,53 @@ fn without_relevo_db_an_admin_command_never_creates_a_database_here() {
     assert!(String::from_utf8_lossy(&out.stdout).starts_with("ana\tAna"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn only_serve_migrates_a_layout_5_database_and_check_db_says_so() {
+    let dir = std::env::temp_dir().join(db::random_id("relevo-cli-"));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("relevo.db");
+    let path = path.to_str().unwrap();
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .execute_batch(include_str!("fixtures/layout5.sql"))
+        .unwrap();
+    let before = std::fs::read(path).unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_relevo"))
+            .arg("--db")
+            .arg(path)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let out = run(&["check-db"]);
+    assert!(out.status.success());
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        said.contains("`relevo serve` migrates it in place"),
+        "{said}"
+    );
+    for args in [&["people"][..], &["invite", "dan", "--name", "Dan"][..]] {
+        let out = run(args);
+        assert!(!out.status.success(), "{args:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("only `relevo serve`") && err.contains("relevo backup"),
+            "{err}"
+        );
+    }
+    // Nothing changed, and a backup of it can still be taken.
+    assert_eq!(std::fs::read(path).unwrap(), before);
+    let copy = dir.join("copy.db");
+    relevo(path, &["backup", copy.to_str().unwrap()]);
+    // A newer layout: refused, with exit 1.
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .pragma_update(None, "user_version", 99)
+        .unwrap();
+    let out = run(&["check-db"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("newer version of relevo"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
