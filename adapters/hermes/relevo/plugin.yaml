@@ -1,7 +1,7 @@
 name: relevo
 label: Relevo
 kind: platform
-version: 0.2.1
+version: 0.3.0
 description: >
   Relevo for Hermes. Relevo keeps and delivers notes between the people of a team,
   each through their own agent. As a gateway platform, every Relevo thread is a chat:

@@ -1,7 +1,8 @@
 //! `relevo mcp`: a stdio MCP server with the tools `send`, `inbox` and `thread`, and with
 //! `--channel`, Claude Code channel events for new notes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -29,8 +30,8 @@ const RULES: &str = "\
 Relevo carries notes between the people of a team; each person reaches it through their own \
 agent, and you are the agent of the one you work with (\"your person\"). Tools: `inbox` (what is \
 new for this session and what waits for your person, with who you are and the team list), \
-`thread` (a whole thread, with who has seen it and who holds it) and `send` (open a thread with \
-`to`, or write in one with `thread`).
+`thread` (a whole thread, with who has seen it, who has handled it and who holds it) and `send` \
+(open a thread with `to`, write in one with `thread`, or mark one handled with `done`).
 
 Rules:
 1. You speak for one person: `you` in the inbox (and /api/people) is their handle. What your \
@@ -40,7 +41,9 @@ there.
 person did not say whom to ask, use the team's `about` lines to choose; ask `@team` only when \
 you do not know who knows.
 3. When a note arrives, decide from your own context and current work whether it is for you. \
-If not, stay silent: do not reply \"not for me\".
+If not, stay silent and leave it: it stays pending for your person, for another of their sessions \
+or for them. If it is for you but needs nothing (an answer you have now read, a thank-you), mark \
+it handled with `send(thread, done: true)` and no text.
 4. Read what you need first. If you can answer or explain from that reading, just answer: your \
 reply takes the thread. If the note needs work, mark the thread as yours with `send(thread, \
 claim: true)` and no text just before you start changing files or running something long, so \
@@ -67,8 +70,9 @@ This server also pushes new notes to you as <channel source=\"relevo\" thread=\"
 from=\"handle\" kind=\"direct|team\"> events. Each event holds a thread with its new notes, which \
 are already delivered to this session. Treat it like a note from your inbox, under the rules \
 above: if it is for you, answer with send(thread=\"<thread id>\", text=…), or, if it needs work \
-first, claim it with send(thread=\"<thread id>\", claim=true) and no text before you start; if \
-not, stay silent. \
+first, claim it with send(thread=\"<thread id>\", claim=true) and no text before you start, or, \
+if it needs nothing, mark it handled with send(thread=\"<thread id>\", done=true) and no text; if \
+not, stay silent and leave it: it stays pending for your person. \
 Events may not reach you, so still look at your inbox when you start a task and before you \
 finish one: `inbox` also lists what was pushed since you last looked.";
 
@@ -97,8 +101,8 @@ pub struct SendParams {
     /// The note, in Markdown. Self-contained: the reader does not share your context. In the
     /// first person, as your person would write it ("I changed…", not "Ana changed…"). Opening
     /// a thread, its first line is a one-line subject (the title), no greeting and no "Re:".
-    /// Required unless only closing or claiming a thread. Never a note that only says you are
-    /// on it.
+    /// Required unless only closing, claiming or marking done a thread. Never a note that only
+    /// says you are on it.
     #[serde(default)]
     pub text: Option<String>,
     /// `true` marks the thread closed (resolved), after writing `text` if given. Only when your
@@ -110,6 +114,13 @@ pub struct SendParams {
     /// just before you start changing files or running something long. Not for team questions.
     #[serde(default)]
     pub claim: Option<bool>,
+    /// `true`, with `thread` and no `text` (and no `claim`): your person has handled the thread
+    /// up to the latest note this session has received, with nothing to write ("seen, nothing
+    /// to do": an answer you have now read, a thank-you). A note that arrived since stays
+    /// pending. It stops being pending for them; nothing is written and nothing
+    /// claimed. Not for a note that is not for you: leave that one pending.
+    #[serde(default)]
+    pub done: Option<bool>,
 }
 
 /// `to`: one address, or a list of them.
@@ -153,15 +164,27 @@ pub struct Relevo {
     /// events (Claude Code started without the channels flag, another client), the notes would
     /// be lost, since the push delivered them. `inbox` shows them once.
     pushed: Arc<Mutex<Vec<Value>>>,
+    /// The notes this process has shown the agent (see `Shown`).
+    shown: Arc<Shown>,
+    /// An inbox request (the `inbox` tool's or the channel loop's) failed since the last answer
+    /// (see `after_failure`).
+    failed: Arc<AtomicBool>,
     channel: bool,
     tool_router: ToolRouter<Self>,
 }
+
+/// The notes this process has shown the agent, by thread: pushed as channel events, listed by
+/// `inbox` (new notes, and the latest note of a thread with nothing new) or read with `thread`.
+/// A thread with an entry has notes that reached this session.
+type Shown = Mutex<HashMap<String, HashSet<String>>>;
 
 impl Relevo {
     pub fn new(client: Result<Arc<Client>, String>, channel: bool) -> Self {
         Relevo {
             client,
             pushed: Arc::new(Mutex::new(vec![])),
+            shown: Arc::new(Mutex::new(HashMap::new())),
+            failed: Arc::new(AtomicBool::new(false)),
             channel,
             tool_router: Self::tool_router(),
         }
@@ -234,6 +257,76 @@ fn forget(pushed: &Mutex<Vec<Value>>, id: &str) {
     lock(pushed).retain(|t| t["id"] != id);
 }
 
+/// Records every note of `thread` (`notes`, `new_notes`, `last_note`) as shown to the agent.
+fn show(shown: &Shown, thread: &Value) {
+    let Some(id) = thread["id"].as_str() else {
+        return;
+    };
+    let mut shown = lock(shown);
+    let notes = shown.entry(id.to_string()).or_default();
+    let listed = ["notes", "new_notes"]
+        .iter()
+        .flat_map(|k| thread[*k].as_array().into_iter().flatten());
+    for n in listed.chain(std::iter::once(&thread["last_note"])) {
+        if let Some(note) = n["id"].as_str() {
+            notes.insert(note.to_string());
+        }
+    }
+}
+
+/// Whether `t`, from an inbox answer, is to be handed over (again): a direct thread pending for
+/// the person, with no new notes by someone else, whose latest note, by someone else, this
+/// process has not shown the agent. The answer that carried that note was lost on the way, or
+/// fetched without being shown; it was delivered all the same, so nothing else would bring it
+/// back. Once per note and process: once shown, a note the agent leaves alone (not for it)
+/// stays pending without coming back.
+fn unshown(shown: &Shown, t: &Value, me: Option<&str>) -> bool {
+    let last = &t["last_note"];
+    s(&t["kind"]) == "direct"
+        && s(&t["status"]) == "open"
+        && render::pending(t)
+        && last["id"].is_string()
+        && Some(s(&last["author"])) != me
+        && !new_by_others(t, me)
+        && !lock(shown)
+            .get(s(&t["id"]))
+            .is_some_and(|notes| notes.contains(s(&last["id"])))
+}
+
+/// Records in `failed` that an inbox request failed in a way that may have lost its answer: any
+/// way but an error Relevo itself sent, which delivered nothing. A proxy's error page (a 504, say)
+/// may hide an answer the server wrote after the proxy gave up.
+fn lost(failed: &AtomicBool, e: &Error) {
+    if !matches!(e, Error::Api { code, .. } if code != "HTTP_ERROR") {
+        failed.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Marks the threads with new notes in `v`, an inbox answer, as coming after a failed request,
+/// when one failed since the last answer (`failed`, which it clears). The server delivers the
+/// notes of an answer when it sends it, so a lost answer took its notes with it, and the notes of
+/// a thread here may not follow on from what this session last saw: the agent is told to read the
+/// thread whole. A direct thread with nothing new is handed over (`unshown`), which says the same.
+fn after_failure(failed: &AtomicBool, v: &mut Value) {
+    if !failed.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    for t in v["threads"].as_array_mut().into_iter().flatten() {
+        if t["new_notes"].as_array().is_some_and(|n| !n.is_empty()) {
+            t["after_failure"] = true.into();
+        }
+    }
+}
+
+/// Whether `t` has new notes not written by `me`.
+fn new_by_others(t: &Value, me: Option<&str>) -> bool {
+    t["new_notes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|n| Some(s(&n["author"])) != me)
+}
+
 /// A failed call as a tool error: the server's code and message, and for `UNKNOWN_PERSON` the
 /// people who can be named.
 fn error(e: Error) -> String {
@@ -260,7 +353,9 @@ impl Relevo {
                        `to` (who to ask, to open a thread: \"ana\", \"ana/pagos-api\" or \
                        \"@team\", or a list of addresses) or `thread` (an existing thread's id, \
                        \"r_…\"); `text` (the note); `close` (true to close the thread); `claim` \
-                       (true, with `thread`, to mark the thread as this session's). If your \
+                       (true, with `thread`, to mark the thread as this session's); `done` (true, \
+                       with `thread` and no text, to mark it handled when it needs nothing: an \
+                       answer you have now read, a thank-you). If your \
                        person names whom to ask (a teammate, or the whole team: `@team`), send it \
                        there. Otherwise, before opening one, look at your inbox (an answer may \
                        already be waiting) and use the team's `about` lines to choose whom to \
@@ -276,7 +371,9 @@ impl Relevo {
                        first person, as your person would (\"I changed…\"). A new thread starts \
                        with a one-line subject (its title), no greeting and no \"Re:\". \
                        `close: true` marks it resolved (a close needs no text): only when your \
-                       person asks, or when you asked the question and it is answered."
+                       person asks, or when you asked the question and it is answered. A note \
+                       stays pending for your person until they answer, close it or mark it \
+                       `done`; if it is not for you, write nothing and leave it pending."
     )]
     async fn send(&self, Parameters(p): Parameters<SendParams>) -> Result<String, String> {
         let client = self.client()?;
@@ -299,11 +396,22 @@ impl Relevo {
         if let Some(claim) = p.claim {
             body.insert("claim".into(), claim.into());
         }
+        let done = p.done == Some(true);
+        if let Some(d) = p.done {
+            body.insert("done".into(), d.into());
+        }
         let v = client.send(body).await.map_err(error)?;
         if let Some(id) = v["thread"].as_str() {
             forget(&self.pushed, id);
         }
-        Ok(render::sent(&v))
+        Ok(if done {
+            // `done` handles only what reached this session: say so when nothing of the thread
+            // was shown here.
+            let received = lock(&self.shown).contains_key(s(&v["thread"]));
+            render::done(&v, received)
+        } else {
+            render::sent(&v)
+        })
     }
 
     #[tool(
@@ -314,26 +422,39 @@ impl Relevo {
     )]
     async fn inbox(&self, Parameters(p): Parameters<InboxParams>) -> Result<String, String> {
         let client = self.client()?;
-        let mut v = client
-            .inbox(p.all.unwrap_or(false), 0)
-            .await
-            .map_err(error)?;
+        let mut v = match client.inbox(p.all.unwrap_or(false), 0).await {
+            Ok(v) => v,
+            Err(e) => {
+                lost(&self.failed, &e);
+                return Err(error(e));
+            }
+        };
+        after_failure(&self.failed, &mut v);
         let me = client.you().await;
+        for t in v["threads"].as_array_mut().into_iter().flatten() {
+            if unshown(&self.shown, t, me.as_deref()) {
+                t["handed_over"] = true.into();
+            }
+        }
         let pushed = std::mem::take(&mut *lock(&self.pushed));
         let rest = merge_pushed(&mut v, pushed);
         let mut out = render::inbox(&v, me.as_deref());
         out.push_str(&render::pushed(&rest, me.as_deref()));
+        for t in v["threads"].as_array().into_iter().flatten().chain(&rest) {
+            show(&self.shown, t);
+        }
         Ok(out)
     }
 
     #[tool(
-        description = "A whole thread: every note, who has seen it and which session holds it. \
-                       Does not claim it."
+        description = "A whole thread: every note, who has seen it, who has handled it and \
+                       which session holds it. Does not claim it."
     )]
     async fn thread(&self, Parameters(p): Parameters<ThreadParams>) -> Result<String, String> {
         let client = self.client()?;
         let v = client.thread(&p.id).await.map_err(error)?;
         forget(&self.pushed, &p.id);
+        show(&self.shown, &v);
         // Before any inbox, who we are is asked of the server, so our own notes are not fenced.
         let me = client.you().await;
         Ok(render::thread(&v, me.as_deref()))
@@ -384,7 +505,11 @@ pub async fn run(channel: bool) -> anyhow::Result<()> {
             .map_err(|e| format!("{e:#}")),
         channel,
     );
-    let pushed = server.pushed.clone();
+    let (pushed, shown, failed) = (
+        server.pushed.clone(),
+        server.shown.clone(),
+        server.failed.clone(),
+    );
     let service = server.serve(rmcp::transport::stdio()).await?;
     let mut news = None;
     if channel {
@@ -393,6 +518,8 @@ pub async fn run(channel: bool) -> anyhow::Result<()> {
                 news = Some(tokio::spawn(push_news(
                     client.clone(),
                     pushed,
+                    shown,
+                    failed,
                     service.peer().clone(),
                 )));
             }
@@ -469,11 +596,27 @@ pub fn channel_event(thread: &Value, me: Option<&str>) -> Option<Value> {
             "\nIf your own work or your person's files answer it, reply with \
              send(thread=\"{id}\", text=…); if not, stay silent."
         ));
+    } else if s(&thread["status"]) == "closed" {
+        // Closed with a last note: to read only; writing in it, `done` included, is refused.
+        content.push_str(
+            "\nThis thread is closed: it needs nothing more and cannot be answered. Read it, and \
+             tell your person if it matters to them; to follow up, open a new thread with \
+             send(to=…).",
+        );
+    } else if !render::pending(thread) {
+        // Another of the person's sessions already handled it: nothing to leave pending or mark
+        // done.
+        content.push_str(&format!(
+            "\nYour person has already handled this thread: it is not pending. If it is for you \
+             and asks something you can answer, answer with send(thread=\"{id}\", text=…); \
+             otherwise stay silent."
+        ));
     } else {
         content.push_str(&format!(
             "\nIf it is for you, answer with send(thread=\"{id}\", text=…), or, if it needs work \
              first, claim it with send(thread=\"{id}\", claim=true) and no text before you \
-             start; if not, stay silent."
+             start, or, if it needs nothing, mark it handled with send(thread=\"{id}\", \
+             done=true) and no text; if not, stay silent and leave it pending."
         ));
     }
     Some(json!({
@@ -487,15 +630,22 @@ pub fn channel_event(thread: &Value, me: Option<&str>) -> Option<Value> {
 ///
 /// The server delivers the notes in an answer when it sends it, so an answer lost on the way
 /// (the laptop slept, the network changed, a proxy cut the request) takes its notes with it.
-/// After a failure the next request does not wait, and each direct thread that it shows only as
-/// waiting is fetched with `thread`: if its latest note is recent and was not pushed, it is
-/// pushed again. A team thread whose notes were lost leaves the inbox and cannot be found again.
-async fn push_news(client: Arc<Client>, pushed: Arc<Mutex<Vec<Value>>>, peer: Peer<RoleServer>) {
+/// After a failure the next request does not wait; in every answer, a direct thread pending for
+/// the person whose latest note this process has not shown is handed over (`unshown`), once, and
+/// in the first answer after a failure each thread with new notes says earlier ones may be
+/// missing (`after_failure`). A team thread whose notes were lost leaves the inbox and cannot be
+/// found again.
+async fn push_news(
+    client: Arc<Client>,
+    pushed: Arc<Mutex<Vec<Value>>>,
+    shown: Arc<Shown>,
+    failed_since: Arc<AtomicBool>,
+    peer: Peer<RoleServer>,
+) {
     let mut backoff = Duration::from_secs(1);
-    // The latest note by someone else pushed for each thread.
-    let mut known: HashMap<String, String> = HashMap::new();
-    // When the first of the requests that failed since the last answer was sent (unix seconds).
-    let mut failed_since: Option<i64> = None;
+    // A request failed since the last answer: the next one does not wait, since a thread whose
+    // notes were lost is no longer new and would not end the wait.
+    let mut failed = false;
     let push = |event: Value| {
         let peer = peer.clone();
         async move {
@@ -507,52 +657,40 @@ async fn push_news(client: Arc<Client>, pushed: Arc<Mutex<Vec<Value>>>, peer: Pe
     };
     loop {
         let started = tokio::time::Instant::now();
-        let sent_at = crate::db::now_unix();
-        let wait = if failed_since.is_some() {
-            0
-        } else {
-            CHANNEL_WAIT
-        };
-        let v = match client.inbox(false, wait).await {
+        let wait = if failed { 0 } else { CHANNEL_WAIT };
+        let mut v = match client.inbox(false, wait).await {
             Ok(v) => v,
             Err(e) => {
                 // The code and message only: never note text or the token.
                 eprintln!("relevo mcp: inbox: {e}; again in {}s", backoff.as_secs());
-                failed_since.get_or_insert(sent_at);
+                failed = true;
+                lost(&failed_since, &e);
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(MAX_BACKOFF);
                 continue;
             }
         };
-        let threads: Vec<&Value> = v["threads"].as_array().into_iter().flatten().collect();
+        after_failure(&failed_since, &mut v);
         // Learnt from this answer's `you`: never another request in this loop.
         let me = client.known_you();
         let mut events = 0;
-        for t in &threads {
+        for t in v["threads"].as_array().into_iter().flatten() {
             let (thread, event) = match channel_event(t, me.as_deref()) {
-                Some(event) => (Value::clone(t), event),
-                None => match failed_since {
-                    Some(since) if waits_quietly(t) => {
-                        let known = known.get(s(&t["id"]));
-                        match recover(&client, t, known, since, me.as_deref()).await {
-                            Some(recovered) => recovered,
-                            None => continue,
-                        }
-                    }
-                    _ => continue,
+                Some(event) => (t.clone(), event),
+                None => match handover(&shown, t, me.as_deref()) {
+                    Some(handed) => handed,
+                    None => continue,
                 },
             };
             // Kept before sending: nothing tells whether the client shows the event.
             remember(&pushed, &thread);
-            if let Some(n) = latest_other(&thread, me.as_deref()) {
-                known.insert(s(&thread["id"]).to_string(), n);
-            }
+            show(&shown, &thread);
             events += 1;
             if !push(event).await {
                 return;
             }
         }
-        failed_since = None;
+        failed = false;
         // A server that answers a waiting request at once with nothing (one that ignores `wait`,
         // or a proxy in the way) must not make this loop spin: back off as after a failure.
         if wait > 0 && events == 0 && started.elapsed() < MIN_EMPTY_WAIT {
@@ -572,68 +710,16 @@ fn s(v: &Value) -> &str {
     v.as_str().unwrap_or("")
 }
 
-/// An open direct thread that waits for a reply with nothing new: what a thread whose new notes
-/// were in a lost answer looks like.
-fn waits_quietly(t: &Value) -> bool {
-    s(&t["kind"]) == "direct"
-        && s(&t["status"]) == "open"
-        && t["waiting_for_you"] == true
-        && t["new_notes"].as_array().is_none_or(Vec::is_empty)
-}
-
-/// The id of the latest note in `thread` (`notes` or `new_notes`) not written by `me`.
-fn latest_other(thread: &Value, me: Option<&str>) -> Option<String> {
-    let notes = thread.get("notes").or_else(|| thread.get("new_notes"))?;
-    notes
-        .as_array()?
-        .iter()
-        .rev()
-        .find(|n| Some(s(&n["author"])) != me)
-        .map(|n| s(&n["id"]).to_string())
-}
-
-/// How far back a recovered note may be, before the failed request, to allow for the server's
-/// clock being off from ours.
-const RECOVER_SLACK: i64 = 600;
-
-/// After a failure: the quiet thread `t` again, as pushed (its notes after `known`, the latest
-/// note by someone else already pushed), and its event, when its latest note is recent and was
-/// not pushed.
-async fn recover(
-    client: &Client,
-    t: &Value,
-    known: Option<&String>,
-    since: i64,
-    me: Option<&str>,
-) -> Option<(Value, Value)> {
-    let full = client.thread(s(&t["id"])).await.ok()?;
-    let notes = full["notes"].as_array()?;
-    let latest = notes.last()?;
-    if Some(s(&latest["id"])) == known.map(String::as_str)
-        || s(&latest["created_at"]) < crate::db::rfc3339(since - RECOVER_SLACK).as_str()
-    {
+/// The thread `t` of an inbox answer handed over again, with its latest note as its new note,
+/// and its event, when `unshown` says so.
+fn handover(shown: &Shown, t: &Value, me: Option<&str>) -> Option<(Value, Value)> {
+    if !unshown(shown, t, me) {
         return None;
     }
-    // The notes after the one pushed; without one, those after our own latest note, or the
-    // latest alone.
-    let start = notes
-        .iter()
-        .rposition(|n| Some(s(&n["id"])) == known.map(String::as_str))
-        .or_else(|| notes.iter().rposition(|n| Some(s(&n["author"])) == me))
-        .map_or(notes.len() - 1, |i| i + 1);
-    let mut thread = full.clone();
-    let object = thread.as_object_mut()?;
-    object.remove("notes");
-    object.remove("delivery");
-    object.insert("new_notes".into(), Value::Array(notes[start..].to_vec()));
-    let mut event = channel_event(&thread, me)?;
-    if let Some(content) = event["content"].as_str() {
-        event["content"] = format!(
-            "(Pushed again: the connection dropped while it was being delivered, so you may have \
-             seen it already.)\n{content}"
-        )
-        .into();
-    }
+    let mut thread = t.clone();
+    thread["new_notes"] = json!([t["last_note"]]);
+    thread["handed_over"] = true.into();
+    let event = channel_event(&thread, me)?;
     Some((thread, event))
 }
 
@@ -645,7 +731,7 @@ mod tests {
     fn channel_events_name_the_latest_other_author() {
         let t = json!({
             "id": "r_1", "kind": "direct", "title": "T", "from": "oscar",
-            "participants": ["oscar", "ana"], "status": "open", "waiting_for_you": true,
+            "participants": ["oscar", "ana"], "status": "open", "pending": true,
             "context": null, "claimed": null,
             "new_notes": [
                 { "id": "n_1", "author": "ana", "via": "x", "created_at": "t", "text": "hi", "truncated": false },
@@ -684,6 +770,12 @@ mod tests {
             content.contains("claim it with send(thread=\"r_1\", claim=true) and no text"),
             "{content}"
         );
+        // Or, if it needs nothing, mark it handled; if it is not for us, leave it pending.
+        assert!(
+            content.contains("mark it handled with send(thread=\"r_1\", done=true) and no text"),
+            "{content}"
+        );
+        assert!(content.contains("leave it pending"), "{content}");
 
         // A team question: answer only with something useful, and do not claim it.
         let mut team = t.clone();
@@ -712,6 +804,145 @@ mod tests {
         for wrong in ["If your own work", "If it is for you", "A team question:"] {
             assert!(!content.contains(wrong), "{wrong}: {content}");
         }
+    }
+
+    #[test]
+    fn channel_events_offer_done_and_pending_only_while_pending_and_open() {
+        let t = json!({
+            "id": "r_1", "kind": "direct", "title": "T", "from": "ana",
+            "participants": ["ana", "oscar"], "status": "open",
+            "pending": true, "context": null, "claimed": null,
+            "new_notes": [
+                { "id": "n_1", "author": "ana", "via": "x", "created_at": "t", "text": "Thanks!", "truncated": false }
+            ]
+        });
+        let content = |t: &Value| {
+            channel_event(t, Some("oscar")).unwrap()["content"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        // Another session of the person already handled it: it reaches this one all the same.
+        let mut handled = t.clone();
+        handled["pending"] = false.into();
+        let out = content(&handled);
+        assert!(
+            out.contains("Your person has already handled this thread: it is not pending."),
+            "{out}"
+        );
+        assert!(out.contains("send(thread=\"r_1\", text=…)"), "{out}");
+        for wrong in ["leave it pending", "done=true", "claim=true"] {
+            assert!(!out.contains(wrong), "{wrong}: {out}");
+        }
+        // Closed with a last note: to read; writing in it, `done` included, would fail.
+        let mut closed = handled.clone();
+        closed["status"] = "closed".into();
+        let out = content(&closed);
+        assert!(
+            out.contains("This thread is closed: it needs nothing more and cannot be answered"),
+            "{out}"
+        );
+        for wrong in ["leave it pending", "done=true", "claim=true", "text=…"] {
+            assert!(!out.contains(wrong), "{wrong}: {out}");
+        }
+        // Still pending: as before.
+        let out = content(&t);
+        assert!(
+            out.contains("done=true") && out.contains("leave it pending"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn only_an_unshown_pending_direct_note_by_someone_else_is_handed_over_once() {
+        let shown: Shown = Mutex::new(HashMap::new());
+        let t = json!({
+            "id": "r_1", "kind": "direct", "title": "T", "from": "ana",
+            "participants": ["ana", "oscar"], "status": "open", "pending": true,
+            "context": null, "claimed": null, "new_notes": [],
+            "last_note": { "id": "n_1", "author": "ana", "via": "x", "created_at": "t",
+                           "text": "Deploy?", "truncated": false }
+        });
+        let me = Some("oscar");
+        assert!(unshown(&shown, &t, me));
+        let with = |k: &str, v: Value| {
+            let mut t = t.clone();
+            t[k] = v;
+            t
+        };
+        for not in [
+            with("kind", "team".into()),
+            with("status", "closed".into()),
+            with("pending", false.into()),
+            // New notes by someone else are pushed as such.
+            with("new_notes", json!([t["last_note"]])),
+            with(
+                "last_note",
+                json!({ "id": "n_2", "author": "oscar", "text": "mine" }),
+            ),
+        ] {
+            assert!(!unshown(&shown, &not, me), "{not}");
+        }
+        // Handed over once: shown, it is not handed over again.
+        let (thread, event) = handover(&shown, &t, me).unwrap();
+        assert_eq!(thread["new_notes"], json!([t["last_note"]]));
+        let content = event["content"].as_str().unwrap();
+        assert!(content.contains("Handed over again"), "{content}");
+        assert_eq!(event["meta"]["from"], "ana");
+        show(&shown, &thread);
+        assert!(!unshown(&shown, &t, me));
+        assert!(handover(&shown, &t, me).is_none());
+        // A later note by someone else, shown nowhere yet, is.
+        let later = with(
+            "last_note",
+            json!({ "id": "n_3", "author": "ana", "text": "Or at 6?" }),
+        );
+        assert!(unshown(&shown, &later, me));
+    }
+
+    #[test]
+    fn the_first_answer_after_a_lost_one_marks_threads_with_new_notes() {
+        let failed = AtomicBool::new(false);
+        let answer = || {
+            json!({ "threads": [
+                { "id": "r_1", "new_notes": [{ "id": "n_2", "author": "ana" }] },
+                { "id": "r_2", "new_notes": [] }
+            ] })
+        };
+        // Nothing failed: nothing marked.
+        let mut v = answer();
+        after_failure(&failed, &mut v);
+        assert!(v["threads"][0].get("after_failure").is_none());
+        // An error the server sent delivered nothing.
+        let api = Error::Api {
+            status: 400,
+            code: "BAD_REQUEST".into(),
+            message: "x".into(),
+            body: Value::Null,
+        };
+        lost(&failed, &api);
+        let mut v = answer();
+        after_failure(&failed, &mut v);
+        assert!(v["threads"][0].get("after_failure").is_none());
+        // No answer, or a proxy's: the next one marks its threads with new notes, once.
+        let proxy = Error::Api {
+            status: 504,
+            code: "HTTP_ERROR".into(),
+            message: "x".into(),
+            body: Value::Null,
+        };
+        lost(&failed, &proxy);
+        let mut v = answer();
+        after_failure(&failed, &mut v);
+        assert_eq!(v["threads"][0]["after_failure"], true);
+        lost(&failed, &Error::Network("cut off".into()));
+        let mut v = answer();
+        after_failure(&failed, &mut v);
+        assert_eq!(v["threads"][0]["after_failure"], true);
+        assert!(v["threads"][1].get("after_failure").is_none());
+        let mut v = answer();
+        after_failure(&failed, &mut v);
+        assert!(v["threads"][0].get("after_failure").is_none());
     }
 
     #[test]
@@ -771,6 +1002,11 @@ mod tests {
             assert!(text.contains(&format!("\n{n}. ")), "rule {n}");
         }
         assert!(!text.contains("\n9. "), "{text}");
+        // Rules v7: a note not for you stays pending; one that needs nothing is marked done.
+        assert!(
+            text.contains("mark it handled with `send(thread, done: true)` and no text."),
+            "{text}"
+        );
         // Word for word as in docs/agents.md.
         let doc = include_str!("../docs/agents.md");
         let rules = text.split_once("\nRules:\n").unwrap().1;

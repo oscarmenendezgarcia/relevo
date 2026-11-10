@@ -4,8 +4,10 @@
 //   PI_BIN        pi executable (default: pi on PATH)
 //   PI_E2E_MODEL  model for the runs (default: gb10/qwen3.8-flash-next)
 //
-// 1. Print mode: pi calls relevo_inbox (sees a note from ana) and relevo_send (answers her).
-// 2. RPC mode: pi sits idle with no prompt; a note from ana wakes it, it answers in the
+// 1. Print mode: pi calls relevo_inbox (sees a note from ana) and relevo_send (answers her in
+//    her thread, which handles it: nothing is left pending for oscar).
+// 2. RPC mode: pi sits idle with no prompt (a new session is handed what is still pending for its
+//    person at once, so nothing may be); a note from ana wakes it, it answers in the
 //    thread at once (a question it can answer with its tools: no note that only says it is on it), the
 //    note is delivered once, and closing stdin shuts pi down.
 //
@@ -39,7 +41,7 @@ try {
   const first = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Hi Oscar, the refunds job uses queue Q7. Just so you know." });
   const prompt =
     "Call relevo_inbox once and tell me in one line what it shows. Then call relevo_send once with " +
-    'to ["ana"] and text "Thanks, noted: Q7." Do nothing else.';
+    `thread "${first.thread}" and text "Thanks, noted: Q7." Do nothing else.`;
   const t1 = Date.now();
   const run = spawnSync(pi, [...base, "-p", prompt], { cwd: work, env, encoding: "utf8", timeout: 180_000 });
   console.log(`print run: exit ${run.status} in ${((Date.now() - t1) / 1000).toFixed(1)}s`);
@@ -50,10 +52,12 @@ try {
   const oscarDelivery = seen.delivery.find((d: any) => d.handle === "oscar");
   assert.equal(oscarDelivery.by?.label, "pi e2e", "relevo_inbox delivered ana's note to the pi session");
   assert.equal(oscarDelivery.by?.context, "relevo-demo@main", "context from git");
-  const anaInbox = await api(server, ana, "GET", "/api/inbox");
-  const answer = anaInbox.threads.find((t: any) => t.from === "oscar" && t.new_notes.some((n: any) => n.via === "pi e2e"));
-  assert.ok(answer, "relevo_send opened a thread to ana");
-  console.log(`print run ok: inbox delivered ${first.thread} in relevo-demo@main; send opened ${answer.id} from via "pi e2e"`);
+  const answer = seen.notes.find((n: any) => n.author === "oscar" && n.via === "pi e2e");
+  assert.ok(answer, "relevo_send answered in ana's thread");
+  // Answering handled it: the RPC session below starts with nothing pending.
+  const pending = (await api(server, oscar, "GET", "/api/inbox?all=1", undefined, "e2e-checker")).threads.filter((t: any) => t.pending);
+  assert.deepEqual(pending, [], "nothing is left pending for oscar");
+  console.log(`print run ok: inbox delivered ${first.thread} in relevo-demo@main; send answered in it via "pi e2e"`);
 
   // 2. RPC mode, idle until a note arrives.
   const child = spawn(pi, [...base, "--mode", "rpc"], { cwd: work, env, stdio: ["pipe", "pipe", "pipe"] });
@@ -83,7 +87,7 @@ try {
   child.stdin.write(JSON.stringify({ id: "state-1", type: "get_state" }) + "\n");
   await until(() => events.some((e) => e.type === "response" && e.id === "state-1"), 60_000, "pi rpc to start");
   await new Promise((r) => setTimeout(r, 2000)); // The waiting inbox request is open by now.
-  assert.equal(events.filter((e) => e.type === "agent_start").length, 0, "idle: no prompt was sent");
+  assert.equal(events.filter((e) => e.type === "agent_start").length, 0, "idle: no prompt was sent, and nothing was pending to hand over");
 
   const t2 = Date.now();
   const wake = await api(server, ana, "POST", "/api/send", {

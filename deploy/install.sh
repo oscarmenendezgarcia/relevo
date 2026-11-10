@@ -14,8 +14,11 @@
 #   --no-systemd  install the binary and the data directory only.
 #
 # Running it again is safe: what is already in place is left alone. Before replacing anything it
-# checks that the new binary runs here and accepts the existing database (a new version may
-# refuse an old one: see "Upgrades" in docs/install.md). It never uses sudo.
+# checks that the new binary runs here and accepts the existing database, as it is or once
+# `relevo serve` migrates it (`relevo check-db`, which only reads it: this script never migrates
+# a database). When the binary changes, it first copies the database into
+# backups/before-upgrade-<UTC time>.db with `relevo backup`. See "Upgrades" in docs/install.md.
+# It never uses sudo.
 set -euo pipefail
 
 usage() {
@@ -95,24 +98,20 @@ version=$("$binary" --version 2>&1) || die "$binary does not run here: $version"
 say "$binary: $version"
 
 # A new binary may refuse a database made by another version: find out before replacing anything.
+# Only reading it: an older layout is migrated by `relevo serve` when it starts, never here.
 if [ -e "$db" ]; then
-    if ! out=$("$binary" --db "$db" people 2>&1 >/dev/null); then
+    if ! out=$("$binary" --db "$db" check-db 2>&1); then
         die "nothing changed: this binary does not accept $db:
   $out
 See \"Upgrades\" in docs/install.md."
     fi
+    say "$out"
 fi
 
-changed_binary=0
+changed_binary=1
 if [ -f "$bin_dir/relevo" ] && cmp -s "$binary" "$bin_dir/relevo"; then
     say "up to date: $bin_dir/relevo"
-else
-    say "installing $bin_dir/relevo"
-    run mkdir -p "$bin_dir"
-    # Into place with a rename, so a running server keeps its old file until it restarts.
-    run install -m 0755 "$binary" "$bin_dir/.relevo.new"
-    run mv -f "$bin_dir/.relevo.new" "$bin_dir/relevo"
-    changed_binary=1
+    changed_binary=0
 fi
 
 # Holds every note: the server's user only.
@@ -130,6 +129,23 @@ private_dir() {
 }
 private_dir "$data_dir"
 private_dir "$backup_dir"
+
+if [ "$changed_binary" = 1 ]; then
+    # Before the server can run the new binary, which may migrate the database: a copy of it as
+    # it is, readable by the old version. `--keep` never removes it (it is not named like the
+    # daily ones).
+    if [ -e "$db" ]; then
+        copy=$backup_dir/before-upgrade-$(date -u +%Y%m%d-%H%M%S).db
+        say "backing up $db to $copy"
+        run "$binary" --db "$db" backup "$copy" ||
+            die "nothing installed: the backup of $db failed"
+    fi
+    say "installing $bin_dir/relevo"
+    run mkdir -p "$bin_dir"
+    # Into place with a rename, so a running server keeps its old file until it restarts.
+    run install -m 0755 "$binary" "$bin_dir/.relevo.new"
+    run mv -f "$bin_dir/.relevo.new" "$bin_dir/relevo"
+fi
 
 changed_units=0
 if [ "$systemd" = 1 ]; then

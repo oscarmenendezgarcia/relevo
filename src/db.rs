@@ -3,7 +3,7 @@
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -60,9 +60,13 @@ CREATE INDEX IF NOT EXISTS threads_by_opener ON threads(opener_id, kind, created
 -- `delivered_at`, `_label` and `_context` say when the latest one by someone else first did, and
 -- which session (its label and context then). `last_seq` is the thread's latest note, `last_other_seq` the
 -- latest one not theirs; `has_new` (no session of theirs has that one),
--- `waiting` (open, direct, latest note not theirs), `inbox` (`has_new` or `waiting`) and
--- `resolved` (a closed `team` thread: it shows only with `all`) are kept by `api::refresh` after
--- every change to the thread.
+-- `waiting` (pending: open, direct, with a note not theirs after `handled_seq`), `inbox` (`has_new`
+-- or `waiting`), `resolved` (a closed `team` thread: it shows only with `all`) and `fresh` (pending,
+-- with a note past `handled_seq` that reached one of their sessions: a new session of theirs gets
+-- its own row, starting at `handled_seq`) are kept by `api::refresh` after every change to the
+-- thread. `handled_seq` is how far the person has handled the thread (by writing in it, closing it
+-- or `done`); `handled_at`, `_label` and `_context` say when they last handled a note by someone
+-- else, and from which session (its label and context then).
 CREATE TABLE IF NOT EXISTS participants (
     thread_id         TEXT NOT NULL REFERENCES threads(id),
     person_id         INTEGER NOT NULL REFERENCES people(id),
@@ -80,11 +84,18 @@ CREATE TABLE IF NOT EXISTS participants (
     waiting           INTEGER NOT NULL DEFAULT 0,
     inbox             INTEGER NOT NULL DEFAULT 0,
     resolved          INTEGER NOT NULL DEFAULT 0,
+    handled_seq       INTEGER,
+    handled_at        INTEGER,
+    handled_label     TEXT,
+    handled_context   TEXT,
+    fresh             INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (thread_id, person_id)
 );
 -- What a session has of a thread, once it differs from its person's: a session without a row has
 -- what its person has (`participants.delivered_seq`). Before that moves, every other session of
 -- the person gets a row with the old value, so one session reading never delivers to another.
+-- A new session gets a row for each `fresh` thread of its person, at what the person handled, so
+-- a note that reached a session which died before handling it is new for the next one.
 -- The other columns copy the participant row (kept by `api::refresh`) so that the inbox can read
 -- a session's new threads, in order, from an index.
 CREATE TABLE IF NOT EXISTS session_threads (
@@ -105,6 +116,7 @@ CREATE INDEX IF NOT EXISTS session_threads_by_thread ON session_threads(thread_i
 CREATE INDEX IF NOT EXISTS session_threads_by_claim
     ON session_threads(claimed_by) WHERE claimed_by IS NOT NULL;
 CREATE INDEX IF NOT EXISTS participants_by_person ON participants(person_id);
+CREATE INDEX IF NOT EXISTS participants_fresh ON participants(person_id) WHERE fresh = 1;
 CREATE INDEX IF NOT EXISTS participants_by_claim
     ON participants(claimed_by) WHERE claimed_by IS NOT NULL;
 -- The inbox of a session is the union of a few index ranges, each already in inbox order, so it
@@ -169,37 +181,171 @@ pub const SESSION_LIFETIME_SECS: i64 = 7 * 24 * 3600;
 /// The claims of a session not seen for this long lapse.
 pub const CLAIM_LAPSE_SECS: i64 = 15 * 60;
 
-/// The layout of `SCHEMA`, kept in SQLite's `user_version`. v0 does not migrate: a database with
-/// another layout is refused, never half-updated (`CREATE TABLE IF NOT EXISTS` would skip the
-/// old tables and fail on their missing columns).
-const SCHEMA_VERSION: i64 = 5;
+/// The layout of `SCHEMA`, kept in SQLite's `user_version`. A database of layout 5 (relevo 0.1.0
+/// to 0.2.x) is migrated in place (`MIGRATE_FROM_5`), by `relevo serve` only; any other layout is
+/// refused, never half-updated (`CREATE TABLE IF NOT EXISTS` would skip the old tables and fail
+/// on their missing columns).
+const SCHEMA_VERSION: i64 = 6;
 
-/// Opens (or creates) the database and applies the schema. `":memory:"` works for tests.
+/// Layout 5 to 6: the handled state of each participant, from what layout 5 recorded as handling.
+/// A thread that was `waiting` there (open, direct, its latest note not theirs) waited for their
+/// reply, whether or not it had reached a session: it is handled up to their own latest note in
+/// it, so it stays pending. Any other thread is handled up to its latest note. Reaching a session
+/// is never taken as handling: `handled_at` and its session are set only when the person wrote
+/// after the latest note by someone else, as when they first did so (from that token; its
+/// session's context then is not known), and stay `NULL` otherwise. Then the flags that depend
+/// on it, as `api::refresh` keeps them, `fresh` included: a new session gets the threads still
+/// pending once, like a note that reached a session which died before handling it. The new
+/// columns go last, as in `SCHEMA`.
+const MIGRATE_FROM_5: &str = "
+ALTER TABLE participants ADD COLUMN handled_seq INTEGER;
+ALTER TABLE participants ADD COLUMN handled_at INTEGER;
+ALTER TABLE participants ADD COLUMN handled_label TEXT;
+ALTER TABLE participants ADD COLUMN handled_context TEXT;
+ALTER TABLE participants ADD COLUMN fresh INTEGER NOT NULL DEFAULT 0;
+UPDATE participants AS p SET handled_seq = nullif(CASE WHEN p.waiting
+    THEN coalesce((SELECT max(n.seq) FROM notes n
+                   WHERE n.thread_id = p.thread_id AND n.author_id = p.person_id), 0)
+    ELSE p.last_seq END, 0);
+UPDATE participants AS p SET handled_at = w.created_at, handled_label = w.via
+FROM notes AS w
+WHERE p.last_other_seq > 0
+  AND w.seq = (SELECT min(n.seq) FROM notes n
+               WHERE n.thread_id = p.thread_id AND n.author_id = p.person_id
+                 AND n.seq > p.last_other_seq);
+UPDATE participants AS p SET
+    waiting = t.kind = 'direct' AND t.status = 'open'
+              AND coalesce(p.handled_seq, 0) < p.last_other_seq,
+    inbox = coalesce(p.delivered_seq, 0) < p.last_other_seq
+            OR (t.kind = 'direct' AND t.status = 'open'
+                AND coalesce(p.handled_seq, 0) < p.last_other_seq),
+    fresh = t.kind = 'direct' AND t.status = 'open'
+            AND coalesce(p.handled_seq, 0) < p.last_other_seq
+            AND coalesce(p.handled_seq, 0) < coalesce(p.delivered_seq, 0)
+FROM threads t WHERE t.id = p.thread_id;
+UPDATE session_threads AS s SET waiting = p.waiting, person_inbox = p.inbox
+FROM participants p WHERE p.thread_id = s.thread_id AND p.person_id = s.person_id;
+";
+
+/// Opens (or creates) the database and applies the schema. A database of layout 5 is refused:
+/// only `relevo serve` migrates it (`open_migrating`), so that an admin command never changes the
+/// layout behind the owner's back, before a backup. `":memory:"` works for tests.
 pub fn open(path: &str) -> Result<Connection> {
+    open_with(path, false)
+}
+
+/// `open`, migrating a database of layout 5 in place: for `relevo serve`.
+pub fn open_migrating(path: &str) -> Result<Connection> {
+    open_with(path, true)
+}
+
+fn open_with(path: &str, migrate: bool) -> Result<Connection> {
     create_private(path).with_context(|| format!("creating database {path}"))?;
     let mut conn = Connection::open(path).with_context(|| format!("opening database {path}"))?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    // A layout it refuses is left as it is: found before anything is written, WAL mode included.
+    let refuses = |layout| layout == Layout::Migrates && !migrate;
+    if refuses(layout(&conn, path)?) {
+        bail!(no_migration(path));
+    }
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     // One transaction, so a process opening a new file at the same time sees it either empty or
-    // with its version set.
+    // with its version set, and one opening an old file sees it either old or migrated.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version != SCHEMA_VERSION {
-        let tables: i64 = tx.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))?;
-        if version > SCHEMA_VERSION {
-            bail!("database {path} was made by a newer version of relevo; use that one");
-        }
-        if tables > 0 {
-            bail!(
-                "database {path} was made by an older version of relevo, and v0 does not \
-                 migrate: delete it (with its -wal and -shm files) and invite the team again"
+    match layout(&tx, path)? {
+        layout if refuses(layout) => bail!(no_migration(path)),
+        Layout::Migrates => {
+            tx.execute_batch(MIGRATE_FROM_5)
+                .with_context(|| format!("migrating database {path} from layout 5"))?;
+            tracing::info!(
+                db = path,
+                "migrated the database from layout 5 to {SCHEMA_VERSION}"
             );
         }
+        Layout::New | Layout::Current => {}
     }
     tx.execute_batch(SCHEMA)?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
+    Ok(conn)
+}
+
+/// Why a command other than `serve` refuses a database of layout 5.
+fn no_migration(path: &str) -> String {
+    format!(
+        "database {path} has the layout of relevo 0.1.0 to 0.2.x, which only `relevo serve` \
+         migrates (in place, when it starts). Keep a copy first with `relevo backup <file>` (it \
+         copies this layout too), then start the server, and run this again once it runs (see \
+         \"Upgrades\" in docs/install.md)"
+    )
+}
+
+/// What a database's layout means to this version.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum Layout {
+    /// Nothing in it yet: it gets this version's layout.
+    New,
+    /// This version's layout.
+    Current,
+    /// Layout 5 (relevo 0.1.0 to 0.2.x): `relevo serve` migrates it.
+    Migrates,
+}
+
+/// The layout of the database `conn` has open, or why this version refuses it.
+fn layout(conn: &Connection, path: &str) -> Result<Layout> {
+    let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if version == SCHEMA_VERSION {
+        return Ok(Layout::Current);
+    }
+    if version > SCHEMA_VERSION {
+        bail!("database {path} was made by a newer version of relevo; use that one");
+    }
+    if version == 5 {
+        return Ok(Layout::Migrates);
+    }
+    let tables: i64 = conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))?;
+    if tables > 0 {
+        bail!(
+            "database {path} was made by an older version of relevo (before 0.1.0), which \
+             this one does not migrate: delete it (with its -wal and -shm files) and invite \
+             the team again"
+        );
+    }
+    Ok(Layout::New)
+}
+
+/// The layout of the existing database at `path`, or why this version refuses it, found without
+/// writing anything (see `read_only`).
+pub fn check(path: &str) -> Result<Layout> {
+    if !std::path::Path::new(path).is_file() {
+        bail!("no database at {path}");
+    }
+    let conn = read_only(path).with_context(|| format!("opening database {path}"))?;
+    layout(&conn, path)
+}
+
+/// Opens the existing database at `path` to read it only, writing nothing: not the database, and
+/// no `-wal` or `-shm` file is left behind. A database without them (no server has it open) is
+/// read as immutable; one with them, read-only, through the server's. Never creates it.
+pub fn read_only(path: &str) -> rusqlite::Result<Connection> {
+    let quiet = ["-wal", "-shm"]
+        .iter()
+        .all(|ext| !std::path::Path::new(&format!("{path}{ext}")).exists());
+    // A URI, so that `immutable` can be asked for: `%`, `?` and `#` would end the path.
+    let file = path
+        .replace('%', "%25")
+        .replace('?', "%3f")
+        .replace('#', "%23");
+    let uri = format!(
+        "file:{file}?{}",
+        if quiet { "immutable=1" } else { "mode=ro" }
+    );
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+        | OpenFlags::SQLITE_OPEN_URI
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = Connection::open_with_flags(&uri, flags)?;
+    conn.busy_timeout(std::time::Duration::from_secs(10))?;
     Ok(conn)
 }
 

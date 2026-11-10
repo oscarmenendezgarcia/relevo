@@ -169,6 +169,80 @@ else
     echo "  (skipped: no python3 to write the database)"
 fi
 
+echo "an upgrade from 0.2.x backs up first, never migrates, and serve migrates on its start"
+if command -v python3 >/dev/null; then
+    # A home of its own, with what 0.2.x left: its binary and a database of layout 5 in WAL mode.
+    home=$fake/home5
+    bin=$home/.local/bin/relevo
+    data=$home/.local/share/relevo
+    db=$data/relevo.db
+    mkdir -p "$home/.local/bin" "$data"
+    chmod 0700 "$data"
+    printf 'relevo 0.2.1' >"$bin"
+    chmod 0755 "$bin"
+    python3 -I - "$db" "$here/../tests/fixtures/layout5.sql" <<'EOF2'
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.executescript(open(sys.argv[2]).read())
+db.execute("PRAGMA journal_mode=WAL")
+db.close()
+EOF2
+    chmod 0600 "$db"
+    version() {
+        python3 -I -c 'import sqlite3, sys; print(sqlite3.connect(sys.argv[1]).execute("PRAGMA user_version").fetchone()[0])' "$1"
+    }
+    before=$(sha256sum <"$db")
+    rm -f "$fake/systemctl.log"
+
+    install_ --dry-run --enable "$binary"
+    expect_in_out "migrates it in place"
+    expect_in_out "would run: $binary --db $db backup $data/backups/before-upgrade-"
+    [ ! -e "$data/backups" ] || fail "dry run made the backups directory"
+
+    install_ --enable "$binary" || fail "upgrade: $(cat "$fake/out")"
+    expect_in_out "the layout of relevo 0.1.0 to 0.2.x"
+    cmp -s "$binary" "$bin" || fail "new binary not installed"
+    # The probe and the backup only read it: the same bytes, no -wal or -shm left behind.
+    [ "$(sha256sum <"$db")" = "$before" ] || fail "install.sh wrote the database"
+    if [ -e "$db-wal" ] || [ -e "$db-shm" ]; then fail "install.sh left -wal or -shm files"; fi
+    [ "$(version "$db")" = 5 ] || fail "install.sh migrated the database"
+    copies=$(find "$data/backups" -name 'before-upgrade-????????-??????.db')
+    [ "$(printf '%s\n' "$copies" | grep -c .)" = 1 ] || fail "backups: $copies"
+    [ "$(mode "$copies")" = 600 ] || fail "backup mode $(mode "$copies")"
+    [ "$(version "$copies")" = 5 ] || fail "the backup is not the old layout"
+    grep -q try-restart "$fake/systemctl.log" || fail "no restart: $(cat "$fake/systemctl.log")"
+    # The daily backup's --keep leaves it alone.
+    "$bin" --db "$db" backup --keep 1 "$data/backups" >/dev/null
+    [ -e "$copies" ] || fail "--keep removed the before-upgrade backup"
+
+    # Until the server starts, admin commands refuse it, and say what to do.
+    if out=$(RELEVO_DB=$db "$bin" people 2>&1); then fail "people ran on layout 5"; fi
+    case $out in *"only \`relevo serve\`"*"relevo backup"*) ;; *) fail "people said: $out" ;; esac
+    [ "$(sha256sum <"$db")" = "$before" ] || fail "people wrote the database"
+
+    # The server migrates it when it starts; the team is still there, nothing to invite again.
+    RELEVO_DB=$db "$bin" serve --addr 127.0.0.1:0 >"$fake/serve.log" 2>&1 &
+    serve=$!
+    for _ in $(seq 100); do
+        [ "$(version "$db")" = 6 ] && break
+        sleep 0.1
+    done
+    kill "$serve"
+    wait "$serve" 2>/dev/null || true
+    [ "$(version "$db")" = 6 ] || fail "serve did not migrate: $(cat "$fake/serve.log")"
+    [ "$(RELEVO_DB=$db "$bin" people | cut -f1 | tr '\n' ' ')" = "ana bob carl " ] ||
+        fail "people after the migration: $(RELEVO_DB=$db "$bin" people)"
+
+    # Installing the same binary again: nothing to back up, nothing restarted.
+    rm -f "$fake/systemctl.log"
+    install_ --enable "$binary"
+    expect_in_out "this version's layout"
+    [ "$(find "$data/backups" -name 'before-upgrade-*' | wc -l)" = 1 ] || fail "backed up again"
+    if grep -q try-restart "$fake/systemctl.log"; then fail "restarted an unchanged server"; fi
+else
+    echo "  (skipped: no python3 to write the database)"
+fi
+
 echo "bad arguments are refused"
 if install_ --enable --no-systemd "$binary"; then fail "accepted --enable --no-systemd"; fi
 if install_ "$fake/missing"; then fail "accepted a missing binary"; fi

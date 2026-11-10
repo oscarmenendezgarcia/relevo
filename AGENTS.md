@@ -1,7 +1,7 @@
 # Relevo — rules for agents working on this repo
 
 - The protocol in `docs/protocol.md` is the contract. Code follows it; if the code needs something the spec doesn't say, change the spec in the same commit and say why.
-- Rust, one binary. `axum` for HTTP, `rusqlite` (bundled) for SQLite, `clap` for the CLI. MCP (`rmcp`) arrives in block 2.
+- Rust, one binary. `axum` for HTTP, `rusqlite` (bundled) for SQLite, `clap` for the CLI. `rmcp` for the MCP server (`relevo mcp`).
 - Before saying something works: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` must pass. Run them in the foreground.
 - Never log note text or tokens. Store token hashes only.
 - Keep it small. No new dependency without a reason; no abstraction for a single use.

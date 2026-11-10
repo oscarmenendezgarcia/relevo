@@ -1,10 +1,13 @@
 """Relevo platform adapter: every Relevo thread is a chat, every new note an inbound message.
 
-connect() keeps one waiting inbox request open (wait=55) and backs off on errors; each thread with
-new notes becomes a MessageEvent from the author of its latest note; send() writes the agent's reply
-in that thread; disconnect() stops the loop, then ends the session with DELETE /api/session. One
-fixed Relevo-Session per profile (see client.gateway_session_id), general unless
-RELEVO_CONTEXT is set.
+connect() first ends the session an earlier start of the gateway may have left (DELETE
+/api/session), so it starts as a new session and gets what is still pending for its person; then
+it keeps one waiting inbox request open (wait=55) and backs off on errors. Each thread with new
+notes becomes a MessageEvent from the author of its latest note, and so, once, does a direct thread
+pending for the person whose latest note this adapter never handed over (the answer that carried it
+was lost on the way, say); send() writes the agent's reply in that thread; disconnect() stops the
+loop, then ends the session with DELETE /api/session. One fixed Relevo-Session per profile (see
+client.gateway_session_id), general unless RELEVO_CONTEXT is set.
 """
 
 from __future__ import annotations
@@ -239,6 +242,8 @@ class RelevoAdapter(BasePlatformAdapter):
     stop_grace = 5.0
     # How long disconnect() waits for DELETE /api/session, which releases the threads this session holds.
     end_timeout = 2.0
+    # How long the loop's first request, ending the session an earlier start left, may take.
+    start_timeout = 30.0
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform(PLATFORM_NAME))
@@ -252,6 +257,11 @@ class RelevoAdapter(BasePlatformAdapter):
         self._me: Optional[str] = None
         # True while the loop hands over threads the server has already delivered to this session.
         self._holding_batch = False
+        # Whether the session an earlier start may have left still has to be ended (see _poll_loop).
+        self._end_first = True
+        # True for the first batch after the session started anew: what it holds may have reached
+        # the previous gateway process already (see _resumable).
+        self._first_batch = False
 
     # -- lifecycle ------------------------------------------------------------------------------
 
@@ -283,6 +293,15 @@ class RelevoAdapter(BasePlatformAdapter):
             logger.error("[relevo] %s", exc)
             self._set_fatal_error("relevo_bad_cert", str(exc), retryable=False)
             return False
+        # Replacing a live adapter of this process (connected before the old one is dropped): the
+        # session is that one's, live, and passes on as it is, unless that one has not managed to end
+        # an earlier start's session yet (the server was unreachable): then this one ends it. The
+        # notes either hands over are remembered for both, so ending it does not hand any over twice.
+        # Otherwise any session under this id is an earlier start's, and the loop ends it first.
+        peers = self._peers()
+        self._end_first = not self._shared() or any(a._end_first for a in peers)
+        if peers:
+            self._seen = peers[0]._seen
         self._stop = asyncio.Event()
         self._poll_task = asyncio.create_task(self._poll_loop(), name="relevo-inbox")
         _LIVE.add(self)
@@ -305,8 +324,9 @@ class RelevoAdapter(BasePlatformAdapter):
         task, self._poll_task = self._poll_task, None
         if task is not None and task is not asyncio.current_task():
             if self._holding_batch and not task.done():
-                # Mid-batch: the server already delivered these threads to the fixed session, so
-                # they would never be new again. Let the loop hand them over, then it stops.
+                # Mid-batch: these threads have reached the session already, so they would not be
+                # new again until the next start, and a team question never (it is not pending).
+                # Let the loop hand them over, then it stops.
                 await asyncio.wait({task}, timeout=self.stop_grace)
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -317,8 +337,14 @@ class RelevoAdapter(BasePlatformAdapter):
             await http.aclose()
         self._mark_disconnected()
 
+    def _peers(self) -> list:
+        """The other live adapters of this process with the same session on the same server and token."""
+        mine = (self.settings.identity, self.settings.session)
+        return [a for a in _LIVE if a is not self and (a.settings.identity, a.settings.session) == mine]
+
     def _shared(self) -> bool:
-        """Another live adapter of this process has the same session on the same server and token."""
+        """A live adapter of this process (this one too, while live) has the same session on the same
+        server and token."""
         mine = (self.settings.identity, self.settings.session)
         return any((a.settings.identity, a.settings.session) == mine for a in _LIVE)
 
@@ -352,14 +378,39 @@ class RelevoAdapter(BasePlatformAdapter):
             return False
         return True
 
+    async def _start_fresh(self) -> None:
+        """End the session this profile's gateway left when it last ran (DELETE /api/session), before
+        the first inbox request. A gateway that died (killed, crashed, the machine lost power) never
+        ended it, and its delivery state would go on: a note it fetched and never handled would not
+        be new again, and its claims would hide threads until they lapse. Ended, the session starts
+        anew with the first inbox: what is still pending for the person is new for it, at once."""
+        await self.api.aend_session(self._ensure_http(), timeout=self.start_timeout)
+        self._end_first = False
+        self._first_batch = True
+        logger.info("[relevo] session %s starts anew: what is pending for this person comes in",
+                    self.settings.session)
+
     async def _poll_loop(self) -> None:
         delay = self.backoff_initial
+        # After a failed request the next one does not wait: an answer lost on the way took notes
+        # with it, which are no longer new, so they would not end a wait; that answer hands them over.
+        failed = False
+        # An inbox request failed in a way that may have lost its answer (anything but an error
+        # Relevo itself sent): the threads with new notes in the next answer say earlier notes may
+        # be missing, since a note written after the loss comes without the lost ones.
+        lost = False
         while self._stop is not None and not self._stop.is_set():
             try:
-                data = await self.api.ainbox(self._ensure_http(), wait=self.wait_seconds)
+                if self._end_first:
+                    # Never an inbox request before it: that would carry the old delivery state on.
+                    await self._start_fresh()
+                data = await self.api.ainbox(self._ensure_http(), wait=0 if failed else self.wait_seconds)
             except asyncio.CancelledError:
                 raise
             except client.RelevoError as exc:
+                failed = True
+                # A proxy's error page (HTTP_…) may hide an answer the server wrote after it gave up.
+                lost = lost or (not self._end_first and exc.code.startswith("HTTP_"))
                 if exc.status in (400, 401):
                     # A refused token, or headers the server calls malformed: asking again cannot help.
                     unauthorized = exc.status == 401
@@ -368,22 +419,27 @@ class RelevoAdapter(BasePlatformAdapter):
                     self._set_fatal_error(
                         "relevo_unauthorized" if unauthorized else "relevo_bad_request",
                         "Relevo refused the token: it is unknown or revoked" if unauthorized
-                        else f"Relevo refused the inbox request: {exc.code}: {exc.message}",
+                        else f"Relevo refused the request: {exc.code}: {exc.message}",
                         retryable=False)
                     await self._notify_fatal_error()
                     return
-                logger.warning("[relevo] inbox failed: %s; retrying in %.1fs", client.describe_error(exc), delay)
+                logger.warning("[relevo] %s failed: %s; retrying in %.1fs", self._asking(),
+                               client.describe_error(exc), delay)
             except Exception as exc:
-                logger.warning("[relevo] inbox failed: %s; retrying in %.1fs", client.describe_error(exc), delay)
+                failed = True
+                lost = lost or not self._end_first  # an inbox request, not the end of the earlier session
+                logger.warning("[relevo] %s failed: %s; retrying in %.1fs", self._asking(),
+                               client.describe_error(exc), delay)
             else:
-                delay = self.backoff_initial
+                delay, failed = self.backoff_initial, False
+                after_failure, lost = lost, False
                 self._me = client.you_of(data) or self._me
                 team = {p.get("handle"): p for p in data.get("team") or []}
                 self._holding_batch = True
                 try:
                     for thread in data.get("threads") or []:
                         try:
-                            await self._dispatch(thread, team)
+                            await self._dispatch(thread, team, after_failure)
                         except asyncio.CancelledError:
                             raise
                         except Exception as exc:
@@ -391,10 +447,14 @@ class RelevoAdapter(BasePlatformAdapter):
                                            client.describe_error(exc))
                 finally:
                     self._holding_batch = False
+                    self._first_batch = False
                 continue
             if await self._pause(delay):
                 return
             delay = min(delay * 2, self.backoff_max)
+
+    def _asking(self) -> str:
+        return "ending the earlier session" if self._end_first else "inbox"
 
     # -- inbound --------------------------------------------------------------------------------
 
@@ -420,11 +480,51 @@ class RelevoAdapter(BasePlatformAdapter):
         while len(self._seen) > _SEEN_LIMIT:
             self._seen.popitem(last=False)
 
-    async def _dispatch(self, thread: dict, team: dict) -> None:
+    def _resumable(self, source: Any) -> bool:
+        """Whether Hermes keeps this chat's session `resume_pending`: a restart interrupted its turn
+        (the drain timed out, or the process died mid-turn), and Hermes may resume that turn now.
+        The first batch after a fresh start hands such a chat its note again, queued behind the
+        resumed turn: that copy says so (client.render_event). It is not dropped, since Hermes may
+        not resume it after all (a stale mark, its restart-loop guard), and the note would then
+        not come again before the next start."""
+        store = getattr(self, "_session_store", None)
+        if store is None:
+            return False
+        try:
+            entry = store.lookup_by_session_key(self._source_session_key(source))
+        except Exception:
+            return False
+        return getattr(entry, "resume_pending", False) is True
+
+    def _hand_over_again(self, thread: dict) -> Optional[dict]:
+        """`thread`, from an inbox answer, to hand over again when it is a direct open thread pending
+        for the person with nothing new, whose latest note (`last_note`), by someone else, this
+        adapter has not handed over: as it was, with that note as its new note and `handed_over` set.
+        Otherwise None. The server delivered that note to this session in an answer the adapter never
+        got (lost on the way), or a tool of a relevo turn, acting for this session, fetched it: either
+        way its chat never had it. Once handed over, a note the agent leaves alone ([SILENT], not for
+        it) stays pending for the person and does not come back in this process."""
+        last = thread.get("last_note")
+        if (thread.get("kind") != "direct" or thread.get("status") != "open" or thread.get("pending") is not True
+                or thread.get("new_notes") or not isinstance(last, dict) or not last.get("id")):
+            return None
+        if last.get("author") == self._me or str(last["id"]) in self._seen:
+            return None
+        return {**thread, "new_notes": [last], "handed_over": True}
+
+    async def _dispatch(self, thread: dict, team: dict, after_failure: bool = False) -> None:
+        """`after_failure`: the first answer after a request that may have lost its answer, so a
+        thread with new notes says earlier ones may be missing (client.render_thread_head)."""
         thread_id = str(thread.get("id") or "")
+        # Only pending: handed over when its notes were new, unless its latest note never was.
+        again = self._hand_over_again(thread)
+        if again:
+            thread = again
+        elif after_failure and thread.get("new_notes"):
+            thread = {**thread, "after_failure": True}
         notes = [n for n in thread.get("new_notes") or [] if n.get("id") not in self._seen]
         if not thread_id or not notes:
-            return  # only waiting: it was handed over when its notes were new
+            return
         self._titles[thread_id] = str(thread.get("title") or thread_id)
         if any(n.get("truncated") for n in notes):
             try:
@@ -448,8 +548,9 @@ class RelevoAdapter(BasePlatformAdapter):
         name = f"{person.get('name')} (@{author})" if person.get("name") else f"@{author}"
         source = self.build_source(chat_id=thread_id, chat_name=self._titles[thread_id], chat_type="dm",
                                    user_id=author, user_name=name)
+        resumed = self._first_batch and self._resumable(source)
         event = MessageEvent(
-            text=client.render_event(thread, notes, self._me),
+            text=client.render_event(thread, notes, self._me, resumed),
             message_type=MessageType.TEXT,
             source=source,
             user_id=author,
@@ -461,7 +562,11 @@ class RelevoAdapter(BasePlatformAdapter):
             # A note may not be for this agent: a bare [SILENT] answer must stand.
             reply_expected=False,
         )
-        logger.info("[relevo] %d new note(s) in thread %s", len(notes), thread_id)
+        if thread.get("handed_over"):
+            logger.info("[relevo] thread %s is pending and its latest note was never handed over: handing it over",
+                        thread_id)
+        else:
+            logger.info("[relevo] %d new note(s) in thread %s", len(notes), thread_id)
         await self.handle_message(event)
 
     # -- outbound -------------------------------------------------------------------------------

@@ -20,7 +20,7 @@ sha256sum --check --ignore-missing SHA256SUMS
 chmod +x relevo-$(uname -m)-unknown-linux-gnu
 ```
 
-Get the deploy files of the same version, for example `git clone --branch v0.1.0 https://github.com/oscarmenendezgarcia/relevo.git` (any `v…` tag), or `gh release download v0.1.0 --repo oscarmenendezgarcia/relevo --archive tar.gz` and unpack it.
+Get the deploy files of the same version, for example `git clone --branch v0.3.0 https://github.com/oscarmenendezgarcia/relevo.git` (any `v…` tag), or `gh release download v0.3.0 --repo oscarmenendezgarcia/relevo --archive tar.gz` and unpack it.
 
 **Or build it** from a checkout, with Rust (`rustup`, stable) and a C compiler (`build-essential` on Debian and Ubuntu; SQLite is compiled in):
 
@@ -100,22 +100,23 @@ Teammates reach Relevo over HTTPS only. Pick one way.
 
 ### HTTPS in Relevo itself (the simplest, for an office network or a VPN)
 
-`relevo serve --tls` speaks HTTPS with standard TLS (rustls) and a certificate of its own: no proxy, no domain, no Cloudflare. Turn it on with a drop-in (`systemctl --user edit relevo`):
+`relevo serve --tls` speaks HTTPS with standard TLS (rustls) and a certificate of its own: no proxy, no domain, no Cloudflare. Turn it on with a drop-in (`systemctl --user edit relevo`), naming in `RELEVO_TLS_NAME` the server's address and host name, the ones teammates will use (here `192.168.1.50` and `relevo-box`; `hostname` and `hostname -I` show this machine's), comma-separated:
 
 ```
 [Service]
 Environment=RELEVO_TLS=true
 Environment=RELEVO_ADDR=0.0.0.0:7878
+Environment=RELEVO_TLS_NAME=192.168.1.50,relevo-box
 ```
 
-and restart it: `systemctl --user restart relevo`. The first start makes a self-signed certificate (valid 10 years) for `localhost`, the loopback addresses, this machine's host name and its network addresses, and keeps it next to the database in `~/.local/share/relevo/relevo.db.tls/` (the key readable by you only). Later starts reuse it. (The unit allows `AF_NETLINK` sockets for this: reading the machine's addresses needs one.) When the certificate, made without `RELEVO_TLS_NAME`, has none of the machine's network addresses, or none could be read, every start logs a warning saying so; then set the names as in **Names** below. At every start the server prints the certificate's SHA-256 fingerprint; see it again with
+and restart it: `systemctl --user restart relevo`. Naming them is recommended: the certificate is then for exactly those names (add `localhost` if agents on this machine itself connect to it by that name), whatever addresses the machine finds at a start (a VPN interface, a second network card, none yet while the network comes up). Without `RELEVO_TLS_NAME`, the first start makes it for `localhost`, the loopback addresses, this machine's host name and the network addresses it finds then. Either way the certificate is self-signed (valid 10 years), made at the first start and kept next to the database in `~/.local/share/relevo/relevo.db.tls/` (the key readable by you only). Later starts reuse it. (The unit allows `AF_NETLINK` sockets for this: reading the machine's addresses needs one.) When the certificate, made without `RELEVO_TLS_NAME`, has none of the machine's network addresses, or none could be read, every start logs a warning saying so; then set the names as above. At every start the server prints the certificate's SHA-256 fingerprint; see it again with
 
 ```
 relevo tls-fingerprint                             # with RELEVO_DB set, as in part 2
 journalctl --user -u relevo | grep fingerprint
 ```
 
-Check it from the machine itself: `curl --cacert ~/.local/share/relevo/relevo.db.tls/cert.pem https://localhost:7878/health`.
+Check it from the machine itself, with a name the certificate has: `curl --cacert ~/.local/share/relevo/relevo.db.tls/cert.pem https://192.168.1.50:7878/health`.
 
 **Open the port to the office network or the VPN only**, never to the internet. With `ufw`, for an office network `192.168.1.0/24` (someone with admin rights runs it):
 
@@ -129,24 +130,24 @@ sudo ufw allow from 192.168.1.0/24 to any port 7878 proto tcp
 
 **Give teammates the address and the fingerprint**: `https://<this machine's address or name>:7878`, and the fingerprint from `relevo tls-fingerprint`, through a channel you trust (in person, or the team's chat). On their first `relevo connect` they compare it with what `connect` shows; from then on their machine trusts that certificate alone for Relevo (part 7).
 
-**Names.** The address teammates use must be one the certificate has. If they use another one (a DNS name the office gives this machine, an address added later), add the names, comma-separated, in the same drop-in:
+**Names.** The address teammates use must be one the certificate has. If they use another one (a DNS name the office gives this machine, an address added later), add it to `RELEVO_TLS_NAME` in the same drop-in:
 
 ```
-Environment=RELEVO_TLS_NAME=relevo.office,192.168.1.50
+Environment=RELEVO_TLS_NAME=192.168.1.50,relevo-box,relevo.office
 ```
 
 Names the stored certificate lacks make a new one at the next start (the log says so) with a new fingerprint, and every teammate runs `relevo connect` again with it. Give the machine a fixed address (or a name) so that this stays rare.
 
-**A certificate you already have** (from Let's Encrypt, or the office's own authority) is used instead with `--tls-cert` and `--tls-key`; then teammates' machines trust it through their authorities and `connect` asks nothing. In the drop-in:
+**A certificate you already have** (from Let's Encrypt, or the office's own authority) is used instead with `--tls-cert` and `--tls-key` (`RELEVO_TLS_CERT` and `RELEVO_TLS_KEY`); then teammates' machines trust it through their authorities and `connect` asks nothing. In the drop-in, without `RELEVO_TLS=true` or `RELEVO_TLS_NAME` (they are for a certificate of Relevo's own, and the server refuses `RELEVO_TLS=true` next to a certificate of yours):
 
 ```
 [Service]
 Environment=RELEVO_ADDR=0.0.0.0:7878
-ExecStart=
-ExecStart=%h/.local/bin/relevo serve --tls-cert /path/to/fullchain.pem --tls-key /path/to/privkey.pem
+Environment=RELEVO_TLS_CERT=/path/to/fullchain.pem
+Environment=RELEVO_TLS_KEY=/path/to/privkey.pem
 ```
 
-The key must be readable by your user. Renewed files are read at the next restart.
+The key must be readable by your user, and neither file may be under `/tmp` (the unit has a private one). Renewed files are read at the next restart.
 
 ### Or a proxy in front (optional)
 
@@ -210,7 +211,7 @@ relevo backup ~/relevo-before-change.db
 
 `relevo backup` uses SQLite's `VACUUM INTO`: a consistent copy, without stopping the server. Do not copy `relevo.db` with `cp` or `rsync` while the server runs: the latest changes may still be in `relevo.db-wal`, and the copy can be missing them or broken. Copy the *backups* elsewhere instead (another disk, another machine), encrypted if they leave the office.
 
-**Restore** a backup with the same version of relevo that made it (a backup has the layout of its version; see part 6):
+**Restore** a backup with the version of relevo that made it, or a later one whose server migrates its layout (a backup has the layout of its version; see part 6):
 
 ```
 systemctl --user stop relevo
@@ -226,21 +227,23 @@ The `-wal` and `-shm` files of the old database must not stay next to the restor
 ## 6. Upgrades
 
 ```
-relevo backup ~/.local/share/relevo/backups/before-upgrade-$(date +%Y%m%d-%H%M%S).db   # --keep never removes it
 deploy/install.sh --enable ./relevo-<new>          # from the deploy files of the new version
 ```
 
-The script replaces the binary and the units, then restarts the server. Before it changes anything, it checks that the new binary runs on this machine and accepts the existing database; if not, it stops and says why.
+Before it changes anything, the script checks that the new binary runs on this machine and accepts the existing database, as it is or once the server migrates it (`relevo check-db`, which only reads it); if not, it stops and says why. Then, when the binary differs from the installed one, it copies the database with `relevo backup` into `~/.local/share/relevo/backups/before-upgrade-<UTC date and time>.db` (the daily backups' `--keep` never removes it: it is not named like them), puts the new binary and units in place, and restarts the server if it was running. It never migrates the database itself.
 
-**The database layout.** The database records the version of its layout (`SCHEMA_VERSION` in `src/db.rs`, kept in SQLite's `user_version`). v0 does not migrate: a relevo with another layout refuses the database ("made by an older version of relevo") in every command, `serve` included, except `backup`, which copies any version's. The release notes say when a version changes the layout. Moving to such a version means starting with a new, empty database:
+**The database layout.** The database records the version of its layout (`SCHEMA_VERSION` in `src/db.rs`, kept in SQLite's `user_version`); the release notes say when a version changes it. Only `relevo serve` migrates an older layout it knows, in place, when it starts. Every other command (`invite`, `people`, …) refuses such a database, writing nothing, and says to start the server first; `relevo backup` copies a database of any version. A layout the binary does not know (a newer version's, or one from before 0.1.0) is refused by every command, `serve` included: if the server is started on it anyway, it stops at once, systemd tries 5 times and then leaves it failed, and `journalctl --user -u relevo` shows the reason.
 
-1. Keep a backup: `relevo backup ~/relevo-old-$(date +%Y%m%d).db`. It stays readable by the old version.
-2. Write down the team: `relevo people` (handles, names, abouts) and `relevo token list` (who has which agents).
-3. Move the old database aside: `systemctl --user stop relevo`, then move `relevo.db`, `relevo.db-wal` and `relevo.db-shm` out of `~/.local/share/relevo`.
-4. Install the new version: `deploy/install.sh --enable ./relevo-<new>`. The server starts with an empty database.
-5. Invite everyone again (part 4). Each teammate runs `relevo connect` again with their new token (part 7). Old threads are not carried over; they are still in the old backup.
+**From 0.2.x to 0.3.0.** 0.3.0 moves the database from layout 5 to 6, in place: people, tokens, threads and notes stay, so there is nobody to invite again, and nobody runs `relevo connect` again.
 
-To go back, install the old binary again and put the old database back (as in a restore). If the server is started on a database it refuses anyway, it stops at once; systemd tries 5 times, then leaves it failed, and `journalctl --user -u relevo` shows the reason.
+1. Back up, with the server running: `relevo backup ~/relevo-before-0.3.0.db`. (The script takes one too; this one you name and keep where you like.) It stays readable by 0.2.x.
+2. Stop the server: `systemctl --user stop relevo`.
+3. Replace the binary, from the 0.3.0 deploy files: `deploy/install.sh --enable ./relevo-<0.3.0>`. It says the database has "the layout of relevo 0.1.0 to 0.2.x", backs it up, installs, and starts the server.
+4. The server migrates the database as it starts. Check: `systemctl --user status relevo`, then `relevo people` (until the server has started, admin commands refuse the old layout).
+
+After the migration, an open direct thread that 0.2.x showed as waiting for someone's reply stays pending for them, including notes their agents fetched and never answered under 0.2.x; every new session of theirs gets those as new notes, once per session, until they are handled. Everything else counts as handled. Teammates then update their own `relevo` binary and adapters (part 7): 0.2.x clients keep working against 0.3.0, but do not show what is pending and cannot mark a thread done.
+
+To go back to 0.2.x, the backup first, then the binary (0.2.x refuses the migrated database, and 0.3.0 would migrate the backup again): `systemctl --user stop relevo`; in `~/.local/share/relevo`, move `relevo.db`, `relevo.db-wal` and `relevo.db-shm` aside and put the backup from step 1 in their place (`install -m 0600 ~/relevo-before-0.3.0.db relevo.db`); then run `deploy/install.sh --enable ./relevo-<0.2.x>` from the 0.2.x deploy files, which starts the server. Notes written since the backup are lost.
 
 ## 7. Each teammate: connect your agent
 

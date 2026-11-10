@@ -62,6 +62,11 @@ pub fn touch(
     check_token(conn, caller)?;
     lapse(conn, app, now)?;
     forget(conn, now)?;
+    let known: bool = conn
+        .prepare_cached(
+            "SELECT EXISTS (SELECT 1 FROM sessions WHERE token_id = ?1 AND client_id = ?2)",
+        )?
+        .query_row(params![caller.token_id, caller.session], |r| r.get(0))?;
     let (id, context): (i64, Option<String>) = conn.query_row(
         "INSERT INTO sessions (token_id, client_id, person_id, context, last_seen)
          VALUES (?1, ?2, ?3, ?4, ?5)
@@ -79,6 +84,9 @@ pub fn touch(
         ],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
+    if !known {
+        start(conn, id, caller.person_id)?;
+    }
     // Beyond the cap, the token's sessions seen least recently are forgotten. This one is now
     // the most recent, so it stays.
     let evicted: Vec<i64> = conn
@@ -102,6 +110,26 @@ pub fn touch(
         context,
     })
 }
+
+/// A new session starts with what its person has (it has no row of its own: see
+/// `session_threads`), except in the threads still pending for the person where one of their
+/// sessions has a note they have not handled (`fresh`): there it starts with what the person
+/// handled, so a note fetched by a session that died before handling it is new for this one.
+fn start(conn: &Connection, id: i64, person: i64) -> Result<(), ApiError> {
+    conn.prepare_cached(START_SQL)?
+        .execute(params![id, person])?;
+    Ok(())
+}
+
+/// The rows a new session `?1` of person `?2` starts with, read from an index that holds only
+/// fresh threads: it costs nothing for a person without any.
+const START_SQL: &str = "
+INSERT INTO session_threads (session_id, thread_id, person_id, delivered_seq, has_new, waiting,
+                             last_seq, claimed_by, context, person_inbox, resolved)
+SELECT ?1, thread_id, person_id, coalesce(handled_seq, 0), 1,
+       waiting, last_seq, claimed_by, context, inbox, resolved
+FROM participants INDEXED BY participants_fresh
+WHERE person_id = ?2 AND fresh = 1";
 
 /// The caller's session as it is recorded, without recording anything: for a waiting request
 /// looking again. `None` when it was forgotten meanwhile.
@@ -186,7 +214,24 @@ fn forget(conn: &Connection, now: i64) -> Result<(), ApiError> {
 
 #[cfg(test)]
 mod tests {
-    use super::LAPSED_SQL;
+    use super::{LAPSED_SQL, START_SQL};
+
+    /// A new session reads only its person's fresh threads, from their own index.
+    #[test]
+    fn a_new_session_reads_only_its_persons_fresh_threads() {
+        let conn = crate::db::open(":memory:").unwrap();
+        let plan: Vec<String> = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {START_SQL}"))
+            .unwrap()
+            .query_map([1, 2], |r| r.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            plan,
+            vec!["SEARCH participants USING INDEX participants_fresh (person_id=?)"]
+        );
+    }
 
     /// Every request looks for lapsed claims, so that must cost nothing however many sessions,
     /// lapsed or not, the server keeps: a range of the index of sessions that may hold claims.

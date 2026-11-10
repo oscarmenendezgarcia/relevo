@@ -39,19 +39,25 @@ The server keeps each session with its token's label, its context and when it wa
 
 ## Delivery state
 
-Delivery is kept per session. For each session the server knows the last note of each thread that reached it. A note reaches a session when that session fetches it through `inbox` or `thread`. A session starts with what its person already has: a note that had reached one of their sessions before this one was first seen counts as having reached it, so a new terminal does not replay the person's whole history; notes that reached none of them are new for it too.
+Two things are kept apart: whether a note has **reached** a session (it was fetched), and whether a person has **handled** it (they did something about it). A note can reach a session that then dies, or decides it is not for it; it stays pending for the person until one of their sessions handles it.
+
+**Handled.** For each participant of a `direct` thread, the server keeps how far the person has handled it. A person handles the thread when one of their sessions writes a note in it, closes it, or sends `done: true` (see `send`), up to the latest note that had reached that session (the session's own new note included, when every earlier one had reached it): a note that landed after the session last fetched the thread was never seen there, so it stays pending, even if the session answered or marked done what it had. So `handled_at` never comes before the note it covers reached the person. Claiming does not handle: a claim says "I am on it", and if the claiming session dies, the note is still pending when the claim ends. A note by someone else that the person has not handled is **pending** for them. `team` threads and closed threads are never pending: answering a team question is optional, and a closed thread asks nothing more.
+
+**Reached.** Delivery is kept per session. For each session the server knows the last note of each thread that reached it. A note reaches a session when that session fetches it through `inbox` or `thread`. Each session gets each note once: a note that reached it is not new for it again, pending or not.
+
+**Where a new session starts.** A session starts, for each `direct` thread still pending for its person, with what the person has *handled*: the notes they have not handled are new for it, so an agent that starts after another one died with a note half done gets that note at once. For every other thread (`team` threads, and `direct` threads that are closed or handled) it starts with what any of the person's sessions has reached, so a new terminal does not replay old team questions, nor the last note of every thread the other person closed.
 
 A thread is **new for a session** when it holds notes, not written by the session's person, that have not reached that session. A person's own notes are never new for any of their sessions. When a session writes a note, everything in the thread up to that note has reached it, unless earlier notes had not: then nothing moves, so a reply written without reading never hides a note.
 
-A thread is **waiting** for a person when it is `direct`, `open`, and its latest note is not theirs. It stays in the inbox of the sessions that see it until the person replies or someone closes it, even after it was delivered.
+A thread is **waiting** for a person when it is pending for them: `direct`, `open`, with a note by someone else they have not handled. It stays in the inbox of the sessions that see it until the person handles it (replies, closes it, or marks it `done`), even after it reached a session.
 
 A `team` thread is never "waiting": it shows only while it is `open` and has notes new for the session. So a teammate's agent with nothing to add does not keep seeing it, and once the asker closes it (resolved), it leaves every inbox, even with notes the session has not fetched; `inbox` with `all` and `thread` still show it. A closed `direct` thread with new notes still shows until they are fetched, since a closing note is often meant to be read.
 
-For others, a participant's delivery is about the latest note *written by someone else* that reached any of their sessions (their own notes say nothing about whether they read the others'): which session (its label, and its context at that moment), and how many of their sessions that note has reached (`seen_by`, counting a session first seen after it reached the person, which starts with it, and not counting forgotten sessions): "picked up by Claude Code in pagos-api, 5 minutes ago", or "seen by 2 of Ana's sessions, none has taken it" when `seen_by` > 0 and there is no live claim.
+For others, a participant's delivery is about the latest note *written by someone else*: whether it reached any of their sessions and which one first (its label, and its context at that moment), how many of their live sessions have it (`seen_by`), and whether the person has handled it, when, and from which session (`handled_at`, `handled_by`): "seen by pi in embeddings, not handled yet", or "handled by Claude Code in producto at 19:30". A session that has ended still counts as having seen it (the `by`), even though `seen_by` counts live sessions only.
 
 ## Operations
 
-All three are the same over HTTP and MCP (MCP arrives in block 2).
+All three are the same over HTTP and over MCP (`relevo mcp`, see `docs/agents.md`).
 
 ### `send`
 
@@ -61,9 +67,10 @@ Opens a thread, or writes in one.
 |---|---|---|
 | `to` | array of addresses (`handle` or `handle/context`, the context with or without a branch), or `["@team"]` | Opens a new thread. Exactly one of `to` and `thread`. |
 | `thread` | thread id | Writes in an existing thread. |
-| `text` | string | The note. Required unless only closing or only claiming (`thread` + `close: true` or `claim: true`, no `text`). |
+| `text` | string | The note. Required unless only closing, claiming or marking done (`thread` + `close: true`, `claim: true` or `done: true`, no `text`). |
 | `close` | bool, optional | Marks the thread closed after writing. |
 | `claim` | bool, optional | With `thread`: claims the thread for this session, as a state, without a note when there is no `text`. Not with `to`. |
+| `done` | bool, optional | With `thread` and no `text`: the person has handled the thread up to the latest note that reached this session, with nothing to write ("seen, nothing to do"). A note that has not reached it stays pending (a session that fetched nothing handles nothing). Writes no note and does not claim. Not with `to`, `text` or `claim`. |
 | `key` | string, 1 to 100 characters, optional | Idempotency key. A repeated `send` from the same person with the same key, within 24 hours of the `send` that used it, returns the first result and writes nothing. Only a successful `send` uses up a key. After 24 hours the key expires: the same key is a fresh `send`, which uses it up for another 24 hours. The server forgets expired keys. |
 
 The body is a JSON object; anything else (an array, say), or any other field, fails with `BAD_REQUEST`. Characters here and below are Unicode scalar values.
@@ -79,7 +86,7 @@ Rules:
 - Text over 64 KiB (counted once decoded from JSON) fails with `TOO_LARGE` (400); empty or blank text with `BAD_REQUEST`. The whole request body may be up to 400 KiB, so a note of 64 KiB fits however the client escapes it.
 - Loop guard: a thread accepts at most 20 notes in any rolling hour. The 21st fails with `THREAD_BUSY`, whose message tells the agent to check with its person before going on. (The server cannot tell a person from an agent, so this caps speed, not authorship.)
 - A person may send at most 60 notes per rolling minute: beyond that, `RATE_LIMITED`.
-- The limits count notes only: a close or a claim without text is never limited.
+- The limits count notes only: a close, a claim or a `done` without text is never limited.
 
 Returns `{ "thread": "<id>", "note": "<id>", "status": "open" | "closed", "claimed": "this-session" | "other-session" | null }`. `note` is `null` when the `send` only closed the thread. `claimed` is who holds the thread for your person after this `send`: `"other-session"` means another of your sessions had it first, so this one should step aside; `null` after opening a thread, and after any close, which releases every claim. A replayed `send` returns who held the thread after its first result, named for the session that replays: `"this-session"` only when that session is the one that held it, so a retry from another session (an agent restarted under a new id, say) is not told it holds a thread it does not.
 
@@ -106,7 +113,7 @@ Returns:
       "from": "oscar",
       "participants": ["oscar", "ana"],
       "status": "open" | "closed",
-      "waiting_for_you": true,
+      "pending": true,
       "last_note": { "id": "n_…", "author": "ana", "via": "Claude Code laptop", "created_at": "…", "text": "…", "truncated": false },
       "context": "pagos-api",
       "claimed": "this-session",
@@ -123,6 +130,7 @@ Returns:
 
 - `team` lists every active person, you included, so the agent knows whom to ask. `contexts` are the distinct contexts of their sessions seen in the last 15 minutes, sorted.
 - `session` is the session this request counts as; `you` is the handle of its person, so an agent knows which member of `team` it speaks for.
+- `pending` says the thread is pending for your person (see [Delivery state](#delivery-state)). (Up to 0.2.x it was called `waiting_for_you`; that name is gone.)
 - `held_by` lists the other participants who hold the thread now (live claims only), with the session's label, context and since when, so whoever asked sees who is on it without opening the thread; empty when nobody else holds it.
 - A thread's `context` is the context it was addressed to for you, or `null`. `claimed` is `null` (unclaimed), `"this-session"`, or, only with `all` (and in `thread`, which also shows any thread of the person), `"other-session"`.
 - At most 20 threads: first those with new notes (waiting ones first among them), then waiting ones with nothing new; within each group, by latest note, newest first. `more` counts the rest. So threads that are only waiting, which stay until someone replies, never keep new notes out.
@@ -135,11 +143,12 @@ Returns:
 
 The whole history of one thread your person takes part in, from any of their sessions. Delivers all its notes to this session. Does not claim it.
 
-Returns the same thread object as `inbox`, with `notes` (every note, in full, oldest first, `truncated: false`) in place of `new_notes`, plus `delivery`: for each participant, in the order of `participants`, the latest note by someone else that they have, when it reached them and which session it reached (`by`), which session of theirs claimed the thread and since when (`claimed_by`, with `since`), or `null`s, and how many of their sessions that note has reached (`seen_by`, 0 when none has). Each session shows its label and its context at that moment: when the note reached it, when it claimed the thread. This is how a writer sees "picked up by her agent 5 minutes ago".
+Returns the same thread object as `inbox`, with `notes` (every note, in full, oldest first, `truncated: false`) in place of `new_notes`, plus `delivery`: for each participant, in the order of `participants`, the latest note by someone else that they have, when it reached them and which session it reached first (`by`, kept after that session ends), which session of theirs claimed the thread and since when (`claimed_by`, with `since`), or `null`s, how many of their live sessions have that note (`seen_by`, 0 when none has), and, once the person has handled that note, when and from which session (`handled_at`, `handled_by`; `null` until then). `handled_at` is when they last handled a note by someone else that they had not handled yet: handling the thread again with nothing new by others keeps it. Each session shows its label and its context at that moment: when the note reached it, when it claimed the thread, when it handled it. This is how a writer sees "picked up by her agent 5 minutes ago", and tells "seen by pi, not handled yet" from "handled by Claude Code at 19:30".
 
 ```json
-"delivery": [ { "handle": "ana", "note": "n_…", "delivered_at": "2026-11-08T10:46:00Z", "by": { "label": "Claude Code laptop", "context": "pagos-api" }, "claimed_by": { "label": "Claude Code laptop", "context": "pagos-api", "since": "2026-11-08T10:47:00Z" }, "seen_by": 1 },
-              { "handle": "bob", "note": null, "delivered_at": null, "by": null, "claimed_by": null, "seen_by": 0 } ]
+"delivery": [ { "handle": "ana", "note": "n_…", "delivered_at": "2026-11-08T10:46:00Z", "by": { "label": "Claude Code laptop", "context": "pagos-api" }, "claimed_by": { "label": "Claude Code laptop", "context": "pagos-api", "since": "2026-11-08T10:47:00Z" }, "seen_by": 1,
+                "handled_at": null, "handled_by": null },
+              { "handle": "bob", "note": null, "delivered_at": null, "by": null, "claimed_by": null, "seen_by": 0, "handled_at": null, "handled_by": null } ]
 ```
 
 ## HTTP
@@ -149,7 +158,7 @@ Every route needs `Authorization: Bearer <token>`, and takes the optional `Relev
 ```
 GET  /api/inbox?all=1&wait=30
 GET  /api/threads/:id
-POST /api/send            { to | thread, text, close?, claim?, key? }
+POST /api/send            { to | thread, text, close?, claim?, done?, key? }
 GET  /api/people          { "team": [...], "you": "ana" }  (same list as inbox)
 DELETE /api/session        forget this session (the one the headers name) and release its claims; { "ok": true }
 GET  /health              no token; { "ok": true }
@@ -189,13 +198,16 @@ relevo about <handle> "new line"
 relevo deactivate <handle>                                                                 # also revokes every token of theirs
 relevo backup <dest-file>                                                                  # a consistent copy, while the server runs
 relevo backup --keep 14 <dest-dir>                                                         # writes <dest-dir>/YYYYMMDD-HHMMSS.db (UTC), keeps the newest 14
+relevo check-db                                                                            # whether this version can use the database, writing nothing
 ```
 
-The database records the version of its layout. v0 does not migrate: every command, `serve` included, refuses a database made by another version of relevo and says so; delete it (with its `-wal` and `-shm` files) and invite the team again.
+The database records the version of its layout. From layout 6 on (relevo 0.3.0), `relevo serve` migrates a database of layout 5 (relevo 0.1.0 to 0.2.x) in place when it starts, keeping what layout 5 said was waiting for a reply: a `direct` thread that was waiting for a person there (open, its latest note not theirs) is handled up to their own latest note in it, so it stays pending for them even if it had reached one of their sessions; every other thread is handled up to its latest note. Reaching a session is not taken as handling: `handled_at` is set only when the person wrote after the latest note by someone else (as when they first did), and is `null` otherwise. As with any pending thread, a new session of the person gets the notes they have not handled as new, once; the person's sessions that already had them see them as waiting, as before, not as new. Only `serve` migrates: every other command that opens the database refuses one of layout 5, before writing anything, and says to start `serve` first (and to keep a `relevo backup` before, which copies it as it is), so an admin command never changes the layout behind the owner's back. Every command refuses any other older layout, and any newer one, and says so; such a database must be deleted (with its `-wal` and `-shm` files) and the team invited again.
 
-`backup` copies the database with SQLite's `VACUUM INTO`: one consistent snapshot, taken without stopping the server (a plain copy of a database in WAL mode can miss what is still in its `-wal` file). It only reads the database: it never creates one, and copies one made by another version too, so it can be kept before an upgrade. The copy is created 0600 under a hidden name, checked (`PRAGMA quick_check`), and only then given its name; an existing file is never overwritten. When `<dest>` is a directory (with `--keep N` it must be one, and is created 0700 if missing), the copy is named `YYYYMMDD-HHMMSS.db` (UTC), and `--keep N` then removes the oldest files named that way beyond the newest N, the new one always among them; other files there are left alone. Restoring is putting a copy in place of the database while the server is stopped (and deleting the old database's `-wal` and `-shm` files).
+`check-db` says whether this version can use the database: as it is, once `serve` migrates it (exit 0), or not, and why (exit 1). It writes nothing, not even `-wal` or `-shm` files: a database without them (no server has it open) is read as immutable, one with them read-only through the server's. It never creates a database. `deploy/install.sh` asks it before it replaces the binary.
 
-`--db` defaults to `RELEVO_DB` or `./relevo.db`; only `serve` creates `./relevo.db` that way, and the other commands refuse to run when neither names a database and there is no `./relevo.db` (so an admin command run before `RELEVO_DB` is set cannot fill a database the server never reads); `--addr` to `RELEVO_ADDR` or `127.0.0.1:7878`; `--team-questions-per-day` to `RELEVO_TEAM_QUESTIONS_PER_DAY` or 5; `--tls` to `RELEVO_TLS` (`true` or `false`) and `--tls-name` to `RELEVO_TLS_NAME` (comma-separated), so that a systemd drop-in can turn TLS on with `Environment=` lines.
+`backup` copies the database with SQLite's `VACUUM INTO`: one consistent snapshot, taken without stopping the server (a plain copy of a database in WAL mode can miss what is still in its `-wal` file). It only reads the database, as `check-db` does: it never creates one, and copies one made by another version too, so it can be kept before an upgrade. The copy is created 0600 under a hidden name, checked (`PRAGMA quick_check`), and only then given its name; an existing file is never overwritten. When `<dest>` is a directory (with `--keep N` it must be one, and is created 0700 if missing), the copy is named `YYYYMMDD-HHMMSS.db` (UTC), and `--keep N` then removes the oldest files named that way beyond the newest N, the new one always among them; other files there are left alone. Restoring is putting a copy in place of the database while the server is stopped (and deleting the old database's `-wal` and `-shm` files).
+
+`--db` defaults to `RELEVO_DB` or `./relevo.db`; only `serve` creates `./relevo.db` that way, and the other commands refuse to run when neither names a database and there is no `./relevo.db` (so an admin command run before `RELEVO_DB` is set cannot fill a database the server never reads); `--addr` to `RELEVO_ADDR` or `127.0.0.1:7878`; `--team-questions-per-day` to `RELEVO_TEAM_QUESTIONS_PER_DAY` or 5; `--tls` to `RELEVO_TLS` (`true` or `false`), `--tls-name` to `RELEVO_TLS_NAME` (comma-separated), and `--tls-cert` and `--tls-key` to `RELEVO_TLS_CERT` and `RELEVO_TLS_KEY`, so that a systemd drop-in can turn TLS on with `Environment=` lines. `--tls` and `--tls-cert` exclude each other, `--tls-cert` and `--tls-key` go together, and `--tls-name` needs `--tls`; `serve` refuses anything else before it opens the database (`RELEVO_TLS=false` counts as no `--tls`).
 
 `serve` can speak HTTPS itself, with no proxy in front:
 
@@ -213,4 +225,4 @@ The server logs counts and ids, never note text or tokens. The database holds to
 
 ## Later (not v0)
 
-MCP tools (block 2), consent between teams, webhooks, OAuth for ChatGPT, A2A gateway, attachments.
+Consent between teams, webhooks, OAuth for ChatGPT, A2A gateway, attachments.

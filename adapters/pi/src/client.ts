@@ -32,7 +32,11 @@ export interface Delivery {
   by: SessionRef | null;
   /** `since`: when that session claimed the thread (servers before it leave it out). */
   claimed_by: (SessionRef & { since?: string }) | null;
+  /** How many of their live sessions have that note. */
   seen_by: number;
+  /** When the person handled that note, and from which session; `null` while not handled (servers before 0.3.0 leave both out). */
+  handled_at?: string | null;
+  handled_by?: SessionRef | null;
 }
 
 export interface Thread {
@@ -42,7 +46,8 @@ export interface Thread {
   from: string;
   participants: string[];
   status: "open" | "closed";
-  waiting_for_you: boolean;
+  /** Pending for the person: not handled yet (servers before 0.3.0 leave it out: nothing is pending then). */
+  pending?: boolean;
   context: string | null;
   claimed: "this-session" | "other-session" | null;
   new_notes?: Note[];
@@ -52,6 +57,13 @@ export interface Thread {
   delivery?: Delivery[];
   /** In the inbox: the other participants who hold the thread now, with their session and since when (servers before it leave it out). */
   held_by?: (SessionRef & { handle: string; since?: string })[];
+  /** Set by the extension, never by the server: handed over again, its latest note never shown in this process. */
+  handed_over?: boolean;
+  /**
+   * Set by the extension, never by the server: in the first answer after a request that may have lost its
+   * answer, so notes of the thread before these may never have reached this session.
+   */
+  after_failure?: boolean;
 }
 
 export interface Inbox {
@@ -69,6 +81,8 @@ export interface SendFields {
   close?: boolean;
   /** With `thread`: claims it for this session, as a state, without a note when there is no `text`. */
   claim?: boolean;
+  /** With `thread` and no `text`: the person has handled the thread up to the latest note this session has received, writing nothing. */
+  done?: boolean;
 }
 
 export interface SendResult {

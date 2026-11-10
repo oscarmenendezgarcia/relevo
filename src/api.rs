@@ -85,8 +85,12 @@ struct Delivery {
     /// The session of theirs that claimed the thread, with its context when it claimed it and
     /// since when it holds it.
     claimed_by: Option<ClaimOut>,
-    /// How many of their sessions have `note`.
+    /// How many of their live sessions have `note`.
     seen_by: i64,
+    /// When the person handled `note` (wrote in the thread, closed it or marked it done), and
+    /// from which session; `None` while it is not handled.
+    handled_at: Option<String>,
+    handled_by: Option<SessionOut>,
 }
 
 /// Who holds a thread for a participant, and since when.
@@ -114,7 +118,9 @@ struct ThreadOut {
     from: String,
     participants: Vec<String>,
     status: String,
-    waiting_for_you: bool,
+    /// Pending for the person: `direct`, `open`, with a note by someone else they have not
+    /// handled.
+    pending: bool,
     context: Option<String>,
     claimed: Option<&'static str>,
     /// The other participants who hold the thread now.
@@ -142,6 +148,10 @@ struct SendRequest {
     /// With `thread`: claims it for this session, without a note when there is no `text`.
     #[serde(default)]
     claim: bool,
+    /// With `thread` and no `text`: the person has handled the thread up to the latest note that
+    /// reached this session.
+    #[serde(default)]
+    done: bool,
     key: Option<String>,
 }
 
@@ -167,6 +177,7 @@ struct ThreadRow {
     /// The latest note that reached this session.
     delivered_seq: i64,
     last_seq: i64,
+    /// Pending for the person.
     waiting: bool,
     context: Option<String>,
     claimed_by: Option<i64>,
@@ -365,28 +376,33 @@ fn inbox_count(conn: &Connection, session: &Session, all: bool) -> Result<usize,
     Ok(counts.first().copied().unwrap_or(0) as usize)
 }
 
-/// Recomputes what the rows of a thread know about it (latest note, new, waiting, inbox,
-/// resolved, and the copies on the sessions' rows). Runs after every change to the thread: a
-/// note, a close, a delivery, a claim.
+/// Recomputes what the rows of a thread know about it (latest note, new, waiting (pending),
+/// inbox, resolved, fresh, and the copies on the sessions' rows). Runs after every change to the
+/// thread: a note, a close, a delivery, a claim, a person handling it.
 fn refresh(conn: &Connection, thread: &str) -> Result<(), ApiError> {
     // A thread is opened by its first note, so it always has a latest one.
-    let (last_seq, last_author, open_direct, resolved): (i64, i64, bool, bool) = conn.query_row(
-        "SELECT n.seq, n.author_id, t.kind = 'direct' AND t.status = 'open',
+    let (last_seq, open_direct, resolved): (i64, bool, bool) = conn.query_row(
+        "SELECT n.seq, t.kind = 'direct' AND t.status = 'open',
                 t.kind = 'team' AND t.status = 'closed'
          FROM threads t JOIN notes n ON n.thread_id = t.id
          WHERE t.id = ?1 ORDER BY n.seq DESC LIMIT 1",
         [thread],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
+    // Pending (`waiting`): open, direct, with a note by someone else after what the person
+    // handled. Fresh: pending, and one of their sessions has a note they have not handled.
     conn.execute(
         "UPDATE participants SET
              last_seq = ?2,
              has_new = coalesce(delivered_seq, 0) < last_other_seq,
-             waiting = ?3 AND person_id != ?4,
-             inbox = coalesce(delivered_seq, 0) < last_other_seq OR (?3 AND person_id != ?4),
-             resolved = ?5
+             waiting = ?3 AND coalesce(handled_seq, 0) < last_other_seq,
+             inbox = coalesce(delivered_seq, 0) < last_other_seq
+                     OR (?3 AND coalesce(handled_seq, 0) < last_other_seq),
+             resolved = ?4,
+             fresh = ?3 AND coalesce(handled_seq, 0) < last_other_seq
+                     AND coalesce(handled_seq, 0) < coalesce(delivered_seq, 0)
          WHERE thread_id = ?1",
-        params![thread, last_seq, open_direct, last_author, resolved],
+        params![thread, last_seq, open_direct, resolved],
     )?;
     conn.execute(
         "UPDATE session_threads AS s SET
@@ -559,7 +575,7 @@ fn thread_out(
         from: row.from.clone(),
         participants: participants(conn, &row.id)?,
         status: row.status.clone(),
-        waiting_for_you: row.waiting,
+        pending: row.waiting,
         context: row.context.clone(),
         claimed: claim(row.claimed_by, session),
         held_by: held_by(conn, &row.id, session.person_id)?,
@@ -613,8 +629,9 @@ fn held_by(conn: &Connection, thread: &str, me: i64) -> Result<Vec<HolderOut>, A
 
 /// For each participant, in order: the latest note by someone else that reached one of their
 /// sessions, which session it reached first, which session claimed the thread (each with its
-/// context then) and when, and how many of their sessions have that note: those without a row of their own
-/// have what their person has.
+/// context then) and when, how many of their live sessions have that note (those without a row
+/// of their own have what their person has), and whether the person has handled it, when and
+/// from which session.
 fn delivery(conn: &Connection, thread: &str) -> Result<Vec<Delivery>, ApiError> {
     let mut stmt = conn.prepare(
         "SELECT pe.handle, n.id, p.delivered_at, p.delivered_label, p.delivered_context,
@@ -622,7 +639,8 @@ fn delivery(conn: &Connection, thread: &str) -> Result<Vec<Delivery>, ApiError> 
                 (SELECT count(*) FROM sessions s
                  LEFT JOIN session_threads st ON st.session_id = s.id AND st.thread_id = p.thread_id
                  WHERE s.person_id = p.person_id
-                   AND coalesce(st.delivered_seq, p.delivered_seq) >= n.seq)
+                   AND coalesce(st.delivered_seq, p.delivered_seq) >= n.seq),
+                p.handled_seq >= n.seq, p.handled_at, p.handled_label, p.handled_context
          FROM participants p JOIN people pe ON pe.id = p.person_id
          LEFT JOIN notes n ON n.seq = (
              SELECT max(o.seq) FROM notes o
@@ -650,6 +668,14 @@ fn delivery(conn: &Connection, thread: &str) -> Result<Vec<Delivery>, ApiError> 
                 _ => None,
             },
             seen_by: r.get(8)?,
+            handled_at: match r.get::<_, Option<bool>>(9)? {
+                Some(true) => r.get::<_, Option<i64>>(10)?.map(rfc3339),
+                _ => None,
+            },
+            handled_by: match r.get::<_, Option<bool>>(9)? {
+                Some(true) => session(r.get(11)?, r.get(12)?),
+                _ => None,
+            },
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -937,9 +963,14 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<(SendResult, Ve
             "claim goes with 'thread' only: opening a thread claims nothing",
         ));
     }
-    if req.text.is_none() && !(req.thread.is_some() && (req.close || req.claim)) {
+    if req.done && (req.to.is_some() || req.text.is_some() || req.claim) {
         return Err(ApiError::bad_request(
-            "text is required (it may be left out only to close or claim a thread)",
+            "done goes with 'thread' alone: no 'to', no 'text' and no 'claim'",
+        ));
+    }
+    if req.text.is_none() && !(req.thread.is_some() && (req.close || req.claim || req.done)) {
+        return Err(ApiError::bad_request(
+            "text is required (it may be left out only to close, claim or mark done a thread)",
         ));
     }
     let to = req
@@ -1064,6 +1095,12 @@ fn write_as(
         }
         None => None,
     };
+    // Writing in the thread, closing it or `done` handles it for the writer's person, up to the
+    // latest note that reached this session. Claiming does not: if the claiming session dies,
+    // the note is still pending.
+    if note_id.is_some() || req.close || req.done {
+        handle(tx, caller, session, &thread_id, now)?;
+    }
     // Writing in an existing thread claims it for this session, and so does `claim` without a
     // note. Opening a thread claims nothing: the asker has nothing to take on, and the answers
     // must reach the person's next session too. Closing without text does not claim.
@@ -1129,6 +1166,50 @@ fn write_as(
         }
     }
     Ok((result, woken))
+}
+
+/// The person has handled the thread up to the latest note that reached this session (after
+/// `deliver` ran for a note it wrote caught up, so that note counts): a note that landed after
+/// the session last looked was never seen there, so writing or `done` cannot handle it. When
+/// that covers a note by someone else they had not handled, it records when and from which
+/// session (its context now).
+fn handle(
+    tx: &Connection,
+    caller: &Caller,
+    session: &Session,
+    thread_id: &str,
+    now: i64,
+) -> Result<(), ApiError> {
+    let reached: i64 = tx.query_row(
+        "SELECT coalesce(s.delivered_seq, p.delivered_seq, 0)
+         FROM participants p
+         LEFT JOIN session_threads s ON s.session_id = ?3 AND s.thread_id = p.thread_id
+         WHERE p.thread_id = ?1 AND p.person_id = ?2",
+        params![thread_id, caller.person_id, session.id],
+        |r| r.get(0),
+    )?;
+    tx.execute(
+        "UPDATE participants SET
+             handled_at = CASE WHEN covers THEN ?3 ELSE handled_at END,
+             handled_label = CASE WHEN covers THEN ?4 ELSE handled_label END,
+             handled_context = CASE WHEN covers THEN ?5 ELSE handled_context END,
+             handled_seq = nullif(max(coalesce(handled_seq, 0), ?6), 0)
+         FROM (SELECT EXISTS (
+                   SELECT 1 FROM notes n, participants q
+                   WHERE q.thread_id = ?1 AND q.person_id = ?2
+                     AND n.thread_id = ?1 AND n.author_id != ?2
+                     AND n.seq > coalesce(q.handled_seq, 0) AND n.seq <= ?6) AS covers)
+         WHERE thread_id = ?1 AND person_id = ?2",
+        params![
+            thread_id,
+            caller.person_id,
+            now,
+            session.label,
+            session.context,
+            reached
+        ],
+    )?;
+    Ok(())
 }
 
 /// Claims the thread for this session, unless another session of the person holds it: a claim is

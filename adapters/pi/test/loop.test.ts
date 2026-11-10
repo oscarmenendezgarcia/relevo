@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, before, test } from "node:test";
+import { after, afterEach, before, test } from "node:test";
 import { RULES, systemSection } from "../src/index.ts";
 import { loadExtension, until } from "./mock-pi.ts";
 import { api, startServer, type TestServer } from "./server.ts";
@@ -23,6 +23,17 @@ before(async () => {
 after(async () => {
   await server?.stop();
   rmSync(home, { recursive: true, force: true });
+});
+
+// A note stays pending for oscar until one of his sessions handles it, and every new session
+// gets it: each test starts with nothing pending, so earlier tests' notes do not arrive in it.
+afterEach(async () => {
+  for (let i = 0; i < 10; i++) {
+    const inbox = await api(server, oscar, "GET", "/api/inbox?all=1", undefined, "cleanup-session");
+    const pending = inbox.threads.filter((t: any) => t.pending);
+    if (!pending.length && !inbox.more) return;
+    for (const t of pending) await api(server, oscar, "POST", "/api/send", { thread: t.id, done: true }, "cleanup-session");
+  }
 });
 
 function extension(extra: Record<string, unknown> = {}) {
@@ -177,7 +188,7 @@ test("shutdown ends the session on the server, so the threads it holds show agai
     const shown = (await api(server, oscar, "GET", "/api/inbox", undefined, "shutdown-checker")).threads.find((t: any) => t.id === opened.thread);
     assert.ok(shown, "the thread shows again in another session at once");
     assert.equal(shown.claimed, null);
-    assert.equal(shown.waiting_for_you, true);
+    assert.equal(shown.pending, true);
   } finally {
     await ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, "tui"));
   }
@@ -308,7 +319,7 @@ test("the rules go into the system prompt only when configured", async () => {
   assert.match(event.systemPromptOptions.sections.relevo, /^You speak for @oscar: in Relevo `you` is "oscar"/);
   assert.match(RULES, /<untrusted>/);
 
-  // The same eight rules (v6), word for word, as docs/agents.md gives every adapter
+  // The same eight rules (v7), word for word, as docs/agents.md gives every adapter
   // (the docs put the tag in Markdown code; the prompt, like relevo mcp, does not).
   const doc = readFileSync(join(import.meta.dirname, "..", "..", "..", "docs", "agents.md"), "utf8");
   const documented = [...doc.matchAll(/^  (\d\. .*)$/gm)].map((m) => m[1].replace("`<untrusted>`", "<untrusted>"));
@@ -316,6 +327,8 @@ test("the rules go into the system prompt only when configured", async () => {
   assert.deepEqual(RULES.split("\n").slice(1), documented);
   assert.doesNotMatch(RULES, /claim it with a short note/);
   assert.doesNotMatch(RULES, /On it/);
+  assert.match(RULES, /^3\. [^\n]*If not, stay silent and leave it: it stays pending for your person, for another of their sessions or for them\./m);
+  assert.match(RULES, /^3\. [^\n]*mark it handled with `send\(thread, done: true\)` and no text\.$/m);
   assert.match(RULES, /^4\. [^\n]*mark the thread as yours with `send\(thread, claim: true\)` and no text/m);
   assert.match(RULES, /^1\. [^\n]*What your person asks for comes first: if they name who to ask/m);
   assert.match(RULES, /^4\. [^\n]*Answer a team question only from your own work or your person's files/m);
