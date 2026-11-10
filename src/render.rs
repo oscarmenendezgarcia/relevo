@@ -150,6 +150,14 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
         let _ = write!(out, "; addressed to you in {c}");
     }
     out.push('\n');
+    // Set by relevo mcp: its latest note was never shown in this process.
+    if t["handed_over"] == true {
+        out.push_str(
+            "Handed over again: it is still pending for your person, and its latest note was \
+             never shown in this session (an answer that carried it may have been lost on the \
+             way, or it was fetched and not shown). Treat that note as new.\n",
+        );
+    }
     if pending(t) && s(&t["kind"]) == "direct" {
         let _ = write!(
             out,
@@ -412,14 +420,24 @@ pub fn pushed(threads: &[Value], me: Option<&str>) -> String {
     out
 }
 
-/// What `send` with `done` did.
-pub fn done(v: &Value) -> String {
+/// What `send` with `done` did. `received`: whether any note of the thread reached this session
+/// (as far as the client knows); `done` handles only those.
+pub fn done(v: &Value, received: bool) -> String {
     let id = s(&v["thread"]);
-    let mut out = format!(
-        "Marked thread {id} handled, up to the notes this session has received: those are no \
-         longer pending for your person. Any note this session has not received yet, and any new \
-         one by someone else, stays pending. Nothing was written, and nothing claimed."
-    );
+    let mut out = if received {
+        format!(
+            "Marked thread {id} handled, up to the notes this session has received: those are no \
+             longer pending for your person. Any note this session has not received yet, and any \
+             new one by someone else, stays pending. Nothing was written, and nothing claimed."
+        )
+    } else {
+        format!(
+            "No note of thread {id} has reached this session, so `done` may have handled nothing: \
+             a note this session has not received stays pending for your person. Read it first \
+             with thread(id=\"{id}\"), then mark it done if it needs nothing. Nothing was \
+             written, and nothing claimed."
+        )
+    };
     if v["claimed"] == "other-session" {
         out.push_str(" Another of your person's sessions still holds it.");
     }
@@ -731,7 +749,7 @@ mod tests {
     #[test]
     fn done_says_nothing_was_written() {
         let v = json!({ "thread": "r_1", "note": null, "status": "open", "claimed": null });
-        let out = done(&v);
+        let out = done(&v, true);
         assert!(out.starts_with("Marked thread r_1 handled"), "{out}");
         // Only what reached this session: a note it has not received stays pending.
         assert!(
@@ -746,7 +764,31 @@ mod tests {
         assert!(!out.contains("still holds"), "{out}");
         let held =
             json!({ "thread": "r_1", "note": null, "status": "open", "claimed": "other-session" });
-        assert!(done(&held).contains("Another of your person's sessions still holds it."));
+        assert!(done(&held, true).contains("Another of your person's sessions still holds it."));
+        // From a session that received nothing of the thread: it says it may have handled
+        // nothing, and to read it first.
+        let out = done(&v, false);
+        assert!(!out.contains("Marked thread"), "{out}");
+        assert!(
+            out.contains("No note of thread r_1 has reached this session")
+                && out.contains("may have handled nothing")
+                && out.contains("Read it first with thread(id=\"r_1\")")
+                && out.contains("Nothing was written, and nothing claimed."),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_thread_handed_over_again_says_so() {
+        let mut t = sample();
+        t["handed_over"] = true.into();
+        let out = thread(&t, Some("oscar"));
+        assert!(
+            out.contains("Handed over again: it is still pending for your person")
+                && out.contains("Treat that note as new."),
+            "{out}"
+        );
+        assert!(!thread(&sample(), Some("oscar")).contains("Handed over"));
     }
 
     #[test]

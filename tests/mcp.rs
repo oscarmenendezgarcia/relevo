@@ -1092,10 +1092,10 @@ async fn read_message(sock: &mut tokio::net::TcpStream) -> Option<Vec<u8>> {
     }
 }
 
-/// A proxy to `upstream` that cuts the connection instead of passing on the first answer to a
-/// waiting inbox request that carries new notes: the server has delivered them, the client
-/// never sees them.
-async fn dropping_proxy(upstream: &str) -> String {
+/// A proxy to `upstream` that cuts the connection instead of passing on the first answer to an
+/// inbox request (a waiting one if `waiting`, else one that does not wait) that carries new
+/// notes: the server has delivered them, the client never sees them.
+async fn dropping_proxy(upstream: &str, waiting: bool) -> String {
     let upstream = upstream.trim_start_matches("http://").to_string();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -1110,9 +1110,11 @@ async fn dropping_proxy(upstream: &str) -> String {
                     let Some(res) = read_message(&mut up).await else {
                         return;
                     };
-                    let waiting = String::from_utf8_lossy(&req).contains("wait=");
+                    let head = String::from_utf8_lossy(&req);
+                    let inbox = head.starts_with("GET /api/inbox")
+                        && head.lines().next().unwrap_or("").contains("wait=") == waiting;
                     let news = String::from_utf8_lossy(&res).contains("\"new_notes\":[{");
-                    if waiting && news && !dropped.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    if inbox && news && !dropped.swap(true, std::sync::atomic::Ordering::SeqCst) {
                         return;
                     }
                     if client.write_all(&res).await.is_err() {
@@ -1125,18 +1127,24 @@ async fn dropping_proxy(upstream: &str) -> String {
     url
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn channel_pushes_again_what_a_dropped_answer_delivered() {
-    let s = server(&["ana", "bob"]).await;
-    let proxy = dropping_proxy(&s.url).await;
-    let home = s.dir.join("home-ana");
+/// `relevo mcp` for `who` through `url` (a proxy), general.
+async fn through(s: &Server, who: &str, url: &str, args: &[&str]) -> Mcp {
+    let home = s.dir.join(format!("home-{}", db::random_id("")));
     std::fs::create_dir(&home).unwrap();
     let mut cmd = relevo(&home);
-    cmd.args(["mcp", "--channel"])
-        .env("RELEVO_URL", &proxy)
-        .env("RELEVO_TOKEN", &s.tokens["ana"])
+    cmd.arg("mcp")
+        .args(args)
+        .env("RELEVO_URL", url)
+        .env("RELEVO_TOKEN", &s.tokens[who])
         .env("RELEVO_CONTEXT", "");
-    let mut ana = Mcp::spawn(cmd).await;
+    Mcp::spawn(cmd).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channel_hands_over_again_what_a_dropped_answer_delivered_once() {
+    let s = server(&["ana", "bob"]).await;
+    let proxy = dropping_proxy(&s.url, true).await;
+    let mut ana = through(&s, "ana", &proxy, &["--channel"]).await;
     let mut bob = Mcp::start(&s, "bob", &s.dir, Some(""), &[]).await;
     // Let ana's first waiting request reach the server.
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1145,23 +1153,46 @@ async fn channel_pushes_again_what_a_dropped_answer_delivered() {
         .ok("send", json!({ "to": ["ana"], "text": "Deploy at 5?" }))
         .await;
     let id = thread_id(&sent);
-    // The answer that delivered it was cut: the note comes again, after the retry.
+    // The answer that delivered it was cut: the next answer lists the thread as pending with
+    // nothing new, and its latest note, never shown, is handed over.
     let event = ana.notification("notifications/claude/channel").await;
     assert_eq!(event["params"]["meta"]["thread"], id.as_str());
+    assert_eq!(event["params"]["meta"]["from"], "bob");
     let content = event["params"]["content"].as_str().unwrap();
-    assert!(content.contains("Pushed again"), "{content}");
+    assert!(content.contains("Handed over again"), "{content}");
     assert!(
         content.contains("<untrusted from=\"@bob\">\nDeploy at 5?\n</untrusted>"),
         "{content}"
     );
-    // Once: a later note comes as usual, and the recovered one is not pushed again.
+    assert!(content.contains("leave it pending"), "{content}");
+
+    // The agent leaves it (not for it): it stays pending, and it is not handed over again when
+    // another answer lists it.
+    let other = bob
+        .ok("send", json!({ "to": ["ana"], "text": "Another question" }))
+        .await;
+    let other = thread_id(&other);
+    let event = ana.notification("notifications/claude/channel").await;
+    assert_eq!(event["params"]["meta"]["thread"], other.as_str());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    ana.request("tools/list", json!({})).await;
+    assert!(
+        !ana.notifications
+            .iter()
+            .any(|n| n["params"]["meta"]["thread"] == id.as_str()),
+        "{:?}",
+        ana.notifications
+    );
+
+    // A later note comes as usual, without the one handed over.
     bob.ok("send", json!({ "thread": id, "text": "Or at 6?" }))
         .await;
     let event = ana.notification("notifications/claude/channel").await;
+    assert_eq!(event["params"]["meta"]["thread"], id.as_str());
     let content = event["params"]["content"].as_str().unwrap();
     assert!(content.contains("Or at 6?"), "{content}");
     assert!(!content.contains("\nDeploy at 5?\n"), "{content}");
-    assert!(!content.contains("Pushed again"), "{content}");
+    assert!(!content.contains("Handed over"), "{content}");
 
     // In case neither event reached the agent, the inbox shows the thread once, with both.
     let inbox = ana.ok("inbox", json!({})).await;
@@ -1174,6 +1205,66 @@ async fn channel_pushes_again_what_a_dropped_answer_delivered() {
     for text in ["\nDeploy at 5?\n", "\nOr at 6?\n"] {
         assert_eq!(inbox.matches(text).count(), 1, "{text}: {inbox}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn inbox_hands_over_once_what_a_lost_answer_delivered() {
+    let s = server(&["ana", "bob"]).await;
+    let proxy = dropping_proxy(&s.url, false).await;
+    let mut ana = through(&s, "ana", &proxy, &[]).await;
+    let mut bob = Mcp::start(&s, "bob", &s.dir, Some(""), &[]).await;
+    let sent = bob
+        .ok("send", json!({ "to": ["ana"], "text": "Deploy at 5?" }))
+        .await;
+    let id = thread_id(&sent);
+    // The answer is lost: the tool fails, and the server has delivered the note.
+    let (failed, _) = ana.call("inbox", json!({})).await;
+    assert!(failed);
+    let seen = bob.ok("thread", json!({ "id": id })).await;
+    assert!(seen.contains("- @ana: note n_"), "{seen}");
+
+    // The next inbox hands it over as needing attention, once.
+    let inbox = ana.ok("inbox", json!({})).await;
+    assert!(inbox.contains(&format!("### Thread {id}")), "{inbox}");
+    assert!(inbox.contains("Handed over again"), "{inbox}");
+    assert!(
+        inbox.contains("<untrusted from=\"@bob\">\nDeploy at 5?\n</untrusted>"),
+        "{inbox}"
+    );
+    let inbox = ana.ok("inbox", json!({})).await;
+    assert!(inbox.contains(&format!("### Thread {id}")), "{inbox}");
+    assert!(inbox.contains("Pending for your person"), "{inbox}");
+    assert!(!inbox.contains("Handed over"), "{inbox}");
+
+    // It reached this session: done handles it.
+    let done = ana.ok("send", json!({ "thread": id, "done": true })).await;
+    assert!(
+        done.starts_with(&format!("Marked thread {id} handled")),
+        "{done}"
+    );
+
+    // A thread whose notes never reached this session: done says it may have handled nothing,
+    // and indeed it stays pending, its note new for the session.
+    let sent = bob
+        .ok("send", json!({ "to": ["ana"], "text": "Unseen" }))
+        .await;
+    let unseen = thread_id(&sent);
+    let done = ana
+        .ok("send", json!({ "thread": unseen, "done": true }))
+        .await;
+    assert!(
+        done.starts_with(&format!(
+            "No note of thread {unseen} has reached this session"
+        )),
+        "{done}"
+    );
+    assert!(done.contains("may have handled nothing"), "{done}");
+    let inbox = ana.ok("inbox", json!({})).await;
+    assert!(
+        inbox.contains(&format!("### Thread {unseen}")) && inbox.contains("\nUnseen\n"),
+        "{inbox}"
+    );
+    assert!(inbox.contains("Pending for your person"), "{inbox}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -1,7 +1,7 @@
 //! `relevo mcp`: a stdio MCP server with the tools `send`, `inbox` and `thread`, and with
 //! `--channel`, Claude Code channel events for new notes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -163,15 +163,23 @@ pub struct Relevo {
     /// events (Claude Code started without the channels flag, another client), the notes would
     /// be lost, since the push delivered them. `inbox` shows them once.
     pushed: Arc<Mutex<Vec<Value>>>,
+    /// The notes this process has shown the agent (see `Shown`).
+    shown: Arc<Shown>,
     channel: bool,
     tool_router: ToolRouter<Self>,
 }
+
+/// The notes this process has shown the agent, by thread: pushed as channel events, listed by
+/// `inbox` (new notes, and the latest note of a thread with nothing new) or read with `thread`.
+/// A thread with an entry has notes that reached this session.
+type Shown = Mutex<HashMap<String, HashSet<String>>>;
 
 impl Relevo {
     pub fn new(client: Result<Arc<Client>, String>, channel: bool) -> Self {
         Relevo {
             client,
             pushed: Arc::new(Mutex::new(vec![])),
+            shown: Arc::new(Mutex::new(HashMap::new())),
             channel,
             tool_router: Self::tool_router(),
         }
@@ -242,6 +250,51 @@ fn merge_pushed(v: &mut Value, pushed: Vec<Value>) -> Vec<Value> {
 /// Forgets the pushed thread `id`: a tool has shown it or written in it.
 fn forget(pushed: &Mutex<Vec<Value>>, id: &str) {
     lock(pushed).retain(|t| t["id"] != id);
+}
+
+/// Records every note of `thread` (`notes`, `new_notes`, `last_note`) as shown to the agent.
+fn show(shown: &Shown, thread: &Value) {
+    let Some(id) = thread["id"].as_str() else {
+        return;
+    };
+    let mut shown = lock(shown);
+    let notes = shown.entry(id.to_string()).or_default();
+    let listed = ["notes", "new_notes"]
+        .iter()
+        .flat_map(|k| thread[*k].as_array().into_iter().flatten());
+    for n in listed.chain(std::iter::once(&thread["last_note"])) {
+        if let Some(note) = n["id"].as_str() {
+            notes.insert(note.to_string());
+        }
+    }
+}
+
+/// Whether `t`, from an inbox answer, is to be handed over (again): a direct thread pending for
+/// the person, with no new notes by someone else, whose latest note, by someone else, this
+/// process has not shown the agent. The answer that carried that note was lost on the way, or
+/// fetched without being shown; it was delivered all the same, so nothing else would bring it
+/// back. Once per note and process: once shown, a note the agent leaves alone (not for it)
+/// stays pending without coming back.
+fn unshown(shown: &Shown, t: &Value, me: Option<&str>) -> bool {
+    let last = &t["last_note"];
+    s(&t["kind"]) == "direct"
+        && s(&t["status"]) == "open"
+        && render::pending(t)
+        && last["id"].is_string()
+        && Some(s(&last["author"])) != me
+        && !new_by_others(t, me)
+        && !lock(shown)
+            .get(s(&t["id"]))
+            .is_some_and(|notes| notes.contains(s(&last["id"])))
+}
+
+/// Whether `t` has new notes not written by `me`.
+fn new_by_others(t: &Value, me: Option<&str>) -> bool {
+    t["new_notes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|n| Some(s(&n["author"])) != me)
 }
 
 /// A failed call as a tool error: the server's code and message, and for `UNKNOWN_PERSON` the
@@ -322,7 +375,10 @@ impl Relevo {
             forget(&self.pushed, id);
         }
         Ok(if done {
-            render::done(&v)
+            // `done` handles only what reached this session: say so when nothing of the thread
+            // was shown here.
+            let received = lock(&self.shown).contains_key(s(&v["thread"]));
+            render::done(&v, received)
         } else {
             render::sent(&v)
         })
@@ -341,10 +397,18 @@ impl Relevo {
             .await
             .map_err(error)?;
         let me = client.you().await;
+        for t in v["threads"].as_array_mut().into_iter().flatten() {
+            if unshown(&self.shown, t, me.as_deref()) {
+                t["handed_over"] = true.into();
+            }
+        }
         let pushed = std::mem::take(&mut *lock(&self.pushed));
         let rest = merge_pushed(&mut v, pushed);
         let mut out = render::inbox(&v, me.as_deref());
         out.push_str(&render::pushed(&rest, me.as_deref()));
+        for t in v["threads"].as_array().into_iter().flatten().chain(&rest) {
+            show(&self.shown, t);
+        }
         Ok(out)
     }
 
@@ -356,6 +420,7 @@ impl Relevo {
         let client = self.client()?;
         let v = client.thread(&p.id).await.map_err(error)?;
         forget(&self.pushed, &p.id);
+        show(&self.shown, &v);
         // Before any inbox, who we are is asked of the server, so our own notes are not fenced.
         let me = client.you().await;
         Ok(render::thread(&v, me.as_deref()))
@@ -406,7 +471,7 @@ pub async fn run(channel: bool) -> anyhow::Result<()> {
             .map_err(|e| format!("{e:#}")),
         channel,
     );
-    let pushed = server.pushed.clone();
+    let (pushed, shown) = (server.pushed.clone(), server.shown.clone());
     let service = server.serve(rmcp::transport::stdio()).await?;
     let mut news = None;
     if channel {
@@ -415,6 +480,7 @@ pub async fn run(channel: bool) -> anyhow::Result<()> {
                 news = Some(tokio::spawn(push_news(
                     client.clone(),
                     pushed,
+                    shown,
                     service.peer().clone(),
                 )));
             }
@@ -525,15 +591,19 @@ pub fn channel_event(thread: &Value, me: Option<&str>) -> Option<Value> {
 ///
 /// The server delivers the notes in an answer when it sends it, so an answer lost on the way
 /// (the laptop slept, the network changed, a proxy cut the request) takes its notes with it.
-/// After a failure the next request does not wait, and each direct thread that it shows only as
-/// waiting is fetched with `thread`: if its latest note is recent and was not pushed, it is
-/// pushed again. A team thread whose notes were lost leaves the inbox and cannot be found again.
-async fn push_news(client: Arc<Client>, pushed: Arc<Mutex<Vec<Value>>>, peer: Peer<RoleServer>) {
+/// After a failure the next request does not wait; in every answer, a direct thread pending for
+/// the person whose latest note this process has not shown is handed over (`unshown`), once. A
+/// team thread whose notes were lost leaves the inbox and cannot be found again.
+async fn push_news(
+    client: Arc<Client>,
+    pushed: Arc<Mutex<Vec<Value>>>,
+    shown: Arc<Shown>,
+    peer: Peer<RoleServer>,
+) {
     let mut backoff = Duration::from_secs(1);
-    // The latest note by someone else pushed for each thread.
-    let mut known: HashMap<String, String> = HashMap::new();
-    // When the first of the requests that failed since the last answer was sent (unix seconds).
-    let mut failed_since: Option<i64> = None;
+    // A request failed since the last answer: the next one does not wait, since a thread whose
+    // notes were lost is no longer new and would not end the wait.
+    let mut failed = false;
     let push = |event: Value| {
         let peer = peer.clone();
         async move {
@@ -545,52 +615,38 @@ async fn push_news(client: Arc<Client>, pushed: Arc<Mutex<Vec<Value>>>, peer: Pe
     };
     loop {
         let started = tokio::time::Instant::now();
-        let sent_at = crate::db::now_unix();
-        let wait = if failed_since.is_some() {
-            0
-        } else {
-            CHANNEL_WAIT
-        };
+        let wait = if failed { 0 } else { CHANNEL_WAIT };
         let v = match client.inbox(false, wait).await {
             Ok(v) => v,
             Err(e) => {
                 // The code and message only: never note text or the token.
                 eprintln!("relevo mcp: inbox: {e}; again in {}s", backoff.as_secs());
-                failed_since.get_or_insert(sent_at);
+                failed = true;
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(MAX_BACKOFF);
                 continue;
             }
         };
-        let threads: Vec<&Value> = v["threads"].as_array().into_iter().flatten().collect();
         // Learnt from this answer's `you`: never another request in this loop.
         let me = client.known_you();
         let mut events = 0;
-        for t in &threads {
+        for t in v["threads"].as_array().into_iter().flatten() {
             let (thread, event) = match channel_event(t, me.as_deref()) {
-                Some(event) => (Value::clone(t), event),
-                None => match failed_since {
-                    Some(since) if waits_quietly(t) => {
-                        let known = known.get(s(&t["id"]));
-                        match recover(&client, t, known, since, me.as_deref()).await {
-                            Some(recovered) => recovered,
-                            None => continue,
-                        }
-                    }
-                    _ => continue,
+                Some(event) => (t.clone(), event),
+                None => match handover(&shown, t, me.as_deref()) {
+                    Some(handed) => handed,
+                    None => continue,
                 },
             };
             // Kept before sending: nothing tells whether the client shows the event.
             remember(&pushed, &thread);
-            if let Some(n) = latest_other(&thread, me.as_deref()) {
-                known.insert(s(&thread["id"]).to_string(), n);
-            }
+            show(&shown, &thread);
             events += 1;
             if !push(event).await {
                 return;
             }
         }
-        failed_since = None;
+        failed = false;
         // A server that answers a waiting request at once with nothing (one that ignores `wait`,
         // or a proxy in the way) must not make this loop spin: back off as after a failure.
         if wait > 0 && events == 0 && started.elapsed() < MIN_EMPTY_WAIT {
@@ -610,68 +666,16 @@ fn s(v: &Value) -> &str {
     v.as_str().unwrap_or("")
 }
 
-/// An open direct thread that waits for a reply with nothing new: what a thread whose new notes
-/// were in a lost answer looks like.
-fn waits_quietly(t: &Value) -> bool {
-    s(&t["kind"]) == "direct"
-        && s(&t["status"]) == "open"
-        && render::pending(t)
-        && t["new_notes"].as_array().is_none_or(Vec::is_empty)
-}
-
-/// The id of the latest note in `thread` (`notes` or `new_notes`) not written by `me`.
-fn latest_other(thread: &Value, me: Option<&str>) -> Option<String> {
-    let notes = thread.get("notes").or_else(|| thread.get("new_notes"))?;
-    notes
-        .as_array()?
-        .iter()
-        .rev()
-        .find(|n| Some(s(&n["author"])) != me)
-        .map(|n| s(&n["id"]).to_string())
-}
-
-/// How far back a recovered note may be, before the failed request, to allow for the server's
-/// clock being off from ours.
-const RECOVER_SLACK: i64 = 600;
-
-/// After a failure: the quiet thread `t` again, as pushed (its notes after `known`, the latest
-/// note by someone else already pushed), and its event, when its latest note is recent and was
-/// not pushed.
-async fn recover(
-    client: &Client,
-    t: &Value,
-    known: Option<&String>,
-    since: i64,
-    me: Option<&str>,
-) -> Option<(Value, Value)> {
-    let full = client.thread(s(&t["id"])).await.ok()?;
-    let notes = full["notes"].as_array()?;
-    let latest = notes.last()?;
-    if Some(s(&latest["id"])) == known.map(String::as_str)
-        || s(&latest["created_at"]) < crate::db::rfc3339(since - RECOVER_SLACK).as_str()
-    {
+/// The thread `t` of an inbox answer handed over again, with its latest note as its new note,
+/// and its event, when `unshown` says so.
+fn handover(shown: &Shown, t: &Value, me: Option<&str>) -> Option<(Value, Value)> {
+    if !unshown(shown, t, me) {
         return None;
     }
-    // The notes after the one pushed; without one, those after our own latest note, or the
-    // latest alone.
-    let start = notes
-        .iter()
-        .rposition(|n| Some(s(&n["id"])) == known.map(String::as_str))
-        .or_else(|| notes.iter().rposition(|n| Some(s(&n["author"])) == me))
-        .map_or(notes.len() - 1, |i| i + 1);
-    let mut thread = full.clone();
-    let object = thread.as_object_mut()?;
-    object.remove("notes");
-    object.remove("delivery");
-    object.insert("new_notes".into(), Value::Array(notes[start..].to_vec()));
-    let mut event = channel_event(&thread, me)?;
-    if let Some(content) = event["content"].as_str() {
-        event["content"] = format!(
-            "(Pushed again: the connection dropped while it was being delivered, so you may have \
-             seen it already.)\n{content}"
-        )
-        .into();
-    }
+    let mut thread = t.clone();
+    thread["new_notes"] = json!([t["last_note"]]);
+    thread["handed_over"] = true.into();
+    let event = channel_event(&thread, me)?;
     Some((thread, event))
 }
 
@@ -803,6 +807,53 @@ mod tests {
             out.contains("done=true") && out.contains("leave it pending"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn only_an_unshown_pending_direct_note_by_someone_else_is_handed_over_once() {
+        let shown: Shown = Mutex::new(HashMap::new());
+        let t = json!({
+            "id": "r_1", "kind": "direct", "title": "T", "from": "ana",
+            "participants": ["ana", "oscar"], "status": "open", "pending": true,
+            "context": null, "claimed": null, "new_notes": [],
+            "last_note": { "id": "n_1", "author": "ana", "via": "x", "created_at": "t",
+                           "text": "Deploy?", "truncated": false }
+        });
+        let me = Some("oscar");
+        assert!(unshown(&shown, &t, me));
+        let with = |k: &str, v: Value| {
+            let mut t = t.clone();
+            t[k] = v;
+            t
+        };
+        for not in [
+            with("kind", "team".into()),
+            with("status", "closed".into()),
+            with("pending", false.into()),
+            // New notes by someone else are pushed as such.
+            with("new_notes", json!([t["last_note"]])),
+            with(
+                "last_note",
+                json!({ "id": "n_2", "author": "oscar", "text": "mine" }),
+            ),
+        ] {
+            assert!(!unshown(&shown, &not, me), "{not}");
+        }
+        // Handed over once: shown, it is not handed over again.
+        let (thread, event) = handover(&shown, &t, me).unwrap();
+        assert_eq!(thread["new_notes"], json!([t["last_note"]]));
+        let content = event["content"].as_str().unwrap();
+        assert!(content.contains("Handed over again"), "{content}");
+        assert_eq!(event["meta"]["from"], "ana");
+        show(&shown, &thread);
+        assert!(!unshown(&shown, &t, me));
+        assert!(handover(&shown, &t, me).is_none());
+        // A later note by someone else, shown nowhere yet, is.
+        let later = with(
+            "last_note",
+            json!({ "id": "n_3", "author": "ana", "text": "Or at 6?" }),
+        );
+        assert!(unshown(&shown, &later, me));
     }
 
     #[test]
