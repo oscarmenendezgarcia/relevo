@@ -1268,6 +1268,69 @@ async fn inbox_hands_over_once_what_a_lost_answer_delivered() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn notes_a_lost_answer_carried_before_the_latest_are_not_hidden() {
+    let s = server(&["ana", "bob", "cy"]).await;
+    let mut bob = Mcp::start(&s, "bob", &s.dir, Some(""), &[]).await;
+
+    // Two notes in the lost answer: only the latest comes back, and it says earlier ones may be
+    // missing, and how to read them.
+    let proxy = dropping_proxy(&s.url, false).await;
+    let mut ana = through(&s, "ana", &proxy, &[]).await;
+    let sent = bob
+        .ok("send", json!({ "to": ["ana"], "text": "Deploy at 5?" }))
+        .await;
+    let id = thread_id(&sent);
+    bob.ok("send", json!({ "thread": id, "text": "If not, at 6." }))
+        .await;
+    let (failed, _) = ana.call("inbox", json!({})).await;
+    assert!(failed);
+    let inbox = ana.ok("inbox", json!({})).await;
+    assert!(inbox.contains("Handed over again"), "{inbox}");
+    assert!(inbox.contains("\nIf not, at 6.\n"), "{inbox}");
+    assert!(
+        inbox.contains("Earlier notes of this thread may not have reached you either")
+            && inbox.contains(&format!(
+                "read it whole with thread(id=\"{id}\") before acting"
+            )),
+        "{inbox}"
+    );
+    let whole = ana.ok("thread", json!({ "id": id })).await;
+    assert!(whole.contains("\nDeploy at 5?\n"), "{whole}");
+
+    // A note written after the loss comes as new; the lost one does not, and the thread says so,
+    // once: the next answer is no longer the first after a failure.
+    let proxy = dropping_proxy(&s.url, false).await;
+    let mut cy = through(&s, "cy", &proxy, &[]).await;
+    let sent = bob
+        .ok(
+            "send",
+            json!({ "to": ["cy"], "text": "Can you review PR 12?" }),
+        )
+        .await;
+    let id = thread_id(&sent);
+    let (failed, _) = cy.call("inbox", json!({})).await;
+    assert!(failed);
+    bob.ok("send", json!({ "thread": id, "text": "So, can you?" }))
+        .await;
+    let inbox = cy.ok("inbox", json!({})).await;
+    assert!(inbox.contains("\nSo, can you?\n"), "{inbox}");
+    assert!(!inbox.contains("\nCan you review PR 12?\n"), "{inbox}");
+    assert!(!inbox.contains("Handed over"), "{inbox}");
+    assert!(
+        inbox.contains("A request for news failed just before this answer")
+            && inbox.contains(&format!(
+                "read it whole with thread(id=\"{id}\") before acting"
+            )),
+        "{inbox}"
+    );
+    bob.ok("send", json!({ "thread": id, "text": "Ping." }))
+        .await;
+    let inbox = cy.ok("inbox", json!({})).await;
+    assert!(inbox.contains("\nPing.\n"), "{inbox}");
+    assert!(!inbox.contains("A request for news failed"), "{inbox}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn connect_takes_the_token_from_stdin_or_the_environment() {
     let s = server(&["ana"]).await;
     let token = &s.tokens["ana"];

@@ -150,12 +150,25 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
         let _ = write!(out, "; addressed to you in {c}");
     }
     out.push('\n');
-    // Set by relevo mcp: its latest note was never shown in this process.
+    // Set by relevo mcp: its latest note was never shown in this process. The answer that lost it
+    // may have carried earlier notes too, and only the latest one comes back.
     if t["handed_over"] == true {
-        out.push_str(
+        let _ = writeln!(
+            out,
             "Handed over again: it is still pending for your person, and its latest note was \
              never shown in this session (an answer that carried it may have been lost on the \
-             way, or it was fetched and not shown). Treat that note as new.\n",
+             way, or it was fetched and not shown). Treat that note as new. Earlier notes of \
+             this thread may not have reached you either: read it whole with \
+             thread(id=\"{id}\") before acting."
+        );
+    } else if t["after_failure"] == true {
+        // Set by relevo mcp: the first answer after a failed request. The lost answer may have
+        // carried notes of this thread that came before these.
+        let _ = writeln!(
+            out,
+            "A request for news failed just before this answer, and its answer may have carried \
+             earlier notes of this thread that never reached you: read it whole with \
+             thread(id=\"{id}\") before acting."
         );
     }
     if pending(t) && s(&t["kind"]) == "direct" {
@@ -788,7 +801,28 @@ mod tests {
                 && out.contains("Treat that note as new."),
             "{out}"
         );
+        // Only its latest note comes back: earlier ones the lost answer carried may be missing.
+        assert!(
+            out.contains("Earlier notes of this thread may not have reached you either")
+                && out.contains("read it whole with thread(id=\"r_1\") before acting."),
+            "{out}"
+        );
+        assert!(!out.contains("A request for news failed"), "{out}");
         assert!(!thread(&sample(), Some("oscar")).contains("Handed over"));
+    }
+
+    #[test]
+    fn a_thread_after_a_failed_request_says_notes_may_be_missing() {
+        let mut t = sample();
+        t["after_failure"] = true.into();
+        let out = thread(&t, Some("oscar"));
+        assert!(
+            out.contains("A request for news failed just before this answer")
+                && out.contains("read it whole with thread(id=\"r_1\") before acting."),
+            "{out}"
+        );
+        assert!(!out.contains("Handed over"), "{out}");
+        assert!(!thread(&sample(), Some("oscar")).contains("A request for news failed"));
     }
 
     #[test]

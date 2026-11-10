@@ -2,6 +2,7 @@
 //! `--channel`, Claude Code channel events for new notes.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -165,6 +166,9 @@ pub struct Relevo {
     pushed: Arc<Mutex<Vec<Value>>>,
     /// The notes this process has shown the agent (see `Shown`).
     shown: Arc<Shown>,
+    /// An inbox request (the `inbox` tool's or the channel loop's) failed since the last answer
+    /// (see `after_failure`).
+    failed: Arc<AtomicBool>,
     channel: bool,
     tool_router: ToolRouter<Self>,
 }
@@ -180,6 +184,7 @@ impl Relevo {
             client,
             pushed: Arc::new(Mutex::new(vec![])),
             shown: Arc::new(Mutex::new(HashMap::new())),
+            failed: Arc::new(AtomicBool::new(false)),
             channel,
             tool_router: Self::tool_router(),
         }
@@ -288,6 +293,30 @@ fn unshown(shown: &Shown, t: &Value, me: Option<&str>) -> bool {
             .is_some_and(|notes| notes.contains(s(&last["id"])))
 }
 
+/// Records in `failed` that an inbox request failed in a way that may have lost its answer: any
+/// way but an error the server sent, which delivered nothing.
+fn lost(failed: &AtomicBool, e: &Error) {
+    if !matches!(e, Error::Api { .. }) {
+        failed.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Marks the threads with new notes in `v`, an inbox answer, as coming after a failed request,
+/// when one failed since the last answer (`failed`, which it clears). The server delivers the
+/// notes of an answer when it sends it, so a lost answer took its notes with it, and the notes of
+/// a thread here may not follow on from what this session last saw: the agent is told to read the
+/// thread whole. A direct thread with nothing new is handed over (`unshown`), which says the same.
+fn after_failure(failed: &AtomicBool, v: &mut Value) {
+    if !failed.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    for t in v["threads"].as_array_mut().into_iter().flatten() {
+        if t["new_notes"].as_array().is_some_and(|n| !n.is_empty()) {
+            t["after_failure"] = true.into();
+        }
+    }
+}
+
 /// Whether `t` has new notes not written by `me`.
 fn new_by_others(t: &Value, me: Option<&str>) -> bool {
     t["new_notes"]
@@ -392,10 +421,14 @@ impl Relevo {
     )]
     async fn inbox(&self, Parameters(p): Parameters<InboxParams>) -> Result<String, String> {
         let client = self.client()?;
-        let mut v = client
-            .inbox(p.all.unwrap_or(false), 0)
-            .await
-            .map_err(error)?;
+        let mut v = match client.inbox(p.all.unwrap_or(false), 0).await {
+            Ok(v) => v,
+            Err(e) => {
+                lost(&self.failed, &e);
+                return Err(error(e));
+            }
+        };
+        after_failure(&self.failed, &mut v);
         let me = client.you().await;
         for t in v["threads"].as_array_mut().into_iter().flatten() {
             if unshown(&self.shown, t, me.as_deref()) {
@@ -471,7 +504,11 @@ pub async fn run(channel: bool) -> anyhow::Result<()> {
             .map_err(|e| format!("{e:#}")),
         channel,
     );
-    let (pushed, shown) = (server.pushed.clone(), server.shown.clone());
+    let (pushed, shown, failed) = (
+        server.pushed.clone(),
+        server.shown.clone(),
+        server.failed.clone(),
+    );
     let service = server.serve(rmcp::transport::stdio()).await?;
     let mut news = None;
     if channel {
@@ -481,6 +518,7 @@ pub async fn run(channel: bool) -> anyhow::Result<()> {
                     client.clone(),
                     pushed,
                     shown,
+                    failed,
                     service.peer().clone(),
                 )));
             }
@@ -592,12 +630,15 @@ pub fn channel_event(thread: &Value, me: Option<&str>) -> Option<Value> {
 /// The server delivers the notes in an answer when it sends it, so an answer lost on the way
 /// (the laptop slept, the network changed, a proxy cut the request) takes its notes with it.
 /// After a failure the next request does not wait; in every answer, a direct thread pending for
-/// the person whose latest note this process has not shown is handed over (`unshown`), once. A
-/// team thread whose notes were lost leaves the inbox and cannot be found again.
+/// the person whose latest note this process has not shown is handed over (`unshown`), once, and
+/// in the first answer after a failure each thread with new notes says earlier ones may be
+/// missing (`after_failure`). A team thread whose notes were lost leaves the inbox and cannot be
+/// found again.
 async fn push_news(
     client: Arc<Client>,
     pushed: Arc<Mutex<Vec<Value>>>,
     shown: Arc<Shown>,
+    failed_since: Arc<AtomicBool>,
     peer: Peer<RoleServer>,
 ) {
     let mut backoff = Duration::from_secs(1);
@@ -616,17 +657,19 @@ async fn push_news(
     loop {
         let started = tokio::time::Instant::now();
         let wait = if failed { 0 } else { CHANNEL_WAIT };
-        let v = match client.inbox(false, wait).await {
+        let mut v = match client.inbox(false, wait).await {
             Ok(v) => v,
             Err(e) => {
                 // The code and message only: never note text or the token.
                 eprintln!("relevo mcp: inbox: {e}; again in {}s", backoff.as_secs());
                 failed = true;
+                lost(&failed_since, &e);
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(MAX_BACKOFF);
                 continue;
             }
         };
+        after_failure(&failed_since, &mut v);
         // Learnt from this answer's `you`: never another request in this loop.
         let me = client.known_you();
         let mut events = 0;
@@ -854,6 +897,41 @@ mod tests {
             json!({ "id": "n_3", "author": "ana", "text": "Or at 6?" }),
         );
         assert!(unshown(&shown, &later, me));
+    }
+
+    #[test]
+    fn the_first_answer_after_a_lost_one_marks_threads_with_new_notes() {
+        let failed = AtomicBool::new(false);
+        let answer = || {
+            json!({ "threads": [
+                { "id": "r_1", "new_notes": [{ "id": "n_2", "author": "ana" }] },
+                { "id": "r_2", "new_notes": [] }
+            ] })
+        };
+        // Nothing failed: nothing marked.
+        let mut v = answer();
+        after_failure(&failed, &mut v);
+        assert!(v["threads"][0].get("after_failure").is_none());
+        // An error the server sent delivered nothing.
+        let api = Error::Api {
+            status: 400,
+            code: "BAD_REQUEST".into(),
+            message: "x".into(),
+            body: Value::Null,
+        };
+        lost(&failed, &api);
+        let mut v = answer();
+        after_failure(&failed, &mut v);
+        assert!(v["threads"][0].get("after_failure").is_none());
+        // No answer: the next one marks its threads with new notes, once.
+        lost(&failed, &Error::Network("cut off".into()));
+        let mut v = answer();
+        after_failure(&failed, &mut v);
+        assert_eq!(v["threads"][0]["after_failure"], true);
+        assert!(v["threads"][1].get("after_failure").is_none());
+        let mut v = answer();
+        after_failure(&failed, &mut v);
+        assert!(v["threads"][0].get("after_failure").is_none());
     }
 
     #[test]
