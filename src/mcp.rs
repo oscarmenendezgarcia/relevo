@@ -294,9 +294,10 @@ fn unshown(shown: &Shown, t: &Value, me: Option<&str>) -> bool {
 }
 
 /// Records in `failed` that an inbox request failed in a way that may have lost its answer: any
-/// way but an error the server sent, which delivered nothing.
+/// way but an error Relevo itself sent, which delivered nothing. A proxy's error page (a 504, say)
+/// may hide an answer the server wrote after the proxy gave up.
 fn lost(failed: &AtomicBool, e: &Error) {
-    if !matches!(e, Error::Api { .. }) {
+    if !matches!(e, Error::Api { code, .. } if code != "HTTP_ERROR") {
         failed.store(true, Ordering::SeqCst);
     }
 }
@@ -923,7 +924,17 @@ mod tests {
         let mut v = answer();
         after_failure(&failed, &mut v);
         assert!(v["threads"][0].get("after_failure").is_none());
-        // No answer: the next one marks its threads with new notes, once.
+        // No answer, or a proxy's: the next one marks its threads with new notes, once.
+        let proxy = Error::Api {
+            status: 504,
+            code: "HTTP_ERROR".into(),
+            message: "x".into(),
+            body: Value::Null,
+        };
+        lost(&failed, &proxy);
+        let mut v = answer();
+        after_failure(&failed, &mut v);
+        assert_eq!(v["threads"][0]["after_failure"], true);
         lost(&failed, &Error::Network("cut off".into()));
         let mut v = answer();
         after_failure(&failed, &mut v);
