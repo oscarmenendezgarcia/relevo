@@ -57,6 +57,8 @@ export interface Thread {
   delivery?: Delivery[];
   /** In the inbox: the other participants who hold the thread now, with their session and since when (servers before it leave it out). */
   held_by?: (SessionRef & { handle: string; since?: string })[];
+  /** Set by the extension, never by the server: handed over again, its latest note never shown in this process. */
+  handed_over?: boolean;
 }
 
 export interface Inbox {

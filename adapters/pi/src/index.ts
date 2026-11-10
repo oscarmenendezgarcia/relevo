@@ -97,6 +97,17 @@ export function relevoExtension(options: Options = {}) {
     const session = newSessionId();
     let sessionCwd = process.cwd();
     let loop: InboxLoop | null = null;
+    /**
+     * The ids of the notes this process has shown the agent: handed over by the loop, listed by
+     * relevo_inbox (new notes, and the latest note of a thread with nothing new) or read with
+     * relevo_thread. The loop hands a pending note over again only if it is not here.
+     */
+    const shown = new Set<string>();
+
+    /** Records the notes of `thread` (`notes`, `new_notes`, `last_note`) as shown to the agent. */
+    function show(thread: Thread): void {
+      for (const n of [...(thread.notes ?? []), ...(thread.new_notes ?? []), thread.last_note]) if (n?.id) shown.add(n.id);
+    }
 
     /**
      * The handle of each token's person (the server's `you`), learnt from every
@@ -233,6 +244,7 @@ export function relevoExtension(options: Options = {}) {
           learn(c, inbox.session?.you);
           return inbox;
         });
+        inbox.threads.forEach(show);
         const text = renderInbox(inbox, overrideWarning(env));
         return result(text, { threads: inbox.threads.map((t) => t.id), more: inbox.more });
       },
@@ -258,6 +270,7 @@ export function relevoExtension(options: Options = {}) {
         const [thread, me] = await call(ctx?.cwd, (c) => Promise.all([c.thread(params.id, signal), whoami(c)]));
         // Read whole: the agent has what the background fetched of it.
         forget(thread.id);
+        show(thread);
         const before = typeof params.before === "string" && params.before ? params.before : undefined;
         return result(renderThread(thread, { before, me }), { thread: thread.id });
       },
@@ -395,6 +408,7 @@ export function relevoExtension(options: Options = {}) {
       const loopClient = client(sessionCwd);
       loop = new InboxLoop({
         client: loopClient,
+        shown,
         wait: options.wait,
         minBackoffMs: options.minBackoffMs,
         maxBackoffMs: options.maxBackoffMs,

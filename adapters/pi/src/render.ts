@@ -156,6 +156,13 @@ export function renderThread(t: Thread, options: ThreadOptions = {}): string {
     `Opened by @${t.from}; participants: ${t.participants.map((p) => `@${p}`).join(", ")}.`,
   ];
   if (t.context) lines.push(`Addressed to your person in context ${t.context}.`);
+  // Set by the background loop: its latest note was never shown in this process.
+  if (t.handed_over) {
+    lines.push(
+      "Handed over again: it is still pending for your person, and its latest note was never shown in this session " +
+        "(an answer that carried it may have been lost on the way, or it was fetched and not shown). Treat that note as new.",
+    );
+  }
   if (isPending(t) && t.kind === "direct") {
     lines.push(
       "Pending for your person: they have not handled it yet. If it is for you and needs nothing, " +

@@ -2,14 +2,24 @@
 // with `wait` stays open; each thread that comes back with new notes is handed
 // to `deliver` once, oldest first. A new session gets, as new, the direct notes
 // still pending for its person (one that reached a session that died before
-// handling it, say), so the first request hands those over at once. Errors back off (doubling up to a minute); a refused token or a
-// malformed request (400) stops it. `pause` ends the waiting request and asks for
-// nothing until `resume`, so notes that land meanwhile stay new on the server.
+// handling it, say), so the first request hands those over at once. In every
+// answer, a direct thread pending for the person whose latest note, by someone
+// else, this process has not shown the agent is handed over too, once: the answer
+// that carried it was lost on the way (the server delivered it all the same), or
+// it was fetched and never shown. Errors back off (doubling up to a minute); a
+// refused token or a malformed request (400) stops it. `pause` ends the waiting
+// request and asks for nothing until `resume`, so notes that land meanwhile stay
+// new on the server.
 
 import { RelevoError, type Client, type Thread } from "./client.ts";
 
 export interface LoopOptions {
   client: Client;
+  /**
+   * The ids of the notes this process has shown the agent: handed over here, listed by
+   * relevo_inbox or read with relevo_thread. The loop adds what it hands over.
+   */
+  shown?: Set<string>;
   /** `you` is the handle of the session's person, when the server says it. */
   deliver: (thread: Thread, you?: string) => void;
   /** Told about each failed request; `fatal` when the loop stops because of it. */
@@ -32,9 +42,12 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-/** When the oldest new note of a thread was written; threads hand over oldest first by it. */
+/**
+ * When the oldest new note of a thread was written (its latest note, with nothing new); threads
+ * hand over oldest first by it.
+ */
 function oldestNote(t: Thread): string {
-  return t.new_notes?.[0]?.created_at ?? "";
+  return t.new_notes?.[0]?.created_at ?? t.last_note?.created_at ?? "";
 }
 
 /**
@@ -46,12 +59,25 @@ export function oldestFirst(threads: Thread[]): Thread[] {
   return [...threads].reverse().sort((a, b) => (oldestNote(a) < oldestNote(b) ? -1 : oldestNote(a) > oldestNote(b) ? 1 : 0));
 }
 
+/**
+ * `t`, from an inbox answer, to hand over again when it is a direct open thread pending for the
+ * person with nothing new, whose latest note (`last_note`), by someone else, is not in `shown`:
+ * as it was, with that note as its new note and `handed_over` set. Otherwise null. Once shown, a
+ * note the agent leaves alone (not for it) stays pending without coming back.
+ */
+export function handOverAgain(t: Thread, shown: Set<string>, me?: string): Thread | null {
+  const last = t.last_note;
+  if (t.kind !== "direct" || t.status !== "open" || t.pending !== true || !last?.id) return null;
+  if ((t.new_notes ?? []).length || last.author === me || shown.has(last.id)) return null;
+  return { ...t, new_notes: [last], handed_over: true };
+}
+
 export class InboxLoop {
   options: LoopOptions;
   controller = new AbortController();
   running: Promise<void> | null = null;
-  /** Latest note handed over per thread, so no note is delivered twice. */
-  delivered = new Map<string, string>();
+  /** The notes shown to the agent in this process, so none is handed over twice. */
+  shown: Set<string>;
   paused = false;
   /** Ends the current request or back-off when paused; a new one per pause. */
   #pause = new AbortController();
@@ -59,6 +85,7 @@ export class InboxLoop {
 
   constructor(options: LoopOptions) {
     this.options = options;
+    this.shown = options.shown ?? new Set();
   }
 
   start(): void {
@@ -105,16 +132,20 @@ export class InboxLoop {
         let handed = 0;
         // Handed over even if paused meanwhile: these notes have reached this session on the
         // server now. Oldest first: the first one handed over starts the agent's turn.
-        for (const thread of oldestFirst(inbox.threads)) {
+        const you = inbox.session?.you;
+        for (const listed of oldestFirst(inbox.threads)) {
           if (stopped.aborted) return;
-          const notes = thread.new_notes ?? [];
-          if (!notes.length) continue; // Only pending: it reached this session before.
-          const last = notes[notes.length - 1].id;
-          if (this.delivered.get(thread.id) === last) continue;
-          this.delivered.set(thread.id, last);
+          const notes = listed.new_notes ?? [];
+          // Only pending: it reached this session before, and is handed over again only if the
+          // agent was never shown its latest note.
+          const thread = notes.length ? listed : handOverAgain(listed, this.shown, you);
+          if (!thread) continue;
+          const news = thread.new_notes ?? [];
+          if (this.shown.has(news[news.length - 1].id)) continue;
+          for (const n of news) this.shown.add(n.id);
           handed++;
           try {
-            this.options.deliver(thread, inbox.session?.you);
+            this.options.deliver(thread, you);
           } catch (err) {
             this.options.onError?.(err, false);
           }
