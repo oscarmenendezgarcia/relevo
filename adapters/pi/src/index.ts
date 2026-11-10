@@ -227,7 +227,7 @@ export function relevoExtension(options: Options = {}) {
         "then the team list (handle, about, live contexts). Look here before opening a new thread: an answer may already be waiting. " +
         "Reading it marks the notes shown as delivered to this session. Without `all` it already shows everything new or waiting for this session; " +
         "`all: true` adds the threads held by your person's other sessions or addressed to their other contexts.",
-      promptSnippet: "Read the Relevo inbox: whom you speak for, new notes, threads waiting for a reply, the team",
+      promptSnippet: "Read the Relevo inbox: whom you speak for, new notes, threads pending for your person, the team",
       parameters: {
         type: "object",
         properties: {
