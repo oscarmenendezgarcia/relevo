@@ -6,8 +6,13 @@
 // answer, a direct thread pending for the person whose latest note, by someone
 // else, this process has not shown the agent is handed over too, once: the answer
 // that carried it was lost on the way (the server delivered it all the same), or
-// it was fetched and never shown. Errors back off (doubling up to a minute); a
-// refused token or a malformed request (400) stops it. `pause` ends the waiting
+// it was fetched and never shown. Since only that latest note comes back, it says
+// earlier ones may be missing; so does each thread with new notes in the first
+// answer after a request that may have lost its answer (a note written after the
+// loss comes without the lost ones). After a failed or paused request the next
+// one does not wait: a lost note is no longer new and would not end a wait.
+// Errors back off (doubling up to a minute); a refused token or a malformed
+// request (400) stops it. `pause` ends the waiting
 // request and asks for nothing until `resume`, so notes that land meanwhile stay
 // new on the server.
 
@@ -119,6 +124,12 @@ export class InboxLoop {
     const { client, wait = 55, minBackoffMs = 1000, maxBackoffMs = 60_000 } = this.options;
     const stopped = this.controller.signal;
     let backoff = minBackoffMs;
+    // A request failed or was ended by a pause since the last answer: the next one does not wait.
+    let failed = false;
+    // The last failure may have lost an answer (anything but an error Relevo itself sent): the
+    // first answer after it marks its threads with new notes. A pause is not counted: ending a
+    // waiting request loses an answer only if the server wrote it in that very moment.
+    let lost = false;
     while (!stopped.aborted) {
       if (this.paused) {
         await new Promise<void>((r) => (this.#resumed = r));
@@ -127,8 +138,10 @@ export class InboxLoop {
       const signal = AbortSignal.any([stopped, this.#pause.signal]);
       const started = Date.now();
       try {
-        const inbox = await client.inbox({ wait }, signal);
+        const inbox = await client.inbox({ wait: failed ? 0 : wait }, signal);
+        const afterLoss = lost;
         backoff = minBackoffMs;
+        failed = lost = false;
         let handed = 0;
         // Handed over even if paused meanwhile: these notes have reached this session on the
         // server now. Oldest first: the first one handed over starts the agent's turn.
@@ -138,7 +151,7 @@ export class InboxLoop {
           const notes = listed.new_notes ?? [];
           // Only pending: it reached this session before, and is handed over again only if the
           // agent was never shown its latest note.
-          const thread = notes.length ? listed : handOverAgain(listed, this.shown, you);
+          const thread = notes.length ? (afterLoss ? { ...listed, after_failure: true } : listed) : handOverAgain(listed, this.shown, you);
           if (!thread) continue;
           const news = thread.new_notes ?? [];
           if (this.shown.has(news[news.length - 1].id)) continue;
@@ -154,7 +167,9 @@ export class InboxLoop {
         if (!handed && Date.now() - started < minBackoffMs) await sleep(minBackoffMs, signal);
       } catch (err) {
         if (stopped.aborted) return;
+        failed = true;
         if (signal.aborted) continue; // Paused: not an error.
+        if (!(err instanceof RelevoError && err.code !== "HTTP")) lost = true;
         // A refused token, or a request the server calls malformed: asking again cannot help.
         if (err instanceof RelevoError && (err.status === 401 || err.status === 400)) {
           this.options.onError?.(err, true);

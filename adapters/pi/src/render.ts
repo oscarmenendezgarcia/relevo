@@ -156,11 +156,20 @@ export function renderThread(t: Thread, options: ThreadOptions = {}): string {
     `Opened by @${t.from}; participants: ${t.participants.map((p) => `@${p}`).join(", ")}.`,
   ];
   if (t.context) lines.push(`Addressed to your person in context ${t.context}.`);
-  // Set by the background loop: its latest note was never shown in this process.
+  // Set by the background loop: its latest note was never shown in this process. The answer that
+  // lost it may have carried earlier notes too, and only the latest one comes back.
   if (t.handed_over) {
     lines.push(
       "Handed over again: it is still pending for your person, and its latest note was never shown in this session " +
-        "(an answer that carried it may have been lost on the way, or it was fetched and not shown). Treat that note as new.",
+        "(an answer that carried it may have been lost on the way, or it was fetched and not shown). Treat that note as new. " +
+        `Earlier notes of this thread may not have reached you either: read it whole with relevo_thread { id: "${t.id}" } before acting.`,
+    );
+  } else if (t.after_failure) {
+    // Set by the background loop: the first answer after a failed request, whose lost answer may
+    // have carried notes of this thread that came before these.
+    lines.push(
+      "A request for news failed just before this answer, and its answer may have carried earlier notes of this thread " +
+        `that never reached you: read it whole with relevo_thread { id: "${t.id}" } before acting.`,
     );
   }
   if (isPending(t) && t.kind === "direct") {

@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, afterEach, before, test } from "node:test";
 import type { Note, Thread } from "../src/client.ts";
-import { handOverAgain } from "../src/loop.ts";
+import { InboxLoop, handOverAgain } from "../src/loop.ts";
 import { renderArrival } from "../src/render.ts";
 import { loadExtension, until } from "./mock-pi.ts";
 import { api, startServer, type TestServer } from "./server.ts";
@@ -124,6 +124,107 @@ test("an inbox answer lost on the way is handed over on the next answer, once", 
   }
 });
 
+test("after a lost answer the next request does not wait, so the note comes at once", async () => {
+  const proxy = await lossyProxy(server.url);
+  // A wait far longer than the test may take: a next request that waited would time it out.
+  const ext = loadExtension({
+    env: { RELEVO_URL: proxy.url, RELEVO_TOKEN: oscar, RELEVO_CONTEXT: "" },
+    home,
+    wait: 30,
+    minBackoffMs: 100,
+  });
+  await ext.emit("session_start", { reason: "startup" }, ext.ctx(home, "tui"));
+  try {
+    await sleep(300);
+    proxy.drop = true;
+    const opened = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Lost while waiting: is staging up?" });
+    await until(() => proxy.dropped === 1);
+    const lostAt = Date.now();
+    await until(() => ext.seen.length === 1, 5000);
+    assert.ok(Date.now() - lostAt < 5000);
+    assert.deepEqual(ext.seen[0].details, { thread: opened.thread, from: "ana", kind: "direct" });
+    assert.match(ext.seen[0].content, /^Handed over again/m);
+  } finally {
+    await ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, "tui"));
+    proxy.server.closeAllConnections();
+    proxy.server.close();
+  }
+});
+
+test("only the latest note of a lost answer comes back, saying earlier ones may be missing", async () => {
+  const proxy = await lossyProxy(server.url);
+  const ext = loadExtension({
+    env: { RELEVO_URL: proxy.url, RELEVO_TOKEN: oscar, RELEVO_CONTEXT: "" },
+    home,
+    wait: 1,
+    minBackoffMs: 100,
+  });
+  await ext.emit("session_start", { reason: "startup" }, ext.ctx(home, "tui"));
+  try {
+    await sleep(300);
+    await ext.session.userPrompt(); // Busy: both notes land before the next request.
+    const opened = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Two lost: deploy at 5?" });
+    await api(server, ana, "POST", "/api/send", { thread: opened.thread, text: "Two lost: if not, at 6." });
+    proxy.drop = true;
+    await ext.session.finishTurn();
+    await until(() => proxy.dropped === 1);
+    await until(() => ext.seen.length === 1);
+    const [message] = ext.seen;
+    assert.match(message.content, /^Handed over again/m);
+    assert.match(message.content, /Two lost: if not, at 6\./);
+    assert.doesNotMatch(message.content, /\nTwo lost: deploy at 5\?\n/); // The title shows its first line only.
+    assert.ok(
+      message.content.includes(
+        `Earlier notes of this thread may not have reached you either: read it whole with relevo_thread { id: "${opened.thread}" } before acting.`,
+      ),
+      message.content,
+    );
+  } finally {
+    await ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, "tui"));
+    proxy.server.closeAllConnections();
+    proxy.server.close();
+  }
+});
+
+test("a note written after a lost answer comes as new, saying earlier ones may be missing, once", async () => {
+  const proxy = await lossyProxy(server.url);
+  // A back-off long enough for ana to write again before the next request.
+  const ext = loadExtension({
+    env: { RELEVO_URL: proxy.url, RELEVO_TOKEN: oscar, RELEVO_CONTEXT: "" },
+    home,
+    wait: 1,
+    minBackoffMs: 1500,
+  });
+  await ext.emit("session_start", { reason: "startup" }, ext.ctx(home, "tui"));
+  try {
+    await sleep(300);
+    proxy.drop = true;
+    const opened = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Lost first: can you review PR 12?" });
+    await until(() => proxy.dropped === 1);
+    await api(server, ana, "POST", "/api/send", { thread: opened.thread, text: "After the loss: so, can you?" });
+    await until(() => ext.seen.length === 1, 5000);
+    const [message] = ext.seen;
+    assert.match(message.content, /New notes \(1\):[\s\S]*After the loss: so, can you\?/);
+    assert.doesNotMatch(message.content, /\nLost first: can you review PR 12\?\n/); // The title shows its first line only.
+    assert.doesNotMatch(message.content, /Handed over again/);
+    assert.ok(
+      message.content.includes(
+        "A request for news failed just before this answer, and its answer may have carried earlier notes of this thread " +
+          `that never reached you: read it whole with relevo_thread { id: "${opened.thread}" } before acting.`,
+      ),
+      message.content,
+    );
+    // The next answer is no longer the first after a failure.
+    await api(server, ana, "POST", "/api/send", { thread: opened.thread, text: "Ping." });
+    await until(() => ext.seen.length === 2, 5000);
+    assert.doesNotMatch(ext.seen[1].content, /A request for news failed/);
+  } finally {
+    await ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, "tui"));
+    proxy.server.closeAllConnections();
+    proxy.server.close();
+  }
+});
+
 test("a thread the agent left alone is not handed over again in the same process", async () => {
   const ext = loadExtension({ env: { RELEVO_URL: server.url, RELEVO_TOKEN: oscar, RELEVO_CONTEXT: "" }, home, wait: 1 });
   await ext.emit("session_start", { reason: "startup" }, ext.ctx(home, "tui"));
@@ -204,7 +305,76 @@ test("only a pending open direct thread with nothing new, whose latest note by s
   assert.ok(handOverAgain({ ...t, last_note: note("n_cccccccccccc", "ana", "Or at 6?") }, shown, "oscar"));
 
   const out = renderArrival(again!, "oscar");
-  assert.match(out, /^Handed over again: it is still pending for your person[^\n]*Treat that note as new\.$/m);
+  assert.match(out, /^Handed over again: it is still pending for your person[^\n]*Treat that note as new\. Earlier notes of this thread may not have reached you either: read it whole with relevo_thread \{ id: "r_aaaaaaaaaaaa" \} before acting\.$/m);
+  assert.doesNotMatch(out, /A request for news failed/);
   assert.match(out, /New notes \(1\):/);
   assert.doesNotMatch(renderArrival({ ...t, new_notes: [t.last_note!] }, "oscar"), /Handed over again/);
+});
+
+test("after a failed or paused request the next one does not wait; an error Relevo sent loses nothing", async () => {
+  const waits: number[] = [];
+  const answers: (() => Promise<any>)[] = [];
+  const t: Thread = {
+    id: "r_aaaaaaaaaaaa",
+    kind: "direct",
+    title: "T",
+    from: "ana",
+    participants: ["ana", "oscar"],
+    status: "open",
+    pending: true,
+    context: null,
+    claimed: null,
+    new_notes: [note("n_aaaaaaaaaaaa", "ana")],
+  };
+  let n = 0;
+  const delivered: Thread[] = [];
+  const loop = new InboxLoop({
+    client: {
+      inbox: (o: { wait?: number }, signal: AbortSignal) => {
+        waits.push(o.wait ?? -1);
+        const next = answers.shift();
+        if (next) return next();
+        // Nothing to say: wait until ended.
+        return new Promise((_, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
+      },
+    } as any,
+    deliver: (thread) => delivered.push(thread),
+    wait: 55,
+    minBackoffMs: 10,
+  });
+  const fresh = () => ({ ...t, new_notes: [note(`n_${String(++n).padStart(12, "0")}`, "ana")] });
+  answers.push(
+    () => Promise.reject(new TypeError("fetch failed")), // Lost on the way.
+    () => Promise.resolve({ threads: [fresh()] }), // Without waiting; marked.
+    () => Promise.resolve({ threads: [fresh()] }), // Waiting again; not marked.
+  );
+  loop.start();
+  try {
+    await until(() => delivered.length === 2 && waits.length === 4);
+    assert.deepEqual(waits, [55, 0, 55, 55]);
+    assert.equal(delivered[0].after_failure, true);
+    assert.equal(delivered[1].after_failure, undefined);
+
+    // A pause ends the waiting request: the next one does not wait, and marks nothing.
+    loop.pause();
+    answers.push(() => Promise.resolve({ threads: [fresh()] }));
+    loop.resume();
+    await until(() => delivered.length === 3);
+    assert.equal(waits[4], 0);
+    assert.equal(delivered[2].after_failure, undefined);
+
+    // An error Relevo itself sent delivered nothing: not waiting, but nothing marked either.
+    loop.pause();
+    const { RelevoError } = await import("../src/client.ts");
+    answers.push(
+      () => Promise.reject(new RelevoError("RATE_LIMITED", "slow down", 429)),
+      () => Promise.resolve({ threads: [fresh()] }),
+    );
+    loop.resume();
+    await until(() => delivered.length === 4);
+    assert.deepEqual(waits.slice(5, 8), [55, 0, 0]);
+    assert.equal(delivered[3].after_failure, undefined);
+  } finally {
+    await loop.stop();
+  }
 });

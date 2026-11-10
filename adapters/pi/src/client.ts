@@ -59,6 +59,11 @@ export interface Thread {
   held_by?: (SessionRef & { handle: string; since?: string })[];
   /** Set by the extension, never by the server: handed over again, its latest note never shown in this process. */
   handed_over?: boolean;
+  /**
+   * Set by the extension, never by the server: in the first answer after a request that may have lost its
+   * answer, so notes of the thread before these may never have reached this session.
+   */
+  after_failure?: boolean;
 }
 
 export interface Inbox {
