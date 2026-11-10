@@ -204,7 +204,7 @@ EOF2
     cmp -s "$binary" "$bin" || fail "new binary not installed"
     # The probe and the backup only read it: the same bytes, no -wal or -shm left behind.
     [ "$(sha256sum <"$db")" = "$before" ] || fail "install.sh wrote the database"
-    [ ! -e "$db-wal" ] && [ ! -e "$db-shm" ] || fail "install.sh left -wal or -shm files"
+    if [ -e "$db-wal" ] || [ -e "$db-shm" ]; then fail "install.sh left -wal or -shm files"; fi
     [ "$(version "$db")" = 5 ] || fail "install.sh migrated the database"
     copies=$(find "$data/backups" -name 'before-upgrade-????????-??????.db')
     [ "$(printf '%s\n' "$copies" | grep -c .)" = 1 ] || fail "backups: $copies"
