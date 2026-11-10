@@ -118,8 +118,6 @@ struct ThreadOut {
     from: String,
     participants: Vec<String>,
     status: String,
-    /// The same as `pending`, for older clients.
-    waiting_for_you: bool,
     /// Pending for the person: `direct`, `open`, with a note by someone else they have not
     /// handled.
     pending: bool,
@@ -577,7 +575,6 @@ fn thread_out(
         from: row.from.clone(),
         participants: participants(conn, &row.id)?,
         status: row.status.clone(),
-        waiting_for_you: row.waiting,
         pending: row.waiting,
         context: row.context.clone(),
         claimed: claim(row.claimed_by, session),

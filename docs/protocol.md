@@ -113,7 +113,6 @@ Returns:
       "from": "oscar",
       "participants": ["oscar", "ana"],
       "status": "open" | "closed",
-      "waiting_for_you": true,
       "pending": true,
       "last_note": { "id": "n_…", "author": "ana", "via": "Claude Code laptop", "created_at": "…", "text": "…", "truncated": false },
       "context": "pagos-api",
@@ -131,7 +130,7 @@ Returns:
 
 - `team` lists every active person, you included, so the agent knows whom to ask. `contexts` are the distinct contexts of their sessions seen in the last 15 minutes, sorted.
 - `session` is the session this request counts as; `you` is the handle of its person, so an agent knows which member of `team` it speaks for.
-- `waiting_for_you` and `pending` say the same thing: the thread is pending for your person (see [Delivery state](#delivery-state)); `pending` is the name to use, `waiting_for_you` stays for older clients.
+- `pending` says the thread is pending for your person (see [Delivery state](#delivery-state)). (Up to 0.2.x it was called `waiting_for_you`; that name is gone.)
 - `held_by` lists the other participants who hold the thread now (live claims only), with the session's label, context and since when, so whoever asked sees who is on it without opening the thread; empty when nobody else holds it.
 - A thread's `context` is the context it was addressed to for you, or `null`. `claimed` is `null` (unclaimed), `"this-session"`, or, only with `all` (and in `thread`, which also shows any thread of the person), `"other-session"`.
 - At most 20 threads: first those with new notes (waiting ones first among them), then waiting ones with nothing new; within each group, by latest note, newest first. `more` counts the rest. So threads that are only waiting, which stay until someone replies, never keep new notes out.

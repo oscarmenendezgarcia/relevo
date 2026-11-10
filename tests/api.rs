@@ -427,7 +427,9 @@ async fn direct_thread_stays_waiting_until_you_reply() {
     assert_eq!(th["from"], "ana");
     assert_eq!(th["participants"], json!(["ana", "bob"]));
     assert_eq!(th["status"], "open");
-    assert_eq!(th["waiting_for_you"], true);
+    assert_eq!(th["pending"], true);
+    // `pending` alone: the 0.2.x name `waiting_for_you` is gone.
+    assert!(th.get("waiting_for_you").is_none(), "{th}");
     let note = &th["new_notes"][0];
     assert_eq!(note["author"], "ana");
     assert_eq!(note["via"], "laptop");
@@ -439,7 +441,7 @@ async fn direct_thread_stays_waiting_until_you_reply() {
     // Delivered, but still waiting.
     let inbox = t.inbox("bob").await;
     assert_eq!(thread_ids(&inbox), vec![id.to_string()]);
-    assert_eq!(inbox["threads"][0]["waiting_for_you"], true);
+    assert_eq!(inbox["threads"][0]["pending"], true);
     assert_eq!(inbox["threads"][0]["new_notes"], json!([]));
 
     t.ok("bob", json!({ "thread": id, "text": "Yes, since Monday." }))
@@ -447,7 +449,7 @@ async fn direct_thread_stays_waiting_until_you_reply() {
     assert!(thread_ids(&t.inbox("bob").await).is_empty());
 
     let inbox = t.inbox("ana").await;
-    assert_eq!(inbox["threads"][0]["waiting_for_you"], true);
+    assert_eq!(inbox["threads"][0]["pending"], true);
     assert_eq!(
         inbox["threads"][0]["new_notes"][0]["text"],
         "Yes, since Monday."
@@ -460,7 +462,7 @@ async fn writers_own_notes_are_delivered_at_once() {
     let id = t.ok("ana", json!({ "to": ["bob"], "text": "hello" })).await;
     assert!(thread_ids(&t.inbox("ana").await).is_empty());
     let th = t.thread("ana", &id).await;
-    assert_eq!(th["waiting_for_you"], false);
+    assert_eq!(th["pending"], false);
     // Delivery tells others only about notes by someone else: Ana has none yet.
     let delivery = th["delivery"].as_array().unwrap();
     assert_eq!(
@@ -491,7 +493,7 @@ async fn writing_does_not_skip_notes_that_never_reached_the_writer() {
         .map(|n| n["text"].as_str().unwrap())
         .collect();
     assert_eq!(texts, vec!["two", "three"]);
-    assert_eq!(inbox["threads"][0]["waiting_for_you"], true);
+    assert_eq!(inbox["threads"][0]["pending"], true);
 }
 
 #[tokio::test]
@@ -527,7 +529,7 @@ async fn thread_shows_whole_history_and_delivery() {
     let th = t.thread("bob", &id).await;
     assert_eq!(th["notes"].as_array().unwrap().len(), 1);
     assert!(th.get("new_notes").is_none());
-    assert_eq!(th["waiting_for_you"], true);
+    assert_eq!(th["pending"], true);
     assert_eq!(th["delivery"][1]["delivered_at"], "2026-11-08T10:46:00Z");
     // Delivered by `thread`: no longer new in the inbox (but still waiting).
     assert_eq!(t.inbox("bob").await["threads"][0]["new_notes"], json!([]));
@@ -568,7 +570,7 @@ async fn any_participant_closes_a_direct_thread_with_a_last_note() {
     let inbox = t.inbox("ana").await;
     let th = &inbox["threads"][0];
     assert_eq!(th["status"], "closed");
-    assert_eq!(th["waiting_for_you"], false);
+    assert_eq!(th["pending"], false);
     assert_eq!(th["new_notes"][0]["text"], "done, closing");
     assert!(thread_ids(&t.inbox("ana").await).is_empty());
 }
@@ -657,7 +659,7 @@ async fn several_recipients_and_duplicates() {
     t.inbox("bob").await;
     // Bob replies; Carl's latest note is not his, so it waits for Carl, not for Bob.
     t.ok("bob", json!({ "thread": id, "text": "mine" })).await;
-    assert_eq!(t.inbox("carl").await["threads"][0]["waiting_for_you"], true);
+    assert_eq!(t.inbox("carl").await["threads"][0]["pending"], true);
     assert!(thread_ids(&t.inbox("bob").await).is_empty());
 }
 
@@ -678,18 +680,18 @@ async fn team_thread_leaves_inboxes_once_delivered_and_never_waits() {
     let th = t.thread("ana", &id).await;
     assert_eq!(th["kind"], "team");
     assert_eq!(th["participants"], json!(["ana", "bob", "carl"]));
-    assert_eq!(th["waiting_for_you"], false);
+    assert_eq!(th["pending"], false);
     assert!(thread_ids(&t.inbox("ana").await).is_empty());
 
     let inbox = t.inbox("bob").await;
     assert_eq!(inbox["threads"][0]["id"], id);
-    assert_eq!(inbox["threads"][0]["waiting_for_you"], false);
+    assert_eq!(inbox["threads"][0]["pending"], false);
     assert!(thread_ids(&t.inbox("bob").await).is_empty());
 
     t.ok("carl", json!({ "thread": id, "text": "I do." })).await;
     let inbox = t.inbox("ana").await;
     assert_eq!(inbox["threads"][0]["new_notes"][0]["text"], "I do.");
-    assert_eq!(inbox["threads"][0]["waiting_for_you"], false);
+    assert_eq!(inbox["threads"][0]["pending"], false);
     assert_eq!(thread_ids(&t.inbox("bob").await), vec![id.clone()]);
     assert!(thread_ids(&t.inbox("ana").await).is_empty());
 }
@@ -1331,7 +1333,7 @@ async fn waiting_threads_with_nothing_new_never_hide_new_notes() {
     assert_eq!(inbox["more"], 2);
     // Threads with new notes come first, newest first, then the waiting ones.
     assert_eq!(shown[..2], [closed, team_q]);
-    assert_eq!(inbox["threads"][2]["waiting_for_you"], true);
+    assert_eq!(inbox["threads"][2]["pending"], true);
     assert_eq!(inbox["threads"][2]["new_notes"], json!([]));
 }
 
@@ -1354,7 +1356,7 @@ async fn inbox_matches(t: &Team, who: &str, model: &mut [Expected]) {
     assert_eq!(shown, want);
     assert_eq!(inbox["more"], expected.len().saturating_sub(20));
     for (th, e) in inbox["threads"].as_array().unwrap().iter().zip(&expected) {
-        assert_eq!(th["waiting_for_you"], e.waiting, "{}", e.id);
+        assert_eq!(th["pending"], e.waiting, "{}", e.id);
         assert_eq!(th["new_notes"].as_array().unwrap().is_empty(), !e.new);
     }
     for e in model.iter_mut().filter(|e| shown.contains(&e.id)) {
@@ -1747,7 +1749,7 @@ async fn an_unaddressed_note_shows_in_every_session_until_one_answers() {
     let th = &v["threads"][0];
     assert_eq!(th["context"], Value::Null);
     assert_eq!(th["claimed"], Value::Null);
-    assert_eq!(th["waiting_for_you"], true);
+    assert_eq!(th["pending"], true);
     // The frontend session still gets it as new: pagos reading it did not deliver it there.
     assert_eq!(
         new_texts(&front.inbox().await, &id),
@@ -2500,7 +2502,7 @@ async fn the_answer_to_a_question_reaches_the_askers_next_session() {
         .iter()
         .find(|th| th["id"] == id)
         .unwrap();
-    assert_eq!(direct["waiting_for_you"], true);
+    assert_eq!(direct["pending"], true);
     // Unclaimed, it shows in his other sessions too, in any context, waiting for his reply. The
     // answer reached B, but Oscar has not handled it, so they start before it: it is new there.
     for (sid, context) in [("term-cccc", "frontend"), ("term-dddd", "")] {
@@ -2552,7 +2554,7 @@ async fn a_new_session_sees_the_answer_another_session_fetched_as_last_note() {
     );
     let v = b.inbox().await;
     assert_eq!(new_texts(&v, &id), Some(vec![]), "{v}");
-    assert_eq!(v["threads"][0]["waiting_for_you"], true, "{v}");
+    assert_eq!(v["threads"][0]["pending"], true, "{v}");
     assert_eq!(
         last_note(&v, &id),
         ("ana".into(), "Yes, since Monday.".into(), false)
@@ -3292,7 +3294,6 @@ async fn session_inbox_matches(t: &Team, s: usize, all: bool, model: &mut [Model
     assert_eq!(thread_ids(&inbox), want, "session {id} all={all}");
     assert_eq!(inbox["more"], expected.len().saturating_sub(20), "{id}");
     for (shown, e) in inbox["threads"].as_array().unwrap().iter().zip(&expected) {
-        assert_eq!(shown["waiting_for_you"], e.1, "{}", e.3);
         assert_eq!(shown["pending"], e.1, "{}", e.3);
         assert_eq!(
             shown["new_notes"].as_array().unwrap().is_empty(),
@@ -3539,7 +3540,7 @@ async fn wait_times_out_with_the_usual_answer_and_waiting_threads_do_not_count()
     let v = t.agent("bob", "", "").inbox_at("/api/inbox?wait=1").await;
     assert!(started.elapsed().as_millis() >= 1000);
     assert_eq!(thread_ids(&v), vec![id]);
-    assert_eq!(v["threads"][0]["waiting_for_you"], true);
+    assert_eq!(v["threads"][0]["pending"], true);
     assert_eq!(v["threads"][0]["new_notes"], json!([]));
 }
 
@@ -3791,7 +3792,6 @@ async fn a_note_fetched_by_a_session_that_ends_is_new_for_the_persons_next_sessi
     );
     let th = listed(&v, &id).unwrap();
     assert_eq!(th["pending"], true);
-    assert_eq!(th["waiting_for_you"], true);
     // Once: it reached this session, so it is not new for it again, though still pending.
     let v = next.inbox().await;
     assert_eq!(new_texts(&v, &id), Some(vec![]));
@@ -3888,7 +3888,6 @@ async fn done_handles_the_thread_without_a_note() {
     );
     let th = pi.thread(&id).await;
     assert_eq!(th["pending"], false);
-    assert_eq!(th["waiting_for_you"], false);
     // A new note by Ana makes it pending again.
     t.ok("ana", json!({ "thread": id, "text": "And restarted." }))
         .await;

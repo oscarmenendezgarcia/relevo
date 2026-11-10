@@ -615,7 +615,7 @@ fn s(v: &Value) -> &str {
 fn waits_quietly(t: &Value) -> bool {
     s(&t["kind"]) == "direct"
         && s(&t["status"]) == "open"
-        && t["waiting_for_you"] == true
+        && render::pending(t)
         && t["new_notes"].as_array().is_none_or(Vec::is_empty)
 }
 
@@ -683,7 +683,7 @@ mod tests {
     fn channel_events_name_the_latest_other_author() {
         let t = json!({
             "id": "r_1", "kind": "direct", "title": "T", "from": "oscar",
-            "participants": ["oscar", "ana"], "status": "open", "waiting_for_you": true,
+            "participants": ["oscar", "ana"], "status": "open", "pending": true,
             "context": null, "claimed": null,
             "new_notes": [
                 { "id": "n_1", "author": "ana", "via": "x", "created_at": "t", "text": "hi", "truncated": false },
@@ -762,7 +762,7 @@ mod tests {
     fn channel_events_offer_done_and_pending_only_while_pending_and_open() {
         let t = json!({
             "id": "r_1", "kind": "direct", "title": "T", "from": "ana",
-            "participants": ["ana", "oscar"], "status": "open", "waiting_for_you": true,
+            "participants": ["ana", "oscar"], "status": "open",
             "pending": true, "context": null, "claimed": null,
             "new_notes": [
                 { "id": "n_1", "author": "ana", "via": "x", "created_at": "t", "text": "Thanks!", "truncated": false }
@@ -786,15 +786,9 @@ mod tests {
         for wrong in ["leave it pending", "done=true", "claim=true"] {
             assert!(!out.contains(wrong), "{wrong}: {out}");
         }
-        // A server that does not say `pending`: `waiting_for_you` decides.
-        let mut old = t.clone();
-        old.as_object_mut().unwrap().remove("pending");
-        old["waiting_for_you"] = false.into();
-        assert!(!content(&old).contains("done=true"));
         // Closed with a last note: to read; writing in it, `done` included, would fail.
         let mut closed = handled.clone();
         closed["status"] = "closed".into();
-        closed["waiting_for_you"] = false.into();
         let out = content(&closed);
         assert!(
             out.contains("This thread is closed: it needs nothing more and cannot be answered"),
