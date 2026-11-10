@@ -255,9 +255,14 @@ fn open_with(path: &str, migrate: bool) -> Result<Connection> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     match layout(&tx, path)? {
         layout if refuses(layout) => bail!(no_migration(path)),
-        Layout::Migrates => tx
-            .execute_batch(MIGRATE_FROM_5)
-            .with_context(|| format!("migrating database {path} from layout 5"))?,
+        Layout::Migrates => {
+            tx.execute_batch(MIGRATE_FROM_5)
+                .with_context(|| format!("migrating database {path} from layout 5"))?;
+            tracing::info!(
+                db = path,
+                "migrated the database from layout 5 to {SCHEMA_VERSION}"
+            );
+        }
         Layout::New | Layout::Current => {}
     }
     tx.execute_batch(SCHEMA)?;

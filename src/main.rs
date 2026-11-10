@@ -405,6 +405,13 @@ async fn main() -> Result<()> {
     }
     // Only the server migrates an older layout: an admin command refuses it.
     let conn = if matches!(cli.command, Command::Serve { .. }) {
+        // Logging starts before the database opens, so a migration is logged.
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "info".into()),
+            )
+            .init();
         db::open_migrating(&db_file)?
     } else {
         db::open(&db_file)?
@@ -419,12 +426,6 @@ async fn main() -> Result<()> {
             tls_cert,
             tls_key,
         } => {
-            tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| "info".into()),
-                )
-                .init();
             let tls = server_tls(
                 &db_file,
                 tls,
