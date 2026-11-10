@@ -26,25 +26,36 @@ enum Command {
         #[arg(long, env = "RELEVO_TEAM_QUESTIONS_PER_DAY", default_value_t = 5)]
         team_questions_per_day: u32,
         /// Speak HTTPS with a certificate of its own, kept in <db>.tls/ (self-signed, made on
-        /// the first start; its fingerprint is printed at every start).
-        #[arg(long, env = "RELEVO_TLS", conflicts_with = "tls_cert")]
+        /// the first start; its fingerprint is printed at every start). Not with --tls-cert.
+        // Checked in `check_tls`, not by clap, which counts RELEVO_TLS=false as given.
+        #[arg(long, env = "RELEVO_TLS")]
         tls: bool,
         /// A host name or IP address the certificate of --tls is for (repeatable, or
         /// comma-separated in RELEVO_TLS_NAME). Names the stored certificate lacks make a new
-        /// one. [default: localhost, loopback, this machine's host name and addresses]
+        /// one. Only with --tls. [default: localhost, loopback, this machine's host name and
+        /// addresses]
         #[arg(
             long,
             value_name = "NAME",
             env = "RELEVO_TLS_NAME",
-            value_delimiter = ',',
-            requires = "tls"
+            value_delimiter = ','
         )]
         tls_name: Vec<String>,
         /// Speak HTTPS with this certificate (PEM, the chain), one you already have.
-        #[arg(long, value_name = "PEM", requires = "tls_key")]
+        #[arg(
+            long,
+            value_name = "PEM",
+            env = "RELEVO_TLS_CERT",
+            requires = "tls_key"
+        )]
         tls_cert: Option<PathBuf>,
         /// The private key (PEM) of --tls-cert.
-        #[arg(long, value_name = "PEM", requires = "tls_cert")]
+        #[arg(
+            long,
+            value_name = "PEM",
+            env = "RELEVO_TLS_KEY",
+            requires = "tls_cert"
+        )]
         tls_key: Option<PathBuf>,
     },
     /// Print the SHA-256 fingerprint of the certificate `serve --tls` uses, for teammates to
@@ -263,6 +274,24 @@ async fn connect(url: &str, token: Option<String>, fingerprint: Option<String>) 
     Ok(())
 }
 
+/// `--tls` (a certificate of its own) and `--tls-cert` (one you have) exclude each other, and
+/// `--tls-name` is for the first only. Checked here rather than by clap, which takes
+/// `RELEVO_TLS=false` from the environment as `--tls` given.
+fn check_tls(tls: bool, names: &[String], cert: Option<&Path>) -> Result<()> {
+    if tls && cert.is_some() {
+        bail!(
+            "--tls (RELEVO_TLS) makes a certificate of its own, and --tls-cert (RELEVO_TLS_CERT) \
+             uses yours: give one of them, not both"
+        );
+    }
+    if !tls && !names.is_empty() {
+        bail!(
+            "--tls-name (RELEVO_TLS_NAME) names the certificate of --tls (RELEVO_TLS=true): give that too"
+        );
+    }
+    Ok(())
+}
+
 /// What `serve` speaks TLS with, if anything, and the fingerprint it prints.
 fn server_tls(
     db_file: &str,
@@ -363,6 +392,16 @@ async fn main() -> Result<()> {
         };
         println!("{db_file}: {says}");
         return Ok(());
+    }
+    // Settings that cannot work are refused before the database is opened, or migrated.
+    if let Command::Serve {
+        tls,
+        tls_name,
+        tls_cert,
+        ..
+    } = &cli.command
+    {
+        check_tls(*tls, tls_name, tls_cert.as_deref())?;
     }
     // Only the server migrates an older layout: an admin command refuses it.
     let conn = if matches!(cli.command, Command::Serve { .. }) {
@@ -504,15 +543,26 @@ mod tests {
         }
     }
 
+    fn tls_files(cli: &Cli) -> (Option<PathBuf>, Option<PathBuf>) {
+        match &cli.command {
+            Command::Serve {
+                tls_cert, tls_key, ..
+            } => (tls_cert.clone(), tls_key.clone()),
+            _ => panic!("not serve"),
+        }
+    }
+
     /// One test, because it changes the process environment.
     #[test]
     fn defaults_and_environment() {
-        const VARS: [&str; 5] = [
+        const VARS: [&str; 7] = [
             "RELEVO_DB",
             "RELEVO_ADDR",
             "RELEVO_TEAM_QUESTIONS_PER_DAY",
             "RELEVO_TLS",
             "RELEVO_TLS_NAME",
+            "RELEVO_TLS_CERT",
+            "RELEVO_TLS_KEY",
         ];
         // SAFETY: no other test in this binary reads or writes the environment.
         unsafe { VARS.iter().for_each(|v| std::env::remove_var(v)) };
@@ -523,17 +573,29 @@ mod tests {
         assert_eq!(tls_args(&cli), (false, vec![]));
 
         // TLS: names only with --tls, a certificate of yours only with its key, not both.
-        let parse = |args: &[&str]| Cli::try_parse_from([&["relevo", "serve"], args].concat());
+        let parse = |args: &[&str]| {
+            let cli = Cli::try_parse_from([&["relevo", "serve"], args].concat()).ok()?;
+            let ok = match &cli.command {
+                Command::Serve {
+                    tls,
+                    tls_name,
+                    tls_cert,
+                    ..
+                } => check_tls(*tls, tls_name, tls_cert.as_deref()).is_ok(),
+                _ => panic!("not serve"),
+            };
+            ok.then_some(cli)
+        };
         let cli = parse(&["--tls", "--tls-name", "a.office", "--tls-name", "10.0.0.5"]).unwrap();
         assert_eq!(
             tls_args(&cli),
             (true, vec!["a.office".into(), "10.0.0.5".into()])
         );
-        assert!(parse(&["--tls-name", "a.office"]).is_err());
-        assert!(parse(&["--tls-cert", "c.pem"]).is_err());
-        assert!(parse(&["--tls-key", "k.pem"]).is_err());
-        assert!(parse(&["--tls", "--tls-cert", "c.pem", "--tls-key", "k.pem"]).is_err());
-        assert!(parse(&["--tls-cert", "c.pem", "--tls-key", "k.pem"]).is_ok());
+        assert!(parse(&["--tls-name", "a.office"]).is_none());
+        assert!(parse(&["--tls-cert", "c.pem"]).is_none());
+        assert!(parse(&["--tls-key", "k.pem"]).is_none());
+        assert!(parse(&["--tls", "--tls-cert", "c.pem", "--tls-key", "k.pem"]).is_none());
+        assert!(parse(&["--tls-cert", "c.pem", "--tls-key", "k.pem"]).is_some());
 
         let cli = Cli::try_parse_from(["relevo", "invite", "ana", "--name", "Ana"]).unwrap();
         let Command::Invite { label, about, .. } = cli.command else {
@@ -566,6 +628,31 @@ mod tests {
         }
         let cli = Cli::try_parse_from(["relevo", "serve"]).unwrap();
         assert_eq!(tls_args(&cli), (false, vec![]));
+        assert_eq!(tls_files(&cli), (None, None));
+        // A certificate of yours from the environment, both files or neither, and not with
+        // RELEVO_TLS on.
+        unsafe { std::env::set_var("RELEVO_TLS_CERT", "/etc/relevo/fullchain.pem") };
+        assert!(parse(&[]).is_none());
+        unsafe { std::env::set_var("RELEVO_TLS_KEY", "/etc/relevo/privkey.pem") };
+        // RELEVO_TLS=false, as the drop-in may still say.
+        let Some(cli) = parse(&[]) else {
+            panic!("RELEVO_TLS_CERT and RELEVO_TLS_KEY refused")
+        };
+        assert_eq!(
+            tls_files(&cli),
+            (
+                Some("/etc/relevo/fullchain.pem".into()),
+                Some("/etc/relevo/privkey.pem".into())
+            )
+        );
+        assert!(!tls_args(&cli).0);
+        unsafe { std::env::set_var("RELEVO_TLS", "true") };
+        assert!(parse(&[]).is_none());
+        unsafe {
+            std::env::set_var("RELEVO_TLS", "false");
+            std::env::remove_var("RELEVO_TLS_CERT");
+            std::env::remove_var("RELEVO_TLS_KEY");
+        }
         // Flags win over the environment, and --db works after the subcommand too.
         let cli =
             Cli::try_parse_from(["relevo", "serve", "--db", "x.db", "--addr", "[::1]:1"]).unwrap();

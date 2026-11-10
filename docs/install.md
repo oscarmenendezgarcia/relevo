@@ -100,22 +100,23 @@ Teammates reach Relevo over HTTPS only. Pick one way.
 
 ### HTTPS in Relevo itself (the simplest, for an office network or a VPN)
 
-`relevo serve --tls` speaks HTTPS with standard TLS (rustls) and a certificate of its own: no proxy, no domain, no Cloudflare. Turn it on with a drop-in (`systemctl --user edit relevo`):
+`relevo serve --tls` speaks HTTPS with standard TLS (rustls) and a certificate of its own: no proxy, no domain, no Cloudflare. Turn it on with a drop-in (`systemctl --user edit relevo`), naming in `RELEVO_TLS_NAME` the server's address and host name, the ones teammates will use (here `192.168.1.50` and `relevo-box`; `hostname` and `hostname -I` show this machine's), comma-separated:
 
 ```
 [Service]
 Environment=RELEVO_TLS=true
 Environment=RELEVO_ADDR=0.0.0.0:7878
+Environment=RELEVO_TLS_NAME=192.168.1.50,relevo-box
 ```
 
-and restart it: `systemctl --user restart relevo`. The first start makes a self-signed certificate (valid 10 years) for `localhost`, the loopback addresses, this machine's host name and its network addresses, and keeps it next to the database in `~/.local/share/relevo/relevo.db.tls/` (the key readable by you only). Later starts reuse it. (The unit allows `AF_NETLINK` sockets for this: reading the machine's addresses needs one.) When the certificate, made without `RELEVO_TLS_NAME`, has none of the machine's network addresses, or none could be read, every start logs a warning saying so; then set the names as in **Names** below. At every start the server prints the certificate's SHA-256 fingerprint; see it again with
+and restart it: `systemctl --user restart relevo`. Naming them is recommended: the certificate is then for exactly those names (add `localhost` if agents on this machine itself connect to it by that name), whatever addresses the machine finds at a start (a VPN interface, a second network card, none yet while the network comes up). Without `RELEVO_TLS_NAME`, the first start makes it for `localhost`, the loopback addresses, this machine's host name and the network addresses it finds then. Either way the certificate is self-signed (valid 10 years), made at the first start and kept next to the database in `~/.local/share/relevo/relevo.db.tls/` (the key readable by you only). Later starts reuse it. (The unit allows `AF_NETLINK` sockets for this: reading the machine's addresses needs one.) When the certificate, made without `RELEVO_TLS_NAME`, has none of the machine's network addresses, or none could be read, every start logs a warning saying so; then set the names as above. At every start the server prints the certificate's SHA-256 fingerprint; see it again with
 
 ```
 relevo tls-fingerprint                             # with RELEVO_DB set, as in part 2
 journalctl --user -u relevo | grep fingerprint
 ```
 
-Check it from the machine itself: `curl --cacert ~/.local/share/relevo/relevo.db.tls/cert.pem https://localhost:7878/health`.
+Check it from the machine itself, with a name the certificate has: `curl --cacert ~/.local/share/relevo/relevo.db.tls/cert.pem https://192.168.1.50:7878/health`.
 
 **Open the port to the office network or the VPN only**, never to the internet. With `ufw`, for an office network `192.168.1.0/24` (someone with admin rights runs it):
 
@@ -129,24 +130,24 @@ sudo ufw allow from 192.168.1.0/24 to any port 7878 proto tcp
 
 **Give teammates the address and the fingerprint**: `https://<this machine's address or name>:7878`, and the fingerprint from `relevo tls-fingerprint`, through a channel you trust (in person, or the team's chat). On their first `relevo connect` they compare it with what `connect` shows; from then on their machine trusts that certificate alone for Relevo (part 7).
 
-**Names.** The address teammates use must be one the certificate has. If they use another one (a DNS name the office gives this machine, an address added later), add the names, comma-separated, in the same drop-in:
+**Names.** The address teammates use must be one the certificate has. If they use another one (a DNS name the office gives this machine, an address added later), add it to `RELEVO_TLS_NAME` in the same drop-in:
 
 ```
-Environment=RELEVO_TLS_NAME=relevo.office,192.168.1.50
+Environment=RELEVO_TLS_NAME=192.168.1.50,relevo-box,relevo.office
 ```
 
 Names the stored certificate lacks make a new one at the next start (the log says so) with a new fingerprint, and every teammate runs `relevo connect` again with it. Give the machine a fixed address (or a name) so that this stays rare.
 
-**A certificate you already have** (from Let's Encrypt, or the office's own authority) is used instead with `--tls-cert` and `--tls-key`; then teammates' machines trust it through their authorities and `connect` asks nothing. In the drop-in:
+**A certificate you already have** (from Let's Encrypt, or the office's own authority) is used instead with `--tls-cert` and `--tls-key` (`RELEVO_TLS_CERT` and `RELEVO_TLS_KEY`); then teammates' machines trust it through their authorities and `connect` asks nothing. In the drop-in, without `RELEVO_TLS=true` or `RELEVO_TLS_NAME` (they are for a certificate of Relevo's own, and the server refuses `RELEVO_TLS=true` next to a certificate of yours):
 
 ```
 [Service]
 Environment=RELEVO_ADDR=0.0.0.0:7878
-ExecStart=
-ExecStart=%h/.local/bin/relevo serve --tls-cert /path/to/fullchain.pem --tls-key /path/to/privkey.pem
+Environment=RELEVO_TLS_CERT=/path/to/fullchain.pem
+Environment=RELEVO_TLS_KEY=/path/to/privkey.pem
 ```
 
-The key must be readable by your user. Renewed files are read at the next restart.
+The key must be readable by your user, and neither file may be under `/tmp` (the unit has a private one). Renewed files are read at the next restart.
 
 ### Or a proxy in front (optional)
 
