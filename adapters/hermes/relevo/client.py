@@ -584,9 +584,9 @@ def done_how(thread_id: Any) -> str:
 
 
 def is_pending(thread: dict) -> bool:
-    """Pending for the person (not handled yet): `pending`, or `waiting_for_you` from a server that
-    does not say `pending`. Team threads never are: answering them is optional."""
-    return thread.get("pending", thread.get("waiting_for_you")) is True and thread.get("kind") == "direct"
+    """Pending for the person (not handled yet): `pending` (a server before 0.3.0 does not say it:
+    nothing is pending then). Team threads never are: answering them is optional."""
+    return thread.get("pending") is True and thread.get("kind") == "direct"
 
 
 def _holder(thread: dict, me: Optional[str], claim_hint: bool) -> str:

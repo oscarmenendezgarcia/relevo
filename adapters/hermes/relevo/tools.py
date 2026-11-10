@@ -162,7 +162,7 @@ _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
     ),
     "relevo_inbox": (
         relevo_inbox,
-        "What is new in Relevo for this session and what waits for your person's reply, with who you "
+        "What is new in Relevo for this session and what is pending for your person, with who you "
         "speak for (`you`) and the team list (handle, what they look after, live contexts). Look here "
         "before opening a thread: an answer may already be waiting.\n\n" + client.TOOL_RULES,
         {"all": {"type": "boolean",

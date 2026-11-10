@@ -785,17 +785,18 @@ class Tools(Base):
         self.assertIn("@oscar's Hermes (general) has it since", client.render_thread(
             self.ana.thread(opened["thread"]), "ana"))
 
-    def test_pending_comes_from_pending_or_from_waiting_for_you_on_a_server_that_does_not_say_it(self):
+    def test_pending_comes_from_pending_alone_waiting_for_you_is_gone(self):
         thread = {"id": "r_1", "kind": "direct", "status": "open", "from": "ana", "participants": ["ana", "oscar"],
-                  "waiting_for_you": True, "pending": True, "claimed": None, "held_by": []}
+                  "pending": True, "claimed": None, "held_by": []}
         self.assertIn("\nPending for your person: they have not handled it yet.", client.render_thread_head(thread, "oscar"))
-        # A server that says `pending` is believed over `waiting_for_you`.
         handled = client.render_thread_head({**thread, "pending": False}, "oscar")
         self.assertNotIn("Pending", handled)
         self.assertNotIn('"done": true', handled)
         self.assertNotIn('"claim": true', handled)
-        old = {k: v for k, v in thread.items() if k != "pending"}
-        self.assertIn("\nPending for your person", client.render_thread_head(old, "oscar"))
+        # The 0.2.x name means nothing now: a server before 0.3.0 shows nothing as pending.
+        old = {**{k: v for k, v in thread.items() if k != "pending"}, "waiting_for_you": True}
+        self.assertNotIn("Pending", client.render_thread_head(old, "oscar"))
+        self.assertNotIn("stays pending", client.render_event(old, [], "oscar"))
         # Team questions are never pending: answering them is optional.
         team = client.render_thread_head({**thread, "kind": "team"}, "oscar")
         self.assertNotIn("Pending", team)
