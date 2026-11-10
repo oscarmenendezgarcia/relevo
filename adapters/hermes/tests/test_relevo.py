@@ -26,6 +26,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -1344,6 +1345,213 @@ class Sessions(Base):
 
     def _oscar(self, thread_id: str) -> dict:
         return next(d for d in self.ana.thread(thread_id)["delivery"] if d["handle"] == "oscar")
+
+
+class LossyProxy:
+    """A proxy to the test server that, while `drop` is set, lets one inbox request with new notes
+    reach the server and get its whole answer, then cuts the connection instead of passing it on:
+    the server delivered those notes, and the adapter never got them."""
+
+    def __init__(self, target: str) -> None:
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        proxy = self
+        self.drop, self.dropped = False, 0
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *_args) -> None:
+                pass
+
+            def do_GET(self) -> None:
+                self.forward()
+
+            def do_POST(self) -> None:
+                self.forward()
+
+            def do_DELETE(self) -> None:
+                self.forward()
+
+            def forward(self) -> None:
+                body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                headers = {k: v for k, v in self.headers.items()
+                           if k.lower() not in ("host", "connection", "content-length")}
+                try:
+                    up = httpx.request(self.command, target + self.path, headers=headers, content=body or None,
+                                       timeout=90)
+                except httpx.HTTPError:
+                    self.close_connection = True
+                    return
+                if proxy.drop and self.command == "GET" and self.path.startswith("/api/inbox"):
+                    if any(t.get("new_notes") for t in up.json().get("threads") or []):
+                        proxy.drop = False
+                        proxy.dropped += 1
+                        # Delivered on the server, lost on the way.
+                        self.close_connection = True
+                        self.connection.shutdown(socket.SHUT_RDWR)
+                        return
+                try:
+                    self.send_response(up.status_code)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(up.content)))
+                    self.end_headers()
+                    self.wfile.write(up.content)
+                except OSError:  # the adapter went away (a disconnect)
+                    self.close_connection = True
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.server.block_on_close = False
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class HandedOverOnce(Base):
+    """docs/agents.md, as relevo mcp and pi do: in every inbox answer, a direct thread pending for the
+    person whose latest note, by someone else, this adapter never handed over is handed over again,
+    once per process. A note the agent leaves alone ([SILENT]) does not come back. Bob writes here:
+    Ana's notes elsewhere in the suite come near the server's 60 notes a minute."""
+
+    HANDED_OVER = ("Handed over again: it is still pending for your person, and its latest note never reached "
+                   "this chat (an answer that carried it may have been lost on the way, or it was fetched and "
+                   "not shown here). Treat that note as new.")
+
+    async def test_an_inbox_answer_lost_on_the_way_is_handed_over_on_the_next_answer_once(self):
+        proxy = LossyProxy(SERVER.url)
+        self.addCleanup(proxy.stop)
+        os.environ["RELEVO_URL"] = proxy.url
+        a = self.make_adapter()
+        a.wait_seconds = 1  # several answers list the thread in the seconds below
+        waits: list[tuple[int, int]] = []
+        real = a.api.ainbox
+
+        async def recorded(http, *, wait=0):
+            waits.append((proxy.dropped, wait))
+            return await real(http, wait=wait)
+
+        a.api.ainbox = recorded
+        await a.connect()
+        await asyncio.sleep(0.5)  # the waiting request is open
+        proxy.drop = True
+        opened = self.bob.send(to=["oscar"], text="Lost answer: is the cache warm?")
+        await self.until(lambda: proxy.dropped == 1)
+        thread = opened["thread"]
+        # The server delivered it to the gateway's session: it is no longer new there.
+        self.assertEqual(self._oscar(thread)["by"]["label"], "Hermes")
+        self.assertEqual(self.events, [])
+
+        # The next answer hands it over. That request does not wait: the lost note is no longer new,
+        # so it would not end a wait.
+        await self.until(lambda: len(self.events) == 1, timeout=5)
+        self.assertEqual([w for dropped, w in waits if dropped][0], 0)
+        self.assertTrue(all(w == 1 for dropped, w in waits if not dropped))
+        event = self.events[0]
+        self.assertEqual(event.source.chat_id, thread)
+        self.assertEqual(event.source.user_id, "bob")
+        self.assertEqual(event.message_id, opened["note"])
+        self.assertIn(f"\n{self.HANDED_OVER}\n", event.text)
+        self.assertIn('<untrusted from="@bob" via="pi"', event.text)
+        self.assertIn("Lost answer: is the cache warm?\n</untrusted>", event.text)
+        self.assertIn("If it is not for you, answer exactly [SILENT] and leave it: it stays pending for your person.",
+                      event.text)
+        self.assertEqual(event.text.count("Lost answer: is the cache warm?"), 2)  # the title and the note
+
+        # Left alone: [SILENT] writes nothing, the thread stays pending, and the answers that list it
+        # in this process do not hand it over again.
+        self.assertTrue((await a.send(thread, "[SILENT]", metadata=FINAL)).success)
+        await asyncio.sleep(2.5)
+        self.assertEqual(len(self.events), 1)
+        self.assertIsNone(self._oscar(thread)["handled_at"])
+        self.assertEqual(len(self.bob.thread(thread)["notes"]), 1)
+        # A new note in it is a new note, as usual.
+        again = self.bob.send(thread=thread, text="Lost answer: any news?")
+        await self.until(lambda: len(self.events) == 2)
+        self.assertEqual(self.events[1].message_id, again["note"])
+        self.assertNotIn("Handed over again", self.events[1].text)
+
+    async def test_a_thread_the_agent_answered_silent_is_not_handed_over_again_in_the_same_process(self):
+        a = self.make_adapter()
+        a.wait_seconds = 1
+        await a.connect()
+        await asyncio.sleep(0.3)
+        opened = self.bob.send(to=["oscar"], text="Not for you: is the staging DB up?")
+        await self.until(lambda: len(self.events) == 1)
+        self.assertNotIn("Handed over again", self.events[0].text)
+        self.assertTrue((await a.send(opened["thread"], "[SILENT]", metadata=FINAL)).success)
+        # Pending for Oscar, listed by every answer with its latest note: never handed over again here.
+        await asyncio.sleep(2.5)
+        self.assertEqual(len(self.events), 1)
+        listed = next(t for t in (await a.api.ainbox(a._ensure_http()))["threads"] if t["id"] == opened["thread"])
+        self.assertTrue(listed["pending"])
+        self.assertEqual(listed["last_note"]["id"], opened["note"])
+        self.assertIsNone(self._oscar(opened["thread"])["handled_at"])
+        # A replacement adapter of this process (connected before the old one is dropped) knows it too.
+        b = self.make_adapter()
+        b.wait_seconds = 1
+        await b.connect()
+        await a.disconnect()
+        await asyncio.sleep(2.5)
+        self.assertEqual(len(self.events), 1)
+
+    async def test_a_note_a_relevo_turn_s_tool_fetched_reaches_its_own_chat_once(self):
+        """The tools of a relevo turn act for the gateway's session: a relevo_inbox there delivers a
+        note of another thread to that session, and that thread's chat never had it."""
+        from gateway.session_context import clear_session_vars, set_session_vars
+
+        a = self.make_adapter()
+        a.wait_seconds = 1
+        gate = asyncio.Event()
+        gate.set()
+        real = a.api.ainbox
+
+        async def gated(http, *, wait=0):
+            await gate.wait()
+            return await real(http, wait=wait)
+
+        a.api.ainbox = gated
+        await a.connect()
+        await asyncio.sleep(0.3)
+        gate.clear()
+        await asyncio.sleep(1.5)  # the request in flight has answered; the next one waits at the gate
+        opened = self.bob.send(to=["oscar"], text="Fetched by a tool: who owns the deploy key?")
+        tokens = set_session_vars(platform="relevo", chat_id="r_another")
+        try:
+            self.assertIn("who owns the deploy key?", tools.relevo_inbox({}))
+        finally:
+            clear_session_vars(tokens)
+        gate.set()
+        await self.until(lambda: len(self.events) == 1)
+        self.assertEqual(self.events[0].source.chat_id, opened["thread"])
+        self.assertIn(self.HANDED_OVER, self.events[0].text)
+        self.assertIn("who owns the deploy key?", self.events[0].text)
+        await asyncio.sleep(2.5)
+        self.assertEqual(len(self.events), 1)
+
+    async def test_only_a_direct_open_pending_thread_whose_latest_note_by_someone_else_was_never_handed_over(self):
+        a = self.make_adapter()
+        a._me = "oscar"
+        last = {"id": "n_1", "author": "ana", "text": "Hi", "created_at": "2026-11-10T10:00:00Z"}
+        thread = {"id": "r_1", "kind": "direct", "status": "open", "from": "ana", "participants": ["ana", "oscar"],
+                  "pending": True, "claimed": None, "new_notes": [], "last_note": last}
+        again = a._hand_over_again(thread)
+        self.assertEqual(again["new_notes"], [last])
+        self.assertTrue(again["handed_over"])
+        self.assertNotIn("handed_over", thread)  # the answer itself is left as it was
+        for other in ({"kind": "team", "pending": False}, {"status": "closed"}, {"pending": False},
+                      {"last_note": {**last, "author": "oscar"}}, {"last_note": None},
+                      {"new_notes": [{**last, "id": "n_2"}]}):
+            self.assertIsNone(a._hand_over_again({**thread, **other}), other)
+        a._remember("n_1")
+        self.assertIsNone(a._hand_over_again(thread))
+
+    def _oscar(self, thread_id: str) -> dict:
+        return next(d for d in self.bob.thread(thread_id)["delivery"] if d["handle"] == "oscar")
 
 
 class Loop(Base):

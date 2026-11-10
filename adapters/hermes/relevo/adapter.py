@@ -3,9 +3,11 @@
 connect() first ends the session an earlier start of the gateway may have left (DELETE
 /api/session), so it starts as a new session and gets what is still pending for its person; then
 it keeps one waiting inbox request open (wait=55) and backs off on errors. Each thread with new
-notes becomes a MessageEvent from the author of its latest note; send() writes the agent's reply in
-that thread; disconnect() stops the loop, then ends the session with DELETE /api/session. One fixed
-Relevo-Session per profile (see client.gateway_session_id), general unless RELEVO_CONTEXT is set.
+notes becomes a MessageEvent from the author of its latest note, and so, once, does a direct thread
+pending for the person whose latest note this adapter never handed over (the answer that carried it
+was lost on the way, say); send() writes the agent's reply in that thread; disconnect() stops the
+loop, then ends the session with DELETE /api/session. One fixed Relevo-Session per profile (see
+client.gateway_session_id), general unless RELEVO_CONTEXT is set.
 """
 
 from __future__ import annotations
@@ -390,15 +392,19 @@ class RelevoAdapter(BasePlatformAdapter):
 
     async def _poll_loop(self) -> None:
         delay = self.backoff_initial
+        # After a failed request the next one does not wait: an answer lost on the way took notes
+        # with it, which are no longer new, so they would not end a wait; that answer hands them over.
+        failed = False
         while self._stop is not None and not self._stop.is_set():
             try:
                 if self._end_first:
                     # Never an inbox request before it: that would carry the old delivery state on.
                     await self._start_fresh()
-                data = await self.api.ainbox(self._ensure_http(), wait=self.wait_seconds)
+                data = await self.api.ainbox(self._ensure_http(), wait=0 if failed else self.wait_seconds)
             except asyncio.CancelledError:
                 raise
             except client.RelevoError as exc:
+                failed = True
                 if exc.status in (400, 401):
                     # A refused token, or headers the server calls malformed: asking again cannot help.
                     unauthorized = exc.status == 401
@@ -414,10 +420,11 @@ class RelevoAdapter(BasePlatformAdapter):
                 logger.warning("[relevo] %s failed: %s; retrying in %.1fs", self._asking(),
                                client.describe_error(exc), delay)
             except Exception as exc:
+                failed = True
                 logger.warning("[relevo] %s failed: %s; retrying in %.1fs", self._asking(),
                                client.describe_error(exc), delay)
             else:
-                delay = self.backoff_initial
+                delay, failed = self.backoff_initial, False
                 self._me = client.you_of(data) or self._me
                 team = {p.get("handle"): p for p in data.get("team") or []}
                 self._holding_batch = True
@@ -481,11 +488,29 @@ class RelevoAdapter(BasePlatformAdapter):
             return False
         return getattr(entry, "resume_pending", False) is True
 
+    def _hand_over_again(self, thread: dict) -> Optional[dict]:
+        """`thread`, from an inbox answer, to hand over again when it is a direct open thread pending
+        for the person with nothing new, whose latest note (`last_note`), by someone else, this
+        adapter has not handed over: as it was, with that note as its new note and `handed_over` set.
+        Otherwise None. The server delivered that note to this session in an answer the adapter never
+        got (lost on the way), or a tool of a relevo turn, acting for this session, fetched it: either
+        way its chat never had it. Once handed over, a note the agent leaves alone ([SILENT], not for
+        it) stays pending for the person and does not come back in this process."""
+        last = thread.get("last_note")
+        if (thread.get("kind") != "direct" or thread.get("status") != "open" or thread.get("pending") is not True
+                or thread.get("new_notes") or not isinstance(last, dict) or not last.get("id")):
+            return None
+        if last.get("author") == self._me or str(last["id"]) in self._seen:
+            return None
+        return {**thread, "new_notes": [last], "handed_over": True}
+
     async def _dispatch(self, thread: dict, team: dict) -> None:
         thread_id = str(thread.get("id") or "")
+        # Only pending: handed over when its notes were new, unless its latest note never was.
+        thread = self._hand_over_again(thread) or thread
         notes = [n for n in thread.get("new_notes") or [] if n.get("id") not in self._seen]
         if not thread_id or not notes:
-            return  # only waiting: it was handed over when its notes were new
+            return
         self._titles[thread_id] = str(thread.get("title") or thread_id)
         if any(n.get("truncated") for n in notes):
             try:
@@ -523,7 +548,11 @@ class RelevoAdapter(BasePlatformAdapter):
             # A note may not be for this agent: a bare [SILENT] answer must stand.
             reply_expected=False,
         )
-        logger.info("[relevo] %d new note(s) in thread %s", len(notes), thread_id)
+        if thread.get("handed_over"):
+            logger.info("[relevo] thread %s is pending and its latest note was never handed over: handing it over",
+                        thread_id)
+        else:
+            logger.info("[relevo] %d new note(s) in thread %s", len(notes), thread_id)
         await self.handle_message(event)
 
     # -- outbound -------------------------------------------------------------------------------

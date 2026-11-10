@@ -627,6 +627,11 @@ def render_thread_head(thread: dict, me: Optional[str] = None, *, hints: bool = 
         lines.append(f"Opened by @{opener}; participants: {_handles(thread.get('participants') or [])}.")
     if thread.get("context"):
         lines.append(f"Addressed to you in context {thread['context']}.")
+    # Set by the adapter: the latest note never reached this chat (see RelevoAdapter._hand_over_again).
+    if thread.get("handed_over"):
+        lines.append("Handed over again: it is still pending for your person, and its latest note never reached "
+                     "this chat (an answer that carried it may have been lost on the way, or it was fetched and "
+                     "not shown here). Treat that note as new.")
     if is_pending(thread):
         pending = "Pending for your person: they have not handled it yet."
         if hints:
