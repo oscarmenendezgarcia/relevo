@@ -57,7 +57,7 @@ For others, a participant's delivery is about the latest note *written by someon
 
 ## Operations
 
-All three are the same over HTTP and MCP (MCP arrives in block 2).
+All three are the same over HTTP and over MCP (`relevo mcp`, see `docs/agents.md`).
 
 ### `send`
 
@@ -225,4 +225,4 @@ The server logs counts and ids, never note text or tokens. The database holds to
 
 ## Later (not v0)
 
-MCP tools (block 2), consent between teams, webhooks, OAuth for ChatGPT, A2A gateway, attachments.
+Consent between teams, webhooks, OAuth for ChatGPT, A2A gateway, attachments.
