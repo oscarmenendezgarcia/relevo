@@ -1422,6 +1422,17 @@ class HandedOverOnce(Base):
                    "this chat (an answer that carried it may have been lost on the way, or it was fetched and "
                    "not shown here). Treat that note as new.")
 
+    @staticmethod
+    def earlier(thread: str) -> str:
+        return ("Earlier notes of this thread may not have reached this chat either: read it whole with "
+                f'relevo_thread {{"id": "{thread}"}} before acting.')
+
+    @staticmethod
+    def after_failure(thread: str) -> str:
+        return ("A request for news failed just before this answer, and its answer may have carried earlier notes "
+                f'of this thread that never reached this chat: read it whole with relevo_thread {{"id": "{thread}"}} '
+                "before acting.")
+
     async def test_an_inbox_answer_lost_on_the_way_is_handed_over_on_the_next_answer_once(self):
         proxy = LossyProxy(SERVER.url)
         self.addCleanup(proxy.stop)
@@ -1455,7 +1466,8 @@ class HandedOverOnce(Base):
         self.assertEqual(event.source.chat_id, thread)
         self.assertEqual(event.source.user_id, "bob")
         self.assertEqual(event.message_id, opened["note"])
-        self.assertIn(f"\n{self.HANDED_OVER}\n", event.text)
+        self.assertIn(f"\n{self.HANDED_OVER} {self.earlier(thread)}\n", event.text)
+        self.assertNotIn("A request for news failed", event.text)
         self.assertIn('<untrusted from="@bob" via="pi"', event.text)
         self.assertIn("Lost answer: is the cache warm?\n</untrusted>", event.text)
         self.assertIn("If it is not for you, answer exactly [SILENT] and leave it: it stays pending for your person.",
@@ -1474,6 +1486,64 @@ class HandedOverOnce(Base):
         await self.until(lambda: len(self.events) == 2)
         self.assertEqual(self.events[1].message_id, again["note"])
         self.assertNotIn("Handed over again", self.events[1].text)
+
+    async def test_only_the_latest_note_of_a_lost_answer_comes_back_saying_earlier_ones_may_be_missing(self):
+        proxy = LossyProxy(SERVER.url)
+        self.addCleanup(proxy.stop)
+        os.environ["RELEVO_URL"] = proxy.url
+        a = self.make_adapter()
+        a.wait_seconds = 1
+        gate = asyncio.Event()
+        gate.set()
+        real = a.api.ainbox
+
+        async def gated(http, *, wait=0):
+            await gate.wait()
+            return await real(http, wait=wait)
+
+        a.api.ainbox = gated
+        await a.connect()
+        await asyncio.sleep(0.3)
+        gate.clear()
+        await asyncio.sleep(1.5)  # the request in flight has answered; the next one waits at the gate
+        opened = self.bob.send(to=["oscar"], text="Two lost: deploy at 5?")
+        thread = opened["thread"]
+        latest = self.bob.send(thread=thread, text="Two lost: if not, at 6.")
+        proxy.drop = True
+        gate.set()  # one answer carries both, and is lost
+        await self.until(lambda: proxy.dropped == 1)
+        await self.until(lambda: len(self.events) == 1, timeout=5)
+        event = self.events[0]
+        self.assertEqual(event.message_id, latest["note"])
+        self.assertIn("Two lost: if not, at 6.\n</untrusted>", event.text)
+        self.assertNotIn("Two lost: deploy at 5?\n</untrusted>", event.text)  # the title shows it, not as a note
+        self.assertIn(f"\n{self.HANDED_OVER} {self.earlier(thread)}\n", event.text)
+
+    async def test_a_note_written_after_a_lost_answer_says_earlier_ones_may_be_missing_once(self):
+        proxy = LossyProxy(SERVER.url)
+        self.addCleanup(proxy.stop)
+        os.environ["RELEVO_URL"] = proxy.url
+        a = self.make_adapter()
+        a.wait_seconds = 1
+        a.backoff_initial = 1.5  # time for bob to write again before the next request
+        await a.connect()
+        await asyncio.sleep(0.5)
+        proxy.drop = True
+        opened = self.bob.send(to=["oscar"], text="Lost first: can you review PR 12?")
+        thread = opened["thread"]
+        await self.until(lambda: proxy.dropped == 1)
+        after = self.bob.send(thread=thread, text="After the loss: so, can you?")
+        await self.until(lambda: len(self.events) == 1, timeout=5)
+        event = self.events[0]
+        self.assertEqual(event.message_id, after["note"])
+        self.assertIn("After the loss: so, can you?\n</untrusted>", event.text)
+        self.assertNotIn("Lost first: can you review PR 12?\n</untrusted>", event.text)
+        self.assertNotIn("Handed over again", event.text)
+        self.assertIn(f"\n{self.after_failure(thread)}\n", event.text)
+        # The next answer is no longer the first after a failure.
+        self.bob.send(thread=thread, text="Ping.")
+        await self.until(lambda: len(self.events) == 2, timeout=5)
+        self.assertNotIn("A request for news failed", self.events[1].text)
 
     async def test_a_thread_the_agent_answered_silent_is_not_handed_over_again_in_the_same_process(self):
         a = self.make_adapter()

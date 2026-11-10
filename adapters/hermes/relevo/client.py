@@ -579,6 +579,10 @@ def claim_how(thread_id: Any) -> str:
     return f'relevo_send {{"thread": "{thread_id}", "claim": true}} and no text'
 
 
+def read_how(thread_id: Any) -> str:
+    return f'relevo_thread {{"id": "{thread_id}"}}'
+
+
 def done_how(thread_id: Any) -> str:
     return f'relevo_send {{"thread": "{thread_id}", "done": true}} and no text'
 
@@ -628,10 +632,18 @@ def render_thread_head(thread: dict, me: Optional[str] = None, *, hints: bool = 
     if thread.get("context"):
         lines.append(f"Addressed to you in context {thread['context']}.")
     # Set by the adapter: the latest note never reached this chat (see RelevoAdapter._hand_over_again).
+    # The answer that lost it may have carried earlier notes too, and only the latest one comes back.
     if thread.get("handed_over"):
         lines.append("Handed over again: it is still pending for your person, and its latest note never reached "
                      "this chat (an answer that carried it may have been lost on the way, or it was fetched and "
-                     "not shown here). Treat that note as new.")
+                     "not shown here). Treat that note as new. Earlier notes of this thread may not have reached "
+                     f"this chat either: read it whole with {read_how(thread.get('id'))} before acting.")
+    elif thread.get("after_failure"):
+        # Set by the adapter: the first answer after a request that may have lost its answer, whose
+        # notes of this thread may have come before these.
+        lines.append("A request for news failed just before this answer, and its answer may have carried earlier "
+                     "notes of this thread that never reached this chat: read it whole with "
+                     f"{read_how(thread.get('id'))} before acting.")
     if is_pending(thread):
         pending = "Pending for your person: they have not handled it yet."
         if hints:

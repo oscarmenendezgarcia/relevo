@@ -395,6 +395,10 @@ class RelevoAdapter(BasePlatformAdapter):
         # After a failed request the next one does not wait: an answer lost on the way took notes
         # with it, which are no longer new, so they would not end a wait; that answer hands them over.
         failed = False
+        # An inbox request failed in a way that may have lost its answer (anything but an error
+        # Relevo itself sent): the threads with new notes in the next answer say earlier notes may
+        # be missing, since a note written after the loss comes without the lost ones.
+        lost = False
         while self._stop is not None and not self._stop.is_set():
             try:
                 if self._end_first:
@@ -405,6 +409,8 @@ class RelevoAdapter(BasePlatformAdapter):
                 raise
             except client.RelevoError as exc:
                 failed = True
+                # A proxy's error page (HTTP_…) may hide an answer the server wrote after it gave up.
+                lost = lost or (not self._end_first and exc.code.startswith("HTTP_"))
                 if exc.status in (400, 401):
                     # A refused token, or headers the server calls malformed: asking again cannot help.
                     unauthorized = exc.status == 401
@@ -421,17 +427,19 @@ class RelevoAdapter(BasePlatformAdapter):
                                client.describe_error(exc), delay)
             except Exception as exc:
                 failed = True
+                lost = lost or not self._end_first  # an inbox request, not the end of the earlier session
                 logger.warning("[relevo] %s failed: %s; retrying in %.1fs", self._asking(),
                                client.describe_error(exc), delay)
             else:
                 delay, failed = self.backoff_initial, False
+                after_failure, lost = lost, False
                 self._me = client.you_of(data) or self._me
                 team = {p.get("handle"): p for p in data.get("team") or []}
                 self._holding_batch = True
                 try:
                     for thread in data.get("threads") or []:
                         try:
-                            await self._dispatch(thread, team)
+                            await self._dispatch(thread, team, after_failure)
                         except asyncio.CancelledError:
                             raise
                         except Exception as exc:
@@ -504,10 +512,16 @@ class RelevoAdapter(BasePlatformAdapter):
             return None
         return {**thread, "new_notes": [last], "handed_over": True}
 
-    async def _dispatch(self, thread: dict, team: dict) -> None:
+    async def _dispatch(self, thread: dict, team: dict, after_failure: bool = False) -> None:
+        """`after_failure`: the first answer after a request that may have lost its answer, so a
+        thread with new notes says earlier ones may be missing (client.render_thread_head)."""
         thread_id = str(thread.get("id") or "")
         # Only pending: handed over when its notes were new, unless its latest note never was.
-        thread = self._hand_over_again(thread) or thread
+        again = self._hand_over_again(thread)
+        if again:
+            thread = again
+        elif after_failure and thread.get("new_notes"):
+            thread = {**thread, "after_failure": True}
         notes = [n for n in thread.get("new_notes") or [] if n.get("id") not in self._seen]
         if not thread_id or not notes:
             return
