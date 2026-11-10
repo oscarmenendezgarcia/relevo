@@ -20,7 +20,7 @@ sha256sum --check --ignore-missing SHA256SUMS
 chmod +x relevo-$(uname -m)-unknown-linux-gnu
 ```
 
-Get the deploy files of the same version, for example `git clone --branch v0.1.0 https://github.com/oscarmenendezgarcia/relevo.git` (any `v…` tag), or `gh release download v0.1.0 --repo oscarmenendezgarcia/relevo --archive tar.gz` and unpack it.
+Get the deploy files of the same version, for example `git clone --branch v0.3.0 https://github.com/oscarmenendezgarcia/relevo.git` (any `v…` tag), or `gh release download v0.3.0 --repo oscarmenendezgarcia/relevo --archive tar.gz` and unpack it.
 
 **Or build it** from a checkout, with Rust (`rustup`, stable) and a C compiler (`build-essential` on Debian and Ubuntu; SQLite is compiled in):
 
