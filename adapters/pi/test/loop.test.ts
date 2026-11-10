@@ -188,7 +188,7 @@ test("shutdown ends the session on the server, so the threads it holds show agai
     const shown = (await api(server, oscar, "GET", "/api/inbox", undefined, "shutdown-checker")).threads.find((t: any) => t.id === opened.thread);
     assert.ok(shown, "the thread shows again in another session at once");
     assert.equal(shown.claimed, null);
-    assert.equal(shown.waiting_for_you, true);
+    assert.equal(shown.pending, true);
   } finally {
     await ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, "tui"));
   }

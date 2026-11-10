@@ -293,7 +293,7 @@ test("a server that does not say `you` leaves every note wrapped and the prompt 
     from: "oscar",
     participants: ["oscar", "ana"],
     status: "open",
-    waiting_for_you: false,
+    pending: false,
     context: null,
     claimed: "this-session",
     notes: [{ id: "n_aaaaaaaaaaaa", author: "oscar", via: "pi laptop", created_at: "2026-11-08T10:41:00Z", text: "Mine", truncated: false }],

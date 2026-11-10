@@ -46,8 +46,7 @@ export interface Thread {
   from: string;
   participants: string[];
   status: "open" | "closed";
-  waiting_for_you: boolean;
-  /** Pending for the person: not handled yet (servers before 0.3.0 leave it out; `waiting_for_you` says the same). */
+  /** Pending for the person: not handled yet (servers before 0.3.0 leave it out: nothing is pending then). */
   pending?: boolean;
   context: string | null;
   claimed: "this-session" | "other-session" | null;

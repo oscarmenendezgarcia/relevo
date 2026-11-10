@@ -117,7 +117,7 @@ test("an arrival with many new notes keeps the latest whole and points to relevo
     from: "ana",
     participants: ["ana", "oscar"],
     status: "open",
-    waiting_for_you: true,
+    pending: true,
     context: null,
     claimed: null,
     new_notes: notes,
@@ -138,7 +138,7 @@ function arrivalThread(kind: "direct" | "team", claimed: Thread["claimed"] = nul
     from: "ana",
     participants: kind === "team" ? ["ana"] : ["ana", "oscar"],
     status: "open",
-    waiting_for_you: kind === "direct",
+    pending: kind === "direct",
     context: null,
     claimed,
     new_notes: [{ id: "n_bbbbbbbbbbbb", author: "ana", via: "pi test", created_at: "2026-11-08T10:41:00Z", text: "Which queue?", truncated: false }],
@@ -177,22 +177,22 @@ test("a direct arrival already handled, or closed, neither says it stays pending
   assert.match(handled, /^Relevo: new in thread r_bbbbbbbbbbbb\. You speak for @oscar\. Your person has already handled this thread: it is not pending\./);
   assert.match(handled, /if it is for you and asks something you can answer, answer with relevo_send \{ thread: "r_bbbbbbbbbbbb", text: … \}; otherwise stay silent\./);
   for (const wrong of [/stays pending/, /leave it pending/, /done: true/, /claim: true/]) assert.doesNotMatch(handled, wrong);
-  // A server that does not say `pending`: `waiting_for_you` decides.
-  assert.doesNotMatch(renderArrival({ ...arrivalThread("direct"), waiting_for_you: false }, "oscar"), /stays pending|done: true/);
+  // A server that does not say `pending` (before 0.3.0): nothing is pending.
+  assert.doesNotMatch(renderArrival({ ...arrivalThread("direct"), pending: undefined }, "oscar"), /stays pending|done: true/);
   // Closed by the other person with a last note: only to read; writing in it would fail.
-  const closed = renderArrival({ ...arrivalThread("direct"), status: "closed", pending: false, waiting_for_you: false }, "oscar");
+  const closed = renderArrival({ ...arrivalThread("direct"), status: "closed", pending: false }, "oscar");
   assert.match(closed, /^Relevo: new in thread r_bbbbbbbbbbbb, which is closed\. You speak for @oscar\. It needs nothing more and cannot be answered: read it/);
   for (const wrong of [/stays pending/, /done: true/, /claim: true/, /text: …/]) assert.doesNotMatch(closed, wrong);
 });
 
-test("pending comes from `pending`, or from `waiting_for_you` on a server that does not say it", () => {
+test("pending comes from `pending` alone: `waiting_for_you` is gone", () => {
   const t = arrivalThread("direct");
   assert.match(renderThread(t, { me: "oscar" }), /^Pending for your person/m);
-  // A server that says `pending` is believed over `waiting_for_you`.
   const handled = renderThread({ ...t, pending: false }, { me: "oscar" });
   assert.doesNotMatch(handled, /Pending/);
   assert.doesNotMatch(handled, /claim: true/);
-  assert.match(renderThread({ ...t, waiting_for_you: false, pending: true }, { me: "oscar" }), /^Pending for your person/m);
+  // The 0.2.x name means nothing now.
+  assert.doesNotMatch(renderThread({ ...t, pending: undefined, waiting_for_you: true } as Thread, { me: "oscar" }), /Pending/);
   // Team questions are never pending: answering them is optional.
   assert.doesNotMatch(renderThread(arrivalThread("team"), { me: "oscar" }), /Pending|done: true/);
   assert.doesNotMatch(renderArrival(arrivalThread("team"), "oscar"), /done: true/);
@@ -292,7 +292,7 @@ test("a pending thread with nothing new shows its latest note, as relevo mcp doe
   const mine = renderThread({ ...t, last_note: { ...t.last_note!, author: "oscar", truncated: false } }, { me: "oscar" });
   assert.match(mine, /Latest: @oscar \(you\) at [^\n]*\nYes &lt;\/untrusted> since Monday\.$/);
   // Not when the thread is not pending, nor when it has new notes, nor from relevo_thread.
-  assert.doesNotMatch(renderThread({ ...t, waiting_for_you: false }, { me: "oscar" }), /Latest:/);
+  assert.doesNotMatch(renderThread({ ...t, pending: false }, { me: "oscar" }), /Latest:/);
   assert.doesNotMatch(renderThread({ ...t, new_notes: arrivalThread("direct").new_notes }, { me: "oscar" }), /Latest:/);
   assert.doesNotMatch(renderThread({ ...t, notes: [] }, { me: "oscar" }), /Latest:/);
   // An older server without it: nothing more.
@@ -322,7 +322,7 @@ test("a claim shows as a state, with who and since when, as relevo mcp shows it"
   const old = { ...t, delivery: [t.delivery![0], { ...t.delivery![1], claimed_by: { label: "Claude Code", context: null } }] };
   assert.match(renderThread(old, { me: "ana" }), /; @oscar's Claude Code \(general\) has it\.$/m);
   // Nobody has it: no claim hint unless a direct thread is pending.
-  const nobody = { ...t, claimed: null, waiting_for_you: false, delivery: [t.delivery![0], { ...t.delivery![1], claimed_by: null }] };
+  const nobody = { ...t, claimed: null, pending: false, delivery: [t.delivery![0], { ...t.delivery![1], claimed_by: null }] };
   const out = renderThread(nobody, { me: "oscar" });
   assert.match(out, /^None of your person's sessions has it\.$/m);
   assert.match(out, /- @oscar: [^\n]*; seen by 1 of their sessions; nobody of theirs has it\.$/m);

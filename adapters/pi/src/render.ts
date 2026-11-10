@@ -59,9 +59,9 @@ function claimState(handle: string, c: NonNullable<Delivery["claimed_by"]>): str
   return `@${handle}'s ${c.label} ${c.context ? `in ${c.context}` : "(general)"} has it${at}`;
 }
 
-/** Whether the thread is pending for the person: `pending`, or `waiting_for_you` from a server that does not say `pending`. */
+/** Whether the thread is pending for the person (a server before 0.3.0 does not say: nothing is). */
 export function isPending(t: Thread): boolean {
-  return (t.pending ?? t.waiting_for_you) === true;
+  return t.pending === true;
 }
 
 /** Who of the person has the thread: who and since when only `relevo_thread`'s delivery says. */
