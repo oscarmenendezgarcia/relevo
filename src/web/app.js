@@ -452,9 +452,9 @@ if (typeof document !== 'undefined') {
     $('people').replaceChildren(...(people.length ? people : [el('div', 'none', 'Nobody yet')]));
   }
 
-  /// "@pedro → you", "@luis → @product", "@oscar → board".
+  /// "@pedro → you", "@luis → @product", "@oscar → everyone".
   function target(t) {
-    if (t.kind === 'global') return 'board';
+    if (t.kind === 'global') return 'everyone';
     if (t.kind === 'team') return t.teams.map((n) => '@' + n).join(', ');
     const others = t.participants.filter((h) => h !== t.from);
     return others.map((h) => (h === you() ? 'you' : '@' + h)).join(', ') || 'you';
@@ -611,8 +611,8 @@ if (typeof document !== 'undefined') {
       footer.hidden = true;
     } else if (state.tab === 'board') {
       footer.textContent = state.threads.length
-        ? 'This is the board: notes with no @, which everyone sees. Team notes and direct notes are seen only by the people in them.'
-        : 'Nothing on the board yet. A note with no @ goes here, for everyone to see.';
+        ? 'Notes with no @, for everyone. Team notes and direct notes are seen only by the people in them.'
+        : 'Nothing here yet. A note with no @ goes here, for everyone to see.';
       footer.hidden = !!state.cursor;
     } else {
       footer.textContent = state.threads.length ? '' : 'No threads here.';
