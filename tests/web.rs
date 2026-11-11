@@ -226,6 +226,10 @@ async fn only_the_two_timeline_routes_are_passed_on_and_only_get() {
         ("GET", "/api/dist/manifest.json"),
         ("GET", "/health"),
         ("POST", "/api/timeline?tab=board"),
+        ("HEAD", "/api/timeline?tab=board"),
+        ("HEAD", "/api/timeline/threads/r_aaaaaaaaaaaa"),
+        ("OPTIONS", "/api/timeline?tab=board"),
+        ("HEAD", "/"),
         ("PUT", "/api/timeline?tab=board"),
         ("DELETE", "/api/timeline/threads/r_aaaaaaaaaaaa"),
         ("GET", "/api/timeline/threads/r_aaaaaaaaaaaa/x"),
@@ -237,7 +241,10 @@ async fn only_the_two_timeline_routes_are_passed_on_and_only_get() {
     ] {
         let (status, headers, body) = ask(&s.web, method, path, &[key]).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
-        assert_eq!(json(&body)["error"]["code"], "NOT_FOUND", "{method} {path}");
+        // An answer to HEAD has no body.
+        if method != "HEAD" {
+            assert_eq!(json(&body)["error"]["code"], "NOT_FOUND", "{method} {path}");
+        }
         assert_security_headers(&headers, path);
     }
     // None of it reached the team's server: it would have counted as a session.

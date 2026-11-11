@@ -18,7 +18,7 @@ use axum::body::Body;
 use axum::extract::rejection::PathRejection;
 use axum::extract::{Path, Request, State};
 use axum::http::header::{self, HeaderName, HeaderValue};
-use axum::http::{StatusCode, Uri};
+use axum::http::{Method, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -122,10 +122,15 @@ fn same(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-/// Checks `Host`, `Origin` and, for the API, the key; then adds the security headers to the
+/// Checks `Host`, `Origin` and, for the API, the key, and refuses every method but GET; then adds the security headers to the
 /// answer, refusal or not.
 async fn guard(State(web): State<Arc<Web>>, req: Request, next: Next) -> Response {
     let mut res = match check(&web, &req) {
+        // GET only: axum would route HEAD to a GET handler too, which would ask the team's
+        // server. Anything else is no route at all.
+        Ok(()) if req.method() != Method::GET => {
+            refused(StatusCode::NOT_FOUND, "NOT_FOUND", "no such route")
+        }
         Ok(()) => next.run(req).await,
         Err(why) => refused(StatusCode::FORBIDDEN, "FORBIDDEN", why),
     };
