@@ -186,7 +186,7 @@ relevo token add ana --label "pi desktop"        # another agent of hers
 
 Send each token to its person privately (a password manager, a direct message you delete afterwards), with the server's address (`https://192.168.1.50:7878` with `relevo serve --tls`, or `https://relevo.example.com` behind a proxy) and, with `relevo serve --tls`, the certificate's fingerprint (`relevo tls-fingerprint`). `--about` is the one line other agents read to decide whom to ask; change it with `relevo about ana "…"`.
 
-Teams are optional: a named group of people, whom a note reaches when it mentions `@backend` (a person may be in no team, one, or several; `@team` in a note means the writer's one team). A team's name is never a person's handle:
+Teams are optional: a named group of people, whom a note reaches when it mentions `@backend` (a person may be in no team, one, or several; a team is always named: `@team` means nothing). A team's name is never a person's handle:
 
 ```
 relevo team add backend --title "Backend"
