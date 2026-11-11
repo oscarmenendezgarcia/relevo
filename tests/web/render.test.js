@@ -4,7 +4,7 @@
 'use strict';
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { parseNote, parseInline, toDom, preview, excerpt, withoutTitle, shownTitle, pickKey, askShown, short, noteTime, ago, absolute } = require(
+const { parseNote, parseInline, toDom, preview, excerpt, withoutTitle, shownTitle, pickKey, askShown, focusAfter, addedThreads, short, noteTime, ago, absolute } = require(
   path.join(__dirname, '..', '..', 'src', 'web', 'app.js')
 );
 
@@ -218,6 +218,28 @@ check('a row\'s preview is one paragraph, only allowed elements', () => {
 
 check('parseInline keeps line breaks inside a paragraph', () => {
   assert.deepEqual(parseInline('a\nb'), [{ t: 'text', text: 'a' }, { t: 'br' }, { t: 'text', text: 'b' }]);
+});
+
+check('a redraw that drops the focused row moves focus to its neighbour', () => {
+  const rows = ['a', 'b', 'c'];
+  // The row that took its place (the rows shifted up when it went).
+  assert.equal(focusAfter(rows, 0), 'a');
+  assert.equal(focusAfter(rows, 1), 'b');
+  // It was the last one: the one before it.
+  assert.equal(focusAfter(rows, 3), 'c');
+  assert.equal(focusAfter(rows, 2), 'c');
+  // Nothing left to focus: the feed itself.
+  assert.equal(focusAfter([], 0), null);
+  assert.equal(focusAfter([], -1), null);
+  assert.equal(focusAfter(rows, -1), null);
+});
+
+check('*Load more* knows the rows it added, in order', () => {
+  const known = new Set(['a', 'b']);
+  const page = [{ id: 'b' }, { id: 'c' }, { id: 'd' }];
+  assert.deepEqual(addedThreads(known, page).map((t) => t.id), ['c', 'd']);
+  assert.deepEqual(addedThreads(known, [{ id: 'a' }]), []);
+  assert.deepEqual(addedThreads(new Set(), []).map((t) => t.id), []);
 });
 
 // `check` is synchronous: these run after it, and fail the process when they fail.

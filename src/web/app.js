@@ -310,6 +310,17 @@ async function askShown(ask, shown, shownCursor) {
   return { first, threads, cursor };
 }
 
+/// Where the focus goes when a redraw dropped the row that had it: the row now at `at` (the one
+/// that took its place), else the one before it, else nothing — the feed itself.
+function focusAfter(rows, at) {
+  return rows[at] || rows[at - 1] || null;
+}
+
+/// The threads *Load more* brings in: the ones not shown yet, in the order they came.
+function addedThreads(known, threads) {
+  return threads.filter((t) => !known.has(t.id));
+}
+
 if (typeof module === 'object' && module.exports) {
   module.exports = {
     parseNote,
@@ -322,6 +333,8 @@ if (typeof module === 'object' && module.exports) {
     shownTitle,
     pickKey,
     askShown,
+    focusAfter,
+    addedThreads,
     short,
     noteTime,
     ago,
@@ -560,13 +573,18 @@ if (typeof document !== 'undefined') {
   async function loadMore() {
     const gen = state.gen;
     if (state.busy !== null || !state.cursor) return;
+    // The button disables and hides itself while it works: whether it had the focus decides where
+    // it goes afterwards, so that it never falls to the page body.
+    const hadFocus = document.activeElement === $('loadmore');
     state.busy = gen;
     $('loadmore').disabled = true;
+    // null when the answer is not wanted any more (the person changed the view).
+    let added = null;
     try {
       const v = await api(query(state.show, state.cursor, 20));
       if (gen !== state.gen) return;
-      const ids = new Set(state.threads.map((t) => t.id));
-      state.threads = state.threads.concat(v.threads.filter((t) => !ids.has(t.id)));
+      added = addedThreads(new Set(state.threads.map((t) => t.id)), v.threads);
+      state.threads = state.threads.concat(added);
       state.cursor = v.cursor;
       state.names = Object.assign({}, state.names, v.names);
       fine();
@@ -576,6 +594,11 @@ if (typeof document !== 'undefined') {
     } finally {
       if (state.busy === gen) state.busy = null;
       $('loadmore').disabled = false;
+      if (hadFocus && added) {
+        const first = added.length ? rowButton(added[0].id) : null;
+        const back = first || ($('loadmore').hidden ? $('feed') : $('loadmore'));
+        back.focus({ preventScroll: true });
+      }
     }
   }
 
@@ -714,6 +737,9 @@ if (typeof document !== 'undefined') {
     return a;
   }
 
+  /// The control of a row: the button of its title.
+  const rowButton = (id) => document.querySelector('[data-id="' + CSS.escape(id) + '"] h3 button');
+
   function toggle(id) {
     if (state.loading) return;
     if (state.open.has(id)) state.open.delete(id);
@@ -723,7 +749,7 @@ if (typeof document !== 'undefined') {
       if (!state.convos.has(id)) loadConvo(id);
     }
     renderFeed();
-    const again = document.querySelector('[data-id="' + CSS.escape(id) + '"] h3 button');
+    const again = rowButton(id);
     if (again) again.focus({ preventScroll: true });
   }
 
@@ -767,6 +793,8 @@ if (typeof document !== 'undefined') {
     const feed = $('feed');
     const focused = document.activeElement;
     const focusedRow = focused && focused.closest ? focused.closest('.row') : null;
+    // Where the focused row sits among the rows shown, in case this redraw drops it.
+    const at = focusedRow ? [...feed.querySelectorAll('.row')].indexOf(focusedRow) : -1;
     const old = new Map();
     feed.querySelectorAll('.row').forEach((r) => old.set(r.dataset.id, r));
     const rows = (threads) =>
@@ -809,10 +837,17 @@ if (typeof document !== 'undefined') {
       return s;
     });
     place(feed, sections);
-    // The row that had focus, if it was drawn again.
+    // The row that had focus, if it was drawn again; else the row that took its place, or the one
+    // before it, or the feed: focus never falls to the page body.
     if (focusedRow && !focusedRow.isConnected) {
-      const again = feed.querySelector('[data-id="' + CSS.escape(focusedRow.dataset.id) + '"] h3 button');
-      if (again) again.focus({ preventScroll: true });
+      const again = rowButton(focusedRow.dataset.id);
+      if (again) {
+        again.focus({ preventScroll: true });
+      } else {
+        const near = focusAfter([...feed.querySelectorAll('.row')], at);
+        const next = (near && rowButton(near.dataset.id)) || feed;
+        next.focus({ preventScroll: true });
+      }
     }
   }
 

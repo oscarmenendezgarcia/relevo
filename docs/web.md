@@ -35,7 +35,7 @@ Minimal: one column, a few words, nothing that repeats what the row already says
 - Dark and light (follows the system); the phone layout is the same column (filters wrap).
 - The favicon is the Relevo mark (`assets/brand/`).
 - When the team's server cannot be reached, a line at the top says so, with the time of the last good refresh; the rows already shown stay. Its space is reserved from the start, so nothing moves when it appears or disappears, as a refresh fails and the next one works; it is a live region always rendered, so it is announced; it is the colour of the text, not the amber of the pill, which means "this needs you". A tab or filter that could not be loaded says so (never "nothing here"), and so does a conversation, with a button to try again.
-- For the keyboard and screen readers: each title is a button (`aria-expanded`) in a heading; the tabs are a tablist (arrow keys, Home, End); filters keep focus when redrawn. All text is at least 4.5:1 on its background in both themes, the amber pill included.
+- For the keyboard and screen readers: each title is a button (`aria-expanded`) in a heading; the tabs are a tablist (arrow keys, Home, End); filters keep focus when redrawn, and focus never falls to the page: a refresh that drops the row under focus (it was handled, closed, filtered out) moves it to the row that took its place, or the one before it, or the list, and *Load more* moves it to the first row it brought in. All text is at least 4.5:1 on its background in both themes, the amber pill included.
 
 ## Not in it
 
