@@ -439,7 +439,9 @@ if (typeof document !== 'undefined') {
     if (text) setTimeout(() => (box.textContent = text), 50);
   }
 
-  /// Unreachable server, wrong key, refused request: a line at the top; what is shown stays.
+  /// Unreachable server, wrong key, refused request: a line at the top; what is shown stays. Its
+  /// space is reserved and it is a live region always rendered, so the rows never jump and the
+  /// words are read out.
   function problem(err) {
     let text;
     if (err.status === 403) {
@@ -454,12 +456,11 @@ if (typeof document !== 'undefined') {
     }
     if (state.lastOk) text += ' Last updated ' + hhmm(state.lastOk) + '.';
     $('banner').textContent = text;
-    $('banner').hidden = false;
   }
 
   function fine() {
     state.lastOk = new Date();
-    $('banner').hidden = true;
+    $('banner').textContent = '';
   }
 
   async function api(path) {

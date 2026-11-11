@@ -535,6 +535,32 @@ mod tests {
         }
     }
 
+    /// The body of `selector`'s rule of the stylesheet, as in `.banner {`.
+    fn rule(selector: &str) -> String {
+        let head = STYLE
+            .find(selector)
+            .unwrap_or_else(|| panic!("the stylesheet has no {selector}"));
+        let body = &STYLE[head + selector.len()..];
+        body[..body.find('}').unwrap()].trim().to_string()
+    }
+
+    /// The line of a failed refresh never moves the page and is always a live region: its space
+    /// is reserved from the start (a `hidden` box would push every row down a line, and back up,
+    /// every 30 seconds) and it is never `display:none`, which screen readers do not announce.
+    /// Nor is it the amber of the status pill: it asks for nothing.
+    #[test]
+    fn the_banner_never_moves_the_page_and_is_always_read() {
+        assert!(
+            INDEX.contains(r#"<div class="banner" id="banner" role="status"></div>"#),
+            "the banner is rendered from the start, with nothing hidden"
+        );
+        assert!(!SCRIPT.contains("$('banner').hidden"), "it is never hidden");
+        let banner = rule(".banner {");
+        assert!(banner.contains("min-height:"), "its height: {banner}");
+        assert!(!banner.contains("display: none"), "{banner}");
+        assert!(banner.contains("color: var(--text)"), "{banner}");
+    }
+
     /// The page and its assets are self-contained: no inline script, nothing remote, and note
     /// text never reaches innerHTML (the script does not use it at all).
     #[test]

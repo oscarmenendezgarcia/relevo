@@ -34,7 +34,7 @@ Minimal: one column, a few words, nothing that repeats what the row already says
 - **Motion, minimal**: a conversation fades in (opacity and 4 px, about 150 ms, ease-out) only when the person opens it; a row that is new or got a new note on a refresh gets a soft tint that fades out over about 1 s. Nothing else moves. Hover effects only with a mouse (`hover: hover`); `prefers-reduced-motion` turns the fade off and keeps the tint without movement.
 - Dark and light (follows the system); the phone layout is the same column (filters wrap).
 - The favicon is the Relevo mark (`assets/brand/`).
-- When the team's server cannot be reached, a line at the top says so, with the time of the last good refresh; the rows already shown stay. A tab or filter that could not be loaded says so (never "nothing here"), and so does a conversation, with a button to try again.
+- When the team's server cannot be reached, a line at the top says so, with the time of the last good refresh; the rows already shown stay. Its space is reserved from the start, so nothing moves when it appears or disappears, as a refresh fails and the next one works; it is a live region always rendered, so it is announced; it is the colour of the text, not the amber of the pill, which means "this needs you". A tab or filter that could not be loaded says so (never "nothing here"), and so does a conversation, with a button to try again.
 - For the keyboard and screen readers: each title is a button (`aria-expanded`) in a heading; the tabs are a tablist (arrow keys, Home, End); filters keep focus when redrawn. All text is at least 4.5:1 on its background in both themes, the amber pill included.
 
 ## Not in it

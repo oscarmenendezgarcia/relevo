@@ -38,7 +38,10 @@ h1 { font-size: 1em; font-weight: 700; margin: 0; }
 .seg button[aria-selected="true"] { background: var(--bg); color: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, .25); }
 .cnt { color: var(--need); font-variant-numeric: tabular-nums; margin-left: 3px; font-weight: 600; }
 .cnt:empty { display: none; }
-.banner { margin: -12px 0 22px; font-size: 13px; color: var(--need); }
+/* The line of a failed refresh. Its space is always reserved, so nothing below it moves when a
+   refresh fails and works again; it is the body text's colour, not the amber of the pill: it
+   asks for nothing. */
+.banner { margin: -12px 0 22px; min-height: 1.5em; font-size: 13px; color: var(--text); }
 
 /* For you's filters: text, with counts */
 .filters { display: flex; gap: 4px; flex-wrap: wrap; margin: -12px 0 22px; font-size: 13px; }
