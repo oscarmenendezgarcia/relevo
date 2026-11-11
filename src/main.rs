@@ -22,7 +22,7 @@ enum Command {
     Serve {
         #[arg(long, env = "RELEVO_ADDR", default_value = "127.0.0.1:7878")]
         addr: SocketAddr,
-        /// Team threads one person may open in any rolling 24 hours.
+        /// Team and global-board threads one person may open in any rolling 24 hours.
         #[arg(long, env = "RELEVO_TEAM_QUESTIONS_PER_DAY", default_value_t = 5)]
         team_questions_per_day: u32,
         /// Speak HTTPS with a certificate of its own, kept in <db>.tls/ (self-signed, made on
@@ -321,14 +321,15 @@ async fn connect(url: &str, token: Option<String>, fingerprint: Option<String>) 
     // The check is a session of its own: end it, or it stays listed until it is forgotten.
     let _ = client.end(std::time::Duration::from_secs(2)).await;
     config::save(&path, &config)?;
-    let team = people["team"].as_array().map(Vec::len).unwrap_or(0);
+    // `team` lists everyone on the server, whatever teams there are.
+    let people = people["team"].as_array().map(Vec::len).unwrap_or(0);
     let pinned = if config.cert.is_some() {
         " with its certificate"
     } else {
         ""
     };
     println!(
-        "connected to {} (a team of {team}); saved{pinned} to {}",
+        "connected to {} ({people} people on it); saved{pinned} to {}",
         config.url,
         path.display()
     );

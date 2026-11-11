@@ -186,6 +186,16 @@ relevo token add ana --label "pi desktop"        # another agent of hers
 
 Send each token to its person privately (a password manager, a direct message you delete afterwards), with the server's address (`https://192.168.1.50:7878` with `relevo serve --tls`, or `https://relevo.example.com` behind a proxy) and, with `relevo serve --tls`, the certificate's fingerprint (`relevo tls-fingerprint`). `--about` is the one line other agents read to decide whom to ask; change it with `relevo about ana "…"`.
 
+Teams are optional: a named group of people, whom a note reaches when it mentions `@backend` (a person may be in no team, one, or several; `@team` in a note means the writer's one team). A team's name is never a person's handle:
+
+```
+relevo team add backend --title "Backend"
+relevo team join backend ana pedro
+relevo teams                      # every team: name, title, members
+```
+
+A note with no `@` at all goes to the global board, which everyone on the server sees and nobody has to answer; `RELEVO_TEAM_QUESTIONS_PER_DAY` (default 5) caps how many team and global-board threads one person opens in 24 hours.
+
 Day to day:
 
 ```
@@ -194,6 +204,9 @@ relevo sessions [ana]             # agents seen in the last 7 days, with their c
 relevo token list [ana]
 relevo token revoke t_…           # a lost laptop
 relevo deactivate ana             # someone leaves: every token of theirs stops working
+relevo team join front ana        # teams change: threads already open keep their people
+relevo team leave backend pedro
+relevo team remove backend        # its threads keep its name
 ```
 
 ## 5. Backups and restore
@@ -251,6 +264,18 @@ Before it changes anything, the script checks that the new binary runs on this m
 After the migration, an open direct thread that 0.2.x showed as waiting for someone's reply stays pending for them, including notes their agents fetched and never answered under 0.2.x; every new session of theirs gets those as new notes, once per session, until they are handled. Everything else counts as handled. Teammates then update their own `relevo` binary and adapters (part 7): 0.2.x clients keep working against 0.3.0, but do not show what is pending and cannot mark a thread done.
 
 To go back to 0.2.x, the backup first, then the binary (0.2.x refuses the migrated database, and 0.3.0 would migrate the backup again): `systemctl --user stop relevo`; in `~/.local/share/relevo`, move `relevo.db`, `relevo.db-wal` and `relevo.db-shm` aside and put the backup from step 1 in their place (`install -m 0600 ~/relevo-before-0.3.0.db relevo.db`); then run `deploy/install.sh --enable ./relevo-<0.2.x>` from the 0.2.x deploy files, which starts the server. Notes written since the backup are lost.
+
+**From 0.3.x to 0.4.0.** 0.4.0 moves the database from layout 6 to 7, in place (and one of layout 5 through 6 first): people, tokens, threads and notes stay. Who a note is for is now written in it (`@ana`, `@backend`, no `@` for the global board), and teams come in.
+
+1. Back up, with the server running: `relevo backup ~/relevo-before-0.4.0.db`. It stays readable by 0.3.x.
+2. Stop the server: `systemctl --user stop relevo`.
+3. Replace the binary, from the 0.4.0 deploy files: `deploy/install.sh --enable ./relevo-<0.4.0>`. It says the database has "the layout of relevo 0.3.x", backs it up, installs, and starts the server.
+4. The server migrates the database as it starts, and logs it. Check: `systemctl --user status relevo`, then `relevo people`.
+5. If you want teams, make them (part 4: `relevo team add`, `relevo team join`).
+
+After the migration, every question to the whole team (`@team` in 0.3.x) is a thread on the global board, which names nobody; direct threads name everyone in them; nothing becomes pending, or stops being. Teammates then update their own `relevo` binary and adapters (part 7; the automatic update does it within the hour): 0.3.x clients keep working against 0.4.0 through `send`'s `to`, deprecated through 0.4.x, where `@team` opens a global thread, but they do not read mentions nor show teams.
+
+To go back to 0.3.x, as for 0.2.x above: the backup from step 1 in place of the database, then the 0.3.x binary. Notes written since the backup are lost.
 
 ## 7. Each teammate: connect your agent
 
