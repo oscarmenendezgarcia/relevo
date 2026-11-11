@@ -140,6 +140,50 @@ impl Client {
         })
     }
 
+    /// `GET path` with the token alone, no session or context (it counts as no session's
+    /// request), and its body as bytes: at most `max` of them, or `BadResponse`.
+    pub async fn fetch(&self, path: &str, max: u64, timeout: Duration) -> Result<Vec<u8>, Error> {
+        let mut res = self
+            .http
+            .get(format!("{}{path}", self.url))
+            .bearer_auth(&self.token)
+            .timeout(timeout)
+            .send()
+            .await
+            .map_err(network)?;
+        let status = res.status();
+        // An error's body is small; a body bigger than asked for is not read at all.
+        let max = if status.is_success() { max } else { 64 * 1024 };
+        if res.content_length().is_some_and(|n| n > max) {
+            return Err(Error::BadResponse(format!(
+                "{status}, more than {max} bytes"
+            )));
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = res.chunk().await.map_err(network)? {
+            if (bytes.len() + chunk.len()) as u64 > max {
+                return Err(Error::BadResponse(format!(
+                    "{status}, more than {max} bytes"
+                )));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if status.is_success() {
+            return Ok(bytes);
+        }
+        let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        let err = &body["error"];
+        Err(Error::Api {
+            status: status.as_u16(),
+            code: err["code"].as_str().unwrap_or("HTTP_ERROR").to_string(),
+            message: err["message"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("the server answered {status}")),
+            body,
+        })
+    }
+
     pub async fn people(&self) -> Result<Value, Error> {
         let req = self.http.get(format!("{}/api/people", self.url));
         let v = shaped(
@@ -354,6 +398,7 @@ mod tests {
             url: format!("http://{addr}"),
             token: "rlv_test".into(),
             cert: None,
+            adapters: vec![],
         };
         let client = Client::new(&config, Some(String::new()), std::env::temp_dir()).unwrap();
         let mut body = serde_json::Map::new();
@@ -392,6 +437,7 @@ mod tests {
             url: format!("http://{addr}"),
             token: "rlv_test".into(),
             cert: None,
+            adapters: vec![],
         };
         (config, server)
     }

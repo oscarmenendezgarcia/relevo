@@ -15,6 +15,7 @@ pub mod render;
 pub mod serve;
 pub mod session;
 pub mod tls;
+pub mod update;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

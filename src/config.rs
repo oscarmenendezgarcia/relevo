@@ -16,6 +16,18 @@ pub struct Config {
     /// authorities do not vouch for the server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cert: Option<String>,
+    /// The adapters installed on this machine, which `relevo update` updates too
+    /// (docs/update.md). Only the file has them, never the environment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub adapters: Vec<Adapter>,
+}
+
+/// An adapter's folder, as `relevo update --adapter <kind> --path <dir>` registers it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Adapter {
+    /// `pi` or `hermes`.
+    pub kind: String,
+    pub path: PathBuf,
 }
 
 /// The config file: `RELEVO_CONFIG`, else `$HOME/.config/relevo/config.json`.
@@ -34,20 +46,25 @@ pub fn env(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }
 
+/// The config file as it is, or `None` when there is none.
+pub fn saved(file: &Path) -> Result<Option<Config>> {
+    match std::fs::read(file) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .with_context(|| format!("reading {}", file.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("reading {}", file.display())),
+    }
+}
+
 /// The file (if any), then `RELEVO_URL`, `RELEVO_TOKEN` and `RELEVO_CERT` (a PEM file) over it.
 /// The saved certificate goes with the saved URL: it is not used for another `RELEVO_URL`.
 pub fn load(env: impl Fn(&str) -> Option<String>) -> Result<Config> {
-    let file = path(&env)?;
-    let mut saved = None;
-    match std::fs::read(&file) {
-        Ok(bytes) => {
-            let config: Config = serde_json::from_slice(&bytes)
-                .with_context(|| format!("reading {}", file.display()))?;
-            saved = Some(config);
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e).with_context(|| format!("reading {}", file.display())),
-    }
+    let saved = saved(&path(&env)?)?;
+    let adapters = saved
+        .as_ref()
+        .map(|s| s.adapters.clone())
+        .unwrap_or_default();
     let set = |name| env(name).filter(|v: &String| !v.is_empty());
     let url = match (set("RELEVO_URL"), &saved) {
         (Some(url), _) => Some(normalize_url(&url)?),
@@ -65,7 +82,12 @@ pub fn load(env: impl Fn(&str) -> Option<String>) -> Result<Config> {
         }),
     };
     match (url, token) {
-        (Some(url), Some(token)) => Ok(Config { url, token, cert }),
+        (Some(url), Some(token)) => Ok(Config {
+            url,
+            token,
+            cert,
+            adapters,
+        }),
         _ => bail!(
             "Relevo is not configured: run `relevo connect <url>` and give it the token \
              (or set RELEVO_URL and RELEVO_TOKEN)"
@@ -183,6 +205,10 @@ mod tests {
             url: "https://relevo.example.com".into(),
             token: "rlv_secret".into(),
             cert: Some("-----BEGIN CERTIFICATE-----\n...".into()),
+            adapters: vec![Adapter {
+                kind: "pi".into(),
+                path: "/home/x/.pi/relevo".into(),
+            }],
         };
         save(&file, &config).unwrap();
         assert_eq!(mode(&file), 0o600);
@@ -208,6 +234,7 @@ mod tests {
                 url: "https://a.example".into(),
                 token: "rlv_a".into(),
                 cert: Some("saved pem".into()),
+                adapters: vec![],
             },
         )
         .unwrap();

@@ -488,6 +488,25 @@ impl ServerHandler for Relevo {
 /// kills its MCP servers when it exits), then ends the session on the server (best effort, for
 /// `END_TIMEOUT` at most), so the threads it holds go back to the person's other sessions at once
 /// instead of after the claims lapse.
+/// The automatic update (docs/update.md): at most once an hour per machine, off with
+/// `RELEVO_AUTO_UPDATE=0`, and silent on stderr unless it installed something or failed.
+async fn auto_update() {
+    let req = crate::update::Request {
+        auto: true,
+        ..Default::default()
+    };
+    let steps = match crate::update::Setup::this_binary() {
+        Ok(setup) => crate::update::command(&req, &setup, config::env, crate::db::now_unix()).await,
+        Err(e) => Err(e),
+    };
+    match steps {
+        Ok(steps) => steps
+            .iter()
+            .for_each(|step| eprintln!("relevo mcp: update: {step}")),
+        Err(e) => eprintln!("relevo mcp: update: {e:#}"),
+    }
+}
+
 pub async fn run(channel: bool) -> anyhow::Result<()> {
     // Listening from the start, so a signal that comes early is not lost.
     let stop = stop_signal()?;
@@ -511,6 +530,8 @@ pub async fn run(channel: bool) -> anyhow::Result<()> {
         server.failed.clone(),
     );
     let service = server.serve(rmcp::transport::stdio()).await?;
+    // In the background, once serving: stdout is MCP's alone, and nothing waits for it.
+    tokio::spawn(auto_update());
     let mut news = None;
     if channel {
         match &client {
