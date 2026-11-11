@@ -462,7 +462,7 @@ async fn tools_carry_a_conversation_between_sessions() {
     assert!(err.contains("- @ana (Ana): ana things"), "{err}");
     let (failed, err) = bob.call("thread", json!({ "id": "r_aaaaaaaaaaaa" })).await;
     assert!(failed && err.starts_with("NOT_FOUND: "), "{err}");
-    let (failed, err) = bob.call("send", json!({ "text": "to whom?" })).await;
+    let (failed, err) = bob.call("send", json!({ "close": true })).await;
     assert!(failed && err.starts_with("BAD_REQUEST: "), "{err}");
     let (failed, err) = bob.call("thread", json!({ "id": "../people" })).await;
     assert!(failed && err.starts_with("NOT_FOUND: "), "{err}");

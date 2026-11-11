@@ -20,6 +20,7 @@ use crate::db::{
     CONTEXT_FORMAT, RESERVED_HANDLES, context_repo, random_id, rfc3339, valid_context,
 };
 use crate::error::ApiError;
+use crate::mention::{Mention, mentions};
 use crate::session::{Session, SessionOut, end, find, lapse, next_lapse, touch};
 use crate::{App, MAX_WAITS_PER_TOKEN};
 
@@ -64,6 +65,16 @@ struct Member {
     name: String,
     about: String,
     contexts: Vec<String>,
+    /// The teams they are in, by name.
+    teams: Vec<String>,
+}
+
+/// A team, with its active members.
+#[derive(Serialize)]
+struct TeamOut {
+    name: String,
+    title: String,
+    members: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -79,6 +90,8 @@ struct NoteOut {
 #[derive(Serialize)]
 struct Delivery {
     handle: String,
+    /// The thread names them: only then can it be pending for them.
+    named: bool,
     note: Option<String>,
     delivered_at: Option<String>,
     /// The session the note reached.
@@ -118,8 +131,12 @@ struct ThreadOut {
     title: String,
     from: String,
     participants: Vec<String>,
+    /// The teams the opening note named, by their names then.
+    teams: Vec<String>,
+    /// The person is a named participant.
+    named: bool,
     status: String,
-    /// Pending for the person: `direct`, `open`, with a note by someone else they have not
+    /// Pending for the person: `open`, naming them, with a note by someone else they have not
     /// handled.
     pending: bool,
     context: Option<String>,
@@ -165,6 +182,26 @@ struct SendResult {
     /// Who holds the thread for the writer's person afterwards, as `claim` names it for the
     /// session that asks.
     claimed: Option<&'static str>,
+    #[serde(flatten)]
+    told: Told,
+}
+
+/// What a `send` says about whom it reached; kept with its key, for a replay.
+#[derive(Serialize, Deserialize)]
+struct Told {
+    kind: String,
+    /// Whom this note's mentions (or `to`) named.
+    to: Named,
+    /// The people this note added to the thread.
+    added: Vec<String>,
+    /// How many people other than the writer take part in the thread after it.
+    reached: i64,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct Named {
+    people: Vec<String>,
+    teams: Vec<String>,
 }
 
 /// A thread as seen by one session of a participant.
@@ -182,6 +219,8 @@ struct ThreadRow {
     waiting: bool,
     context: Option<String>,
     claimed_by: Option<i64>,
+    /// The thread names the person.
+    named: bool,
 }
 
 /// One thread of an inbox page, with what orders it.
@@ -199,7 +238,7 @@ struct Candidate {
 const THREAD_SQL: &str = "
 SELECT t.id, t.kind, t.title, o.handle, t.opener_id, t.status,
        coalesce(s.delivered_seq, p.delivered_seq, 0), p.last_seq, p.waiting, p.context,
-       p.claimed_by
+       p.claimed_by, p.named_seq IS NOT NULL
 FROM participants p
 JOIN threads t ON t.id = p.thread_id
 JOIN people o ON o.id = t.opener_id
@@ -223,6 +262,7 @@ fn find_thread(conn: &Connection, session: &Session, id: &str) -> Result<ThreadR
                 waiting: r.get(8)?,
                 context: r.get(9)?,
                 claimed_by: r.get(10)?,
+                named: r.get(11)?,
             })
         },
     )
@@ -379,31 +419,33 @@ fn inbox_count(conn: &Connection, session: &Session, all: bool) -> Result<usize,
 
 /// Recomputes what the rows of a thread know about it (latest note, new, waiting (pending),
 /// inbox, resolved, fresh, and the copies on the sessions' rows). Runs after every change to the
-/// thread: a note, a close, a delivery, a claim, a person handling it.
+/// thread: a note, a close, a delivery, a claim, a person handling it, a person named.
 fn refresh(conn: &Connection, thread: &str) -> Result<(), ApiError> {
     // A thread is opened by its first note, so it always has a latest one.
-    let (last_seq, open_direct, resolved): (i64, bool, bool) = conn.query_row(
-        "SELECT n.seq, t.kind = 'direct' AND t.status = 'open',
-                t.kind = 'team' AND t.status = 'closed'
+    let (last_seq, open, closed_shared): (i64, bool, bool) = conn.query_row(
+        "SELECT n.seq, t.status = 'open', t.kind != 'direct' AND t.status = 'closed'
          FROM threads t JOIN notes n ON n.thread_id = t.id
          WHERE t.id = ?1 ORDER BY n.seq DESC LIMIT 1",
         [thread],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
-    // Pending (`waiting`): open, direct, with a note by someone else after what the person
-    // handled. Fresh: pending, and one of their sessions has a note they have not handled.
+    // Pending (`waiting`): open, naming the person, with a note by someone else after what they
+    // handled, and from the one that named them on (`FLOOR`). Fresh: pending, and one of their
+    // sessions has a note they have not handled. Resolved: a closed `team` or `global` thread
+    // that does not name them.
+    let pending = format!("(?3 AND named_seq IS NOT NULL AND {FLOOR} < last_other_seq)");
     conn.execute(
-        "UPDATE participants SET
-             last_seq = ?2,
-             has_new = coalesce(delivered_seq, 0) < last_other_seq,
-             waiting = ?3 AND coalesce(handled_seq, 0) < last_other_seq,
-             inbox = coalesce(delivered_seq, 0) < last_other_seq
-                     OR (?3 AND coalesce(handled_seq, 0) < last_other_seq),
-             resolved = ?4,
-             fresh = ?3 AND coalesce(handled_seq, 0) < last_other_seq
-                     AND coalesce(handled_seq, 0) < coalesce(delivered_seq, 0)
-         WHERE thread_id = ?1",
-        params![thread, last_seq, open_direct, resolved],
+        &format!(
+            "UPDATE participants SET
+                 last_seq = ?2,
+                 has_new = coalesce(delivered_seq, 0) < last_other_seq,
+                 waiting = {pending},
+                 inbox = coalesce(delivered_seq, 0) < last_other_seq OR ({pending}),
+                 resolved = ?4 AND named_seq IS NULL,
+                 fresh = {pending} AND {FLOOR} < coalesce(delivered_seq, 0)
+             WHERE thread_id = ?1"
+        ),
+        params![thread, last_seq, open, closed_shared],
     )?;
     conn.execute(
         "UPDATE session_threads AS s SET
@@ -421,7 +463,28 @@ fn refresh(conn: &Connection, thread: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// Every active person, with the contexts of their sessions seen in the last 15 minutes.
+/// How far a named participant's pending notes start: after what they handled, and from the note
+/// that named them on (what came before was optional for them). `NULL` when not named. A new
+/// session starts there in a fresh thread (`session::START_SQL`).
+const FLOOR: &str = "max(coalesce(handled_seq, 0), named_seq - 1)";
+
+/// The teams each person is in, by name.
+fn teams_of(conn: &Connection) -> Result<HashMap<i64, Vec<String>>, ApiError> {
+    let mut out: HashMap<i64, Vec<String>> = HashMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT m.person_id, t.name FROM team_members m JOIN teams t ON t.id = m.team_id
+         ORDER BY t.name",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    for row in rows {
+        let (person, team) = row?;
+        out.entry(person).or_default().push(team);
+    }
+    Ok(out)
+}
+
+/// Every active person, with the contexts of their sessions seen in the last 15 minutes and the
+/// teams they are in.
 fn team(conn: &Connection, now: i64) -> Result<Vec<Member>, ApiError> {
     let mut contexts: HashMap<i64, Vec<String>> = HashMap::new();
     let mut stmt = conn.prepare(
@@ -433,17 +496,58 @@ fn team(conn: &Connection, now: i64) -> Result<Vec<Member>, ApiError> {
         let (person, context) = row?;
         contexts.entry(person).or_default().push(context);
     }
+    let mut teams = teams_of(conn)?;
     let mut stmt = conn
         .prepare("SELECT id, handle, name, about FROM people WHERE active = 1 ORDER BY handle")?;
     let rows = stmt.query_map([], |r| {
+        let id: i64 = r.get(0)?;
         Ok(Member {
-            contexts: contexts.remove(&r.get(0)?).unwrap_or_default(),
+            contexts: contexts.remove(&id).unwrap_or_default(),
+            teams: teams.remove(&id).unwrap_or_default(),
             handle: r.get(1)?,
             name: r.get(2)?,
             about: r.get(3)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Every team, by name, with its active members, by handle.
+fn teams(conn: &Connection) -> Result<Vec<TeamOut>, ApiError> {
+    let mut out: Vec<(i64, TeamOut)> = conn
+        .prepare("SELECT id, name, title FROM teams ORDER BY name")?
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                TeamOut {
+                    name: r.get(1)?,
+                    title: r.get(2)?,
+                    members: Vec::new(),
+                },
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut stmt = conn.prepare(
+        "SELECT m.team_id, p.handle FROM team_members m JOIN people p ON p.id = m.person_id
+         WHERE p.active = 1 ORDER BY p.handle",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get(1)?)))?;
+    for row in rows {
+        let (team, handle) = row?;
+        if let Some((_, t)) = out.iter_mut().find(|(id, _)| *id == team) {
+            t.members.push(handle);
+        }
+    }
+    Ok(out.into_iter().map(|(_, t)| t).collect())
+}
+
+/// The teams the note that opened a thread named, sorted.
+fn thread_teams(conn: &Connection, thread: &str) -> Result<Vec<String>, ApiError> {
+    let rows = conn
+        .prepare_cached("SELECT name FROM thread_teams WHERE thread_id = ?1 ORDER BY name")?
+        .query_map([thread], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows)
 }
 
 fn participants(conn: &Connection, thread: &str) -> Result<Vec<String>, ApiError> {
@@ -575,6 +679,8 @@ fn thread_out(
         title: row.title.clone(),
         from: row.from.clone(),
         participants: participants(conn, &row.id)?,
+        teams: thread_teams(conn, &row.id)?,
+        named: row.named,
         status: row.status.clone(),
         pending: row.waiting,
         context: row.context.clone(),
@@ -641,7 +747,8 @@ fn delivery(conn: &Connection, thread: &str) -> Result<Vec<Delivery>, ApiError> 
                  LEFT JOIN session_threads st ON st.session_id = s.id AND st.thread_id = p.thread_id
                  WHERE s.person_id = p.person_id
                    AND coalesce(st.delivered_seq, p.delivered_seq) >= n.seq),
-                p.handled_seq >= n.seq, p.handled_at, p.handled_label, p.handled_context
+                p.handled_seq >= n.seq, p.handled_at, p.handled_label, p.handled_context,
+                p.named_seq IS NOT NULL
          FROM participants p JOIN people pe ON pe.id = p.person_id
          LEFT JOIN notes n ON n.seq = (
              SELECT max(o.seq) FROM notes o
@@ -657,6 +764,7 @@ fn delivery(conn: &Connection, thread: &str) -> Result<Vec<Delivery>, ApiError> 
         };
         Ok(Delivery {
             handle: r.get(0)?,
+            named: r.get(13)?,
             note: r.get(1)?,
             delivered_at: r.get::<_, Option<i64>>(2)?.map(rfc3339),
             by: session(r.get(3)?, r.get(4)?),
@@ -743,8 +851,12 @@ fn as_session<T>(
 // ---------- handlers ----------
 
 async fn people(State(app): State<Arc<App>>, caller: Caller) -> Result<Json<Value>, ApiError> {
-    let team = as_session(&app, &caller, true, |tx, _, now| team(tx, now))?;
-    Ok(Json(json!({ "team": team, "you": caller.handle })))
+    let (team, teams) = as_session(&app, &caller, true, |tx, _, now| {
+        Ok((team(tx, now)?, teams(tx)?))
+    })?;
+    Ok(Json(
+        json!({ "team": team, "teams": teams, "you": caller.handle }),
+    ))
 }
 
 /// `DELETE /api/session`: the client ends its session. It is forgotten at once, with its claims.
@@ -863,6 +975,7 @@ fn answer_inbox(app: &App, caller: &Caller, all: bool, arrived: bool) -> Result<
             threads.push(out);
         }
         let team = team(tx, now)?;
+        let teams = teams(tx)?;
         tracing::info!(
             person = %caller.handle,
             session = session.id,
@@ -873,6 +986,7 @@ fn answer_inbox(app: &App, caller: &Caller, all: bool, arrived: bool) -> Result<
         );
         Ok(json!({
             "team": team,
+            "teams": teams,
             // `you`: which member of `team` this session speaks for.
             "session": {
                 "label": session.label,
@@ -929,6 +1043,8 @@ async fn send(
         thread = %result.thread,
         note = result.note.as_deref().unwrap_or("-"),
         status = %result.status,
+        kind = %result.told.kind,
+        reached = result.told.reached,
         "send"
     );
     Ok(Json(result))
@@ -954,36 +1070,62 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<(SendResult, Ve
             ));
         }
     }
-    if req.to.is_some() == req.thread.is_some() {
+    let marks = req.close || req.claim || req.done;
+    if req.to.is_some() {
+        if req.thread.is_some() {
+            return Err(ApiError::bad_request(
+                "give exactly one of 'to' and 'thread' ('to' is deprecated: write who the note \
+                 is for in its text, with @handle)",
+            ));
+        }
+        if marks {
+            return Err(ApiError::bad_request(
+                "'to' opens a thread: 'close', 'claim' and 'done' go with 'thread' only",
+            ));
+        }
+    } else if req.thread.is_none() && marks {
         return Err(ApiError::bad_request(
-            "give exactly one of 'to' and 'thread'",
+            "'close', 'claim' and 'done' go with 'thread' only: opening a thread claims nothing",
         ));
     }
-    if req.claim && req.to.is_some() {
+    if req.done && (req.text.is_some() || req.claim) {
         return Err(ApiError::bad_request(
-            "claim goes with 'thread' only: opening a thread claims nothing",
+            "done goes with 'thread' alone: no 'text' and no 'claim'",
         ));
     }
-    if req.done && (req.to.is_some() || req.text.is_some() || req.claim) {
-        return Err(ApiError::bad_request(
-            "done goes with 'thread' alone: no 'to', no 'text' and no 'claim'",
-        ));
-    }
-    if req.text.is_none() && !(req.thread.is_some() && (req.close || req.claim || req.done)) {
+    if req.text.is_none() && !(req.thread.is_some() && marks) {
         return Err(ApiError::bad_request(
             "text is required (it may be left out only to close, claim or mark done a thread)",
         ));
     }
-    let to = req
-        .to
-        .as_deref()
-        .map(|to| recipients(to, &caller.handle))
-        .transpose()?;
+    // Who it is for, as far as that can be checked without the database: an unknown name is
+    // past these checks.
+    let whom = match (&req.to, &req.text) {
+        (Some(to), _) => Whom {
+            mentions: recipients(to, &caller.handle)?,
+            people_only: true,
+        },
+        (None, Some(text)) => Whom {
+            mentions: mentions(text, &caller.handle).map_err(ApiError::bad_request)?,
+            people_only: false,
+        },
+        (None, None) => Whom {
+            mentions: Vec::new(),
+            people_only: false,
+        },
+    };
 
     // Only a request past its own parameter checks counts as seen.
     as_session(app, caller, true, |tx, session, now| {
-        write_as(tx, app, caller, session, &req, to.as_ref(), now)
+        write_as(tx, app, caller, session, &req, &whom, now)
     })
+}
+
+/// Whom a `send` names: the mentions of its text, or, from the deprecated `to`, its addresses
+/// (people only; none for `@team`, which opens a `global` thread).
+struct Whom {
+    mentions: Vec<Mention>,
+    people_only: bool,
 }
 
 /// `send`'s writes, as `session`.
@@ -993,7 +1135,7 @@ fn write_as(
     caller: &Caller,
     session: &Session,
     req: &SendRequest,
-    to: Option<&To>,
+    whom: &Whom,
     now: i64,
 ) -> Result<(SendResult, Vec<i64>), ApiError> {
     // Keys expire 24 hours after the send that used them. Forgetting them here keeps the table
@@ -1002,44 +1144,29 @@ fn write_as(
         "DELETE FROM send_keys WHERE created_at <= ?1",
         [now - KEY_LIFETIME_SECS],
     )?;
-    // A replay keeps who held the thread after the first send, named for the session that asks:
-    // a retry from another session is not told it holds a thread it does not.
-    if let Some(key) = &req.key {
-        let first = tx
-            .query_row(
-                "SELECT thread_id, note_id, status, claimed_by FROM send_keys
-                 WHERE person_id = ?1 AND key = ?2",
-                params![caller.person_id, key],
-                |r| {
-                    Ok(SendResult {
-                        thread: r.get(0)?,
-                        note: r.get(1)?,
-                        status: r.get(2)?,
-                        claimed: claim(r.get(3)?, session),
-                    })
-                },
-            )
-            .optional()?;
-        if let Some(first) = first {
-            return Ok((first, Vec::new()));
-        }
+    if let Some(key) = &req.key
+        && let Some(first) = replay(tx, caller, session, key)?
+    {
+        return Ok((first, Vec::new()));
     }
 
     // `caught_up`: every note of the thread had reached this session before it wrote, the
-    // person's own from other sessions included.
-    let (thread_id, caught_up) = match (to, &req.thread) {
-        (Some(to), _) => {
+    // person's own from other sessions included. `to`: whom this note names.
+    let (thread_id, caught_up, mut to, reply_names) = match &req.thread {
+        None => {
             let text = req.text.as_deref().unwrap_or_default();
-            (open_thread(tx, app, caller, to, text, now)?, true)
+            let (id, to) = open_thread(tx, app, caller, whom, text, now)?;
+            (id, true, to, Vec::new())
         }
-        (None, Some(id)) => {
+        Some(id) => {
             let row = find_thread(tx, session, id)?;
             if row.status == "closed" {
                 return Err(ApiError::thread_closed());
             }
-            if req.close && row.kind == "team" && row.opener_id != caller.person_id {
+            if req.close && row.kind != "direct" && row.opener_id != caller.person_id {
                 return Err(ApiError::forbidden());
             }
+            let names = reply_names(tx, caller, &whom.mentions, now)?;
             if req.text.is_some() {
                 let recent: i64 = tx.query_row(
                     "SELECT count(*) FROM notes WHERE thread_id = ?1 AND created_at > ?2",
@@ -1051,11 +1178,15 @@ fn write_as(
                 }
             }
             let caught_up = row.delivered_seq >= row.last_seq;
-            (row.id, caught_up)
+            let to = Named {
+                people: names.iter().map(|(_, h, _)| h.clone()).collect(),
+                teams: Vec::new(),
+            };
+            (row.id, caught_up, to, names)
         }
-        (None, None) => unreachable!("checked above"),
     };
 
+    let mut added = Vec::new();
     let note_id = match &req.text {
         Some(text) => {
             let recent: i64 = tx.query_row(
@@ -1083,6 +1214,8 @@ fn write_as(
                 ],
             )?;
             let seq = tx.last_insert_rowid();
+            // The people this note names, from this note on; those not in the thread join it.
+            added = name(tx, &thread_id, seq, &reply_names)?;
             tx.execute(
                 "UPDATE participants SET last_other_seq = ?2 WHERE thread_id = ?1 AND person_id != ?3",
                 params![thread_id, seq, caller.person_id],
@@ -1105,7 +1238,7 @@ fn write_as(
     // Writing in an existing thread claims it for this session, and so does `claim` without a
     // note. Opening a thread claims nothing: the asker has nothing to take on, and the answers
     // must reach the person's next session too. Closing without text does not claim.
-    if to.is_none() && (note_id.is_some() || req.claim) {
+    if req.thread.is_some() && (note_id.is_some() || req.claim) {
         take_claim(tx, caller, session, &thread_id, now)?;
     }
 
@@ -1133,16 +1266,26 @@ fn write_as(
         params![thread_id, caller.person_id],
         |r| r.get(0),
     )?;
+    let (kind, reached) = reach(tx, &thread_id)?;
+    to.people.dedup();
     let result = SendResult {
         thread: thread_id,
         note: note_id,
         status: if req.close { "closed" } else { "open" }.to_string(),
         claimed: claim(claimed_by, session),
+        told: Told {
+            kind,
+            to,
+            added,
+            reached,
+        },
     };
     if let Some(key) = &req.key {
+        let told = serde_json::to_string(&result.told).map_err(|_| ApiError::internal())?;
         tx.execute(
-            "INSERT INTO send_keys (person_id, key, thread_id, note_id, status, claimed_by, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO send_keys (person_id, key, thread_id, note_id, status, claimed_by,
+                                    created_at, result)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 caller.person_id,
                 key,
@@ -1150,7 +1293,8 @@ fn write_as(
                 result.note,
                 result.status,
                 claimed_by,
-                now
+                now,
+                told
             ],
         )?;
     }
@@ -1244,57 +1388,293 @@ fn take_claim(
     Ok(())
 }
 
-/// Creates a `direct` or `team` thread with its participants (the writer first). Returns its id.
+/// A thread's kind, and how many people other than the writer take part in it.
+fn reach(tx: &Connection, thread: &str) -> Result<(String, i64), ApiError> {
+    Ok(tx.query_row(
+        "SELECT kind, (SELECT count(*) - 1 FROM participants WHERE thread_id = ?1)
+         FROM threads WHERE id = ?1",
+        [thread],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?)
+}
+
+/// The first result of a `send` with this key, if it is still kept. It keeps who held the thread
+/// after that send, named for the session that asks: a retry from another session is not told it
+/// holds a thread it does not. A key used before layout 7 kept no more than that: the rest is
+/// told as the thread is now.
+fn replay(
+    tx: &Connection,
+    caller: &Caller,
+    session: &Session,
+    key: &str,
+) -> Result<Option<SendResult>, ApiError> {
+    let first = tx
+        .query_row(
+            "SELECT thread_id, note_id, status, claimed_by, result FROM send_keys
+             WHERE person_id = ?1 AND key = ?2",
+            params![caller.person_id, key],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((thread, note, status, claimed_by, told)) = first else {
+        return Ok(None);
+    };
+    let told = match told.and_then(|t| serde_json::from_str(&t).ok()) {
+        Some(told) => told,
+        None => {
+            let (kind, reached) = reach(tx, &thread)?;
+            Told {
+                kind,
+                to: Named::default(),
+                added: Vec::new(),
+                reached,
+            }
+        }
+    };
+    Ok(Some(SendResult {
+        thread,
+        note,
+        status,
+        claimed: claim(claimed_by, session),
+        told,
+    }))
+}
+
+/// Who mentions name: people (id, handle, context), in the order mentioned, and teams (id, name),
+/// once each.
+struct Resolved {
+    people: Vec<(i64, String, Option<String>)>,
+    teams: Vec<(i64, String)>,
+}
+
+/// Finds whom the mentions name: an active person's handle, a team's name, or `team` (your one
+/// team). Names that are none of these fail with `UNKNOWN_PERSON`, all of them at once; `@team`
+/// with no team or several of yours, and a context on a team, with `BAD_REQUEST`. With
+/// `people_only` (the deprecated `to`), a team's name is unknown.
+fn resolve(
+    conn: &Connection,
+    caller: &Caller,
+    mentions: &[Mention],
+    people_only: bool,
+    now: i64,
+) -> Result<Resolved, ApiError> {
+    let mut out = Resolved {
+        people: Vec::new(),
+        teams: Vec::new(),
+    };
+    let mut unknown = Vec::new();
+    let mut refused = None;
+    for m in mentions {
+        let team = if m.name == "team" {
+            let mine: Vec<(i64, String)> = conn
+                .prepare_cached(
+                    "SELECT t.id, t.name FROM team_members m JOIN teams t ON t.id = m.team_id
+                     WHERE m.person_id = ?1 ORDER BY t.name",
+                )?
+                .query_map([caller.person_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            match mine.as_slice() {
+                [one] => Some(one.clone()),
+                [] => {
+                    refused.get_or_insert(ApiError::bad_request(
+                        "@team means your team, and you are in none: name a team (@name) or the \
+                         people the note is for (@handle), or write no @ to post on the global \
+                         board",
+                    ));
+                    None
+                }
+                several => {
+                    let names: Vec<String> = several.iter().map(|(_, n)| format!("@{n}")).collect();
+                    refused.get_or_insert(ApiError::bad_request(format!(
+                        "@team means your team, and you are in several: {}; name the one you mean",
+                        names.join(", ")
+                    )));
+                    None
+                }
+            }
+        } else {
+            let person: Option<i64> = conn
+                .prepare_cached("SELECT id FROM people WHERE handle = ?1 AND active = 1")?
+                .query_row([&m.name], |r| r.get(0))
+                .optional()?;
+            if let Some(id) = person {
+                out.people.push((id, m.name.clone(), m.context.clone()));
+                continue;
+            }
+            let team: Option<i64> = if people_only {
+                None
+            } else {
+                conn.prepare_cached("SELECT id FROM teams WHERE name = ?1")?
+                    .query_row([&m.name], |r| r.get(0))
+                    .optional()?
+            };
+            match team {
+                Some(id) => {
+                    if let Some(context) = &m.context {
+                        refused.get_or_insert(ApiError::bad_request(format!(
+                            "'@{}/{context}': @{} is a team, and a team takes no context",
+                            m.name, m.name
+                        )));
+                    }
+                    Some((id, m.name.clone()))
+                }
+                None => {
+                    unknown.push(m.name.clone());
+                    None
+                }
+            }
+        };
+        if let Some(team) = team
+            && !out.teams.iter().any(|(id, _)| *id == team.0)
+        {
+            out.teams.push(team);
+        }
+    }
+    if !unknown.is_empty() {
+        let valid = serde_json::to_value(team(conn, now)?).unwrap_or_default();
+        let teams = serde_json::to_value(teams(conn)?).unwrap_or_default();
+        return Err(ApiError::unknown_person(&unknown, valid, teams));
+    }
+    match refused {
+        Some(e) => Err(e),
+        None => Ok(out),
+    }
+}
+
+/// The people a reply's mentions name. A team cannot be named there: a thread's teams are those
+/// of the note that opened it.
+fn reply_names(
+    conn: &Connection,
+    caller: &Caller,
+    mentions: &[Mention],
+    now: i64,
+) -> Result<Vec<(i64, String, Option<String>)>, ApiError> {
+    let team_in_reply = |name: &str| {
+        ApiError::bad_request(format!(
+            "@{name} is a team, and a team cannot be mentioned in a reply: open a new thread for \
+             it, or name its people (@handle)"
+        ))
+    };
+    if mentions.iter().any(|m| m.name == "team") {
+        return Err(team_in_reply("team"));
+    }
+    let resolved = resolve(conn, caller, mentions, false, now)?;
+    if let Some((_, name)) = resolved.teams.first() {
+        return Err(team_in_reply(name));
+    }
+    Ok(resolved.people)
+}
+
+/// Names these people in the thread from note `seq` on: a participant not named yet becomes
+/// named; someone not in it joins it, named, addressed to the context of their mention. (The
+/// context of a mention of someone already in the thread is ignored.) Returns those who joined.
+fn name(
+    conn: &Connection,
+    thread: &str,
+    seq: i64,
+    people: &[(i64, String, Option<String>)],
+) -> Result<Vec<String>, ApiError> {
+    let mut added = Vec::new();
+    for (person, handle, context) in people {
+        let named: Option<Option<i64>> = conn
+            .query_row(
+                "SELECT named_seq FROM participants WHERE thread_id = ?1 AND person_id = ?2",
+                params![thread, person],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match named {
+            Some(Some(_)) => {}
+            Some(None) => {
+                conn.execute(
+                    "UPDATE participants SET named_seq = ?3 WHERE thread_id = ?1 AND person_id = ?2",
+                    params![thread, person, seq],
+                )?;
+            }
+            None => {
+                conn.execute(
+                    "INSERT INTO participants (thread_id, person_id, context, named_seq)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![thread, person, context, seq],
+                )?;
+                added.push(handle.clone());
+            }
+        }
+    }
+    Ok(added)
+}
+
+/// Opens a thread for whom the mentions (or `to`) name: `direct` for people only, `team` with a
+/// team, `global` with nobody. Its participants: the writer first, then the people named, then
+/// the other active members of the teams named (or, in a `global` thread, every other active
+/// person), by handle. Returns its id and whom it named.
 fn open_thread(
     conn: &Connection,
     app: &App,
     caller: &Caller,
-    to: &To,
+    whom: &Whom,
     text: &str,
     now: i64,
-) -> Result<String, ApiError> {
-    // The others, each with the context the thread is addressed to for them.
-    let (kind, others): (&str, Vec<(i64, Option<String>)>) = match to {
-        To::Team => {
-            let others: Vec<(i64, Option<String>)> = conn
-                .prepare("SELECT id FROM people WHERE active = 1 AND id != ?1 ORDER BY handle")?
-                .query_map([caller.person_id], |r| Ok((r.get(0)?, None)))?
-                .collect::<rusqlite::Result<_>>()?;
-            if others.is_empty() {
-                return Err(ApiError::no_recipients());
-            }
-            let asked: i64 = conn.query_row(
-                "SELECT count(*) FROM threads
-             WHERE opener_id = ?1 AND kind = 'team' AND created_at > ?2",
-                params![caller.person_id, now - 24 * 3600],
-                |r| r.get(0),
+) -> Result<(String, Named), ApiError> {
+    let r = resolve(conn, caller, &whom.mentions, whom.people_only, now)?;
+    let kind = match (r.teams.is_empty(), r.people.is_empty()) {
+        (false, _) => "team",
+        (true, false) => "direct",
+        (true, true) => "global",
+    };
+    // The others: (person, the context the thread is addressed to for them, named).
+    let mut others: Vec<(i64, Option<String>, bool)> = r
+        .people
+        .iter()
+        .map(|(id, _, context)| (*id, context.clone(), true))
+        .collect();
+    let reached: Vec<i64> = match kind {
+        "team" => {
+            let mut stmt = conn.prepare_cached(
+                "SELECT p.id FROM team_members m JOIN people p ON p.id = m.person_id
+                 WHERE m.team_id = ?1 AND p.active = 1 AND p.id != ?2 ORDER BY p.handle",
             )?;
-            if asked >= i64::from(app.team_questions_per_day) {
-                return Err(ApiError::team_limit(app.team_questions_per_day));
-            }
-            ("team", others)
-        }
-        To::People(addresses) => {
-            let mut others = Vec::new();
-            for (handle, context) in addresses {
-                let id: Option<i64> = conn
-                    .query_row(
-                        "SELECT id FROM people WHERE handle = ?1 AND active = 1",
-                        [handle],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
-                match id {
-                    Some(id) => others.push((id, context.clone())),
-                    None => {
-                        let valid = serde_json::to_value(team(conn, now)?).unwrap_or_default();
-                        return Err(ApiError::unknown_person(handle, valid));
-                    }
+            let mut ids = Vec::new();
+            for (team, _) in &r.teams {
+                for id in stmt.query_map(params![team, caller.person_id], |r| r.get(0))? {
+                    ids.push(id?);
                 }
             }
-            ("direct", others)
+            ids
         }
+        "global" => conn
+            .prepare("SELECT id FROM people WHERE active = 1 AND id != ?1 ORDER BY handle")?
+            .query_map([caller.person_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?,
+        _ => Vec::new(),
     };
+    for id in reached {
+        if !others.iter().any(|(o, _, _)| *o == id) {
+            others.push((id, None, false));
+        }
+    }
+    if others.is_empty() {
+        return Err(ApiError::no_recipients());
+    }
+    if kind != "direct" {
+        let opened: i64 = conn.query_row(
+            "SELECT count(*) FROM threads
+             WHERE opener_id = ?1 AND kind IN ('team', 'global') AND created_at > ?2",
+            params![caller.person_id, now - 24 * 3600],
+            |r| r.get(0),
+        )?;
+        if opened >= i64::from(app.team_questions_per_day) {
+            return Err(ApiError::team_limit(app.team_questions_per_day));
+        }
+    }
 
     let id = random_id("r_");
     conn.execute(
@@ -1302,25 +1682,33 @@ fn open_thread(
          VALUES (?1, ?2, ?3, ?4, 'open', ?5)",
         params![id, kind, title_of(text), caller.person_id, now],
     )?;
-    let mut add = conn
-        .prepare("INSERT INTO participants (thread_id, person_id, context) VALUES (?1, ?2, ?3)")?;
-    add.execute(params![id, caller.person_id, None::<String>])?;
-    for (person, context) in others {
-        add.execute(params![id, person, context])?;
+    let mut add = conn.prepare(
+        "INSERT INTO participants (thread_id, person_id, context, named_seq)
+         VALUES (?1, ?2, ?3, ?4)",
+    )?;
+    // Every participant of a `direct` thread is named, its opener too: the others answer to them.
+    let opener_named = (kind == "direct").then_some(0);
+    add.execute(params![id, caller.person_id, None::<String>, opener_named])?;
+    for (person, context, named) in others {
+        add.execute(params![id, person, context, named.then_some(0)])?;
     }
-    Ok(id)
+    for (_, name) in &r.teams {
+        conn.execute(
+            "INSERT INTO thread_teams (thread_id, name) VALUES (?1, ?2)",
+            params![id, name],
+        )?;
+    }
+    let to = Named {
+        people: r.people.into_iter().map(|(_, h, _)| h).collect(),
+        teams: r.teams.into_iter().map(|(_, n)| n).collect(),
+    };
+    Ok((id, to))
 }
 
-/// Whom `send` opens a thread for.
-enum To {
-    Team,
-    /// (handle, context) pairs, the writer not among them.
-    People(Vec<(String, Option<String>)>),
-}
-
-/// `to`, checked as far as it can be without the database: `@team` alone and without a context,
-/// or 1 to 20 people other than the writer (`me`).
-fn recipients(to: &[String], me: &str) -> Result<To, ApiError> {
+/// The deprecated `to`, checked as far as it can be without the database, as 0.3 did: `@team`
+/// alone and without a context (none named: a `global` thread), or 1 to 20 people other than
+/// the writer (`me`).
+fn recipients(to: &[String], me: &str) -> Result<Vec<Mention>, ApiError> {
     let addresses = addresses(to)?;
     if addresses.iter().any(|(h, _)| h == "team") {
         if addresses.len() != 1 {
@@ -1331,7 +1719,7 @@ fn recipients(to: &[String], me: &str) -> Result<To, ApiError> {
         if addresses[0].1.is_some() {
             return Err(ApiError::bad_request("'@team' takes no context"));
         }
-        return Ok(To::Team);
+        return Ok(Vec::new());
     }
     if addresses.is_empty() || addresses.len() > MAX_RECIPIENTS {
         return Err(ApiError::bad_request(
@@ -1341,7 +1729,10 @@ fn recipients(to: &[String], me: &str) -> Result<To, ApiError> {
     if addresses.iter().any(|(h, _)| h == me) {
         return Err(ApiError::bad_request("you cannot send a note to yourself"));
     }
-    Ok(To::People(addresses))
+    Ok(addresses
+        .into_iter()
+        .map(|(name, context)| Mention { name, context })
+        .collect())
 }
 
 /// `to`, read as (handle, context) pairs: without leading `@`, lowercased, `equipo` read as

@@ -114,7 +114,8 @@ pub fn touch(
 /// A new session starts with what its person has (it has no row of its own: see
 /// `session_threads`), except in the threads still pending for the person where one of their
 /// sessions has a note they have not handled (`fresh`): there it starts with what the person
-/// handled, so a note fetched by a session that died before handling it is new for this one.
+/// handled (or, named later, from the note that named them), so a note fetched by a session that
+/// died before handling it is new for this one.
 fn start(conn: &Connection, id: i64, person: i64) -> Result<(), ApiError> {
     conn.prepare_cached(START_SQL)?
         .execute(params![id, person])?;
@@ -122,11 +123,12 @@ fn start(conn: &Connection, id: i64, person: i64) -> Result<(), ApiError> {
 }
 
 /// The rows a new session `?1` of person `?2` starts with, read from an index that holds only
-/// fresh threads: it costs nothing for a person without any.
+/// fresh threads: it costs nothing for a person without any. It starts where the person's pending
+/// notes do (`api::FLOOR`): after what they handled, and from the note that named them on.
 const START_SQL: &str = "
 INSERT INTO session_threads (session_id, thread_id, person_id, delivered_seq, has_new, waiting,
                              last_seq, claimed_by, context, person_inbox, resolved)
-SELECT ?1, thread_id, person_id, coalesce(handled_seq, 0), 1,
+SELECT ?1, thread_id, person_id, max(coalesce(handled_seq, 0), named_seq - 1), 1,
        waiting, last_seq, claimed_by, context, inbox, resolved
 FROM participants INDEXED BY participants_fresh
 WHERE person_id = ?2 AND fresh = 1";

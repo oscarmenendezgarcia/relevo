@@ -1,0 +1,17 @@
+{
+  "tokens": {
+    "ana": "rlv_90-Pq9NMn3XcLlrRjRTsylKKKWIn6FdixwwarMqXCmw",
+    "bob": "rlv_z3dpHG387vmOmUx5QWH8pSy0zd-cCrNKnKAXB_5Ug6k",
+    "carl": "rlv_3guoCL2avLbmVEKcSV9bgD2aInV3UawoA-6u3BluqZU"
+  },
+  "threads": {
+    "fetched": "r_pxsxyijycdc5",
+    "replied": "r_26jmvdxtfgsv",
+    "done": "r_jjjrxezton6r",
+    "team": "r_duekqcrvmt36",
+    "unread_team": "r_3qwkprknqzko",
+    "resolved": "r_awxyxjmiqiz5",
+    "claimed": "r_kgbm3jdprxjj",
+    "unread": "r_xbsqqdtx2ocw"
+  }
+}

@@ -148,16 +148,77 @@ fn without_relevo_db_an_admin_command_never_creates_a_database_here() {
 }
 
 #[test]
-fn only_serve_migrates_a_layout_5_database_and_check_db_says_so() {
+fn only_serve_migrates_a_layout_5_or_6_database_and_check_db_says_so() {
+    for (dump, made_by) in [
+        (
+            include_str!("fixtures/layout5.sql"),
+            "relevo 0.1.0 to 0.2.x",
+        ),
+        (include_str!("fixtures/layout6.sql"), "relevo 0.3.x"),
+    ] {
+        let dir = std::env::temp_dir().join(db::random_id("relevo-cli-"));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("relevo.db");
+        let path = path.to_str().unwrap();
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .execute_batch(dump)
+            .unwrap();
+        let before = std::fs::read(path).unwrap();
+        let run = |args: &[&str]| {
+            Command::new(env!("CARGO_BIN_EXE_relevo"))
+                .arg("--db")
+                .arg(path)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        let out = run(&["check-db"]);
+        assert!(out.status.success());
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            said.contains("`relevo serve` migrates it in place") && said.contains(made_by),
+            "{said}"
+        );
+        for args in [
+            &["people"][..],
+            &["invite", "dan", "--name", "Dan"][..],
+            &["team", "add", "backend"][..],
+            &["teams"][..],
+        ] {
+            let out = run(args);
+            assert!(!out.status.success(), "{args:?}");
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                err.contains("only `relevo serve`")
+                    && err.contains("relevo backup")
+                    && err.contains(made_by),
+                "{err}"
+            );
+        }
+        // Nothing changed, and a backup of it can still be taken.
+        assert_eq!(std::fs::read(path).unwrap(), before);
+        let copy = dir.join("copy.db");
+        relevo(path, &["backup", copy.to_str().unwrap()]);
+        // A newer layout: refused, with exit 1.
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .pragma_update(None, "user_version", 99)
+            .unwrap();
+        let out = run(&["check-db"]);
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("newer version of relevo"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[test]
+fn teams_are_kept_from_the_cli() {
     let dir = std::env::temp_dir().join(db::random_id("relevo-cli-"));
     std::fs::create_dir(&dir).unwrap();
     let path = dir.join("relevo.db");
     let path = path.to_str().unwrap();
-    rusqlite::Connection::open(path)
-        .unwrap()
-        .execute_batch(include_str!("fixtures/layout5.sql"))
-        .unwrap();
-    let before = std::fs::read(path).unwrap();
+    db::open(path).unwrap();
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_relevo"))
             .arg("--db")
@@ -166,33 +227,45 @@ fn only_serve_migrates_a_layout_5_database_and_check_db_says_so() {
             .output()
             .unwrap()
     };
-    let out = run(&["check-db"]);
-    assert!(out.status.success());
-    let said = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        said.contains("`relevo serve` migrates it in place"),
-        "{said}"
-    );
-    for args in [&["people"][..], &["invite", "dan", "--name", "Dan"][..]] {
+    let fails = |args: &[&str], says: &str| {
         let out = run(args);
         assert!(!out.status.success(), "{args:?}");
         let err = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            err.contains("only `relevo serve`") && err.contains("relevo backup"),
-            "{err}"
-        );
+        assert!(err.contains(says), "{args:?}: {err}");
+    };
+    for h in ["ana", "bob", "old"] {
+        relevo(path, &["invite", h, "--name", h]);
     }
-    // Nothing changed, and a backup of it can still be taken.
-    assert_eq!(std::fs::read(path).unwrap(), before);
-    let copy = dir.join("copy.db");
-    relevo(path, &["backup", copy.to_str().unwrap()]);
-    // A newer layout: refused, with exit 1.
-    rusqlite::Connection::open(path)
-        .unwrap()
-        .pragma_update(None, "user_version", 99)
-        .unwrap();
-    let out = run(&["check-db"]);
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("newer version of relevo"));
+    relevo(path, &["deactivate", "old"]);
+    let said = relevo(path, &["team", "add", "backend", "--title", "Backend"]);
+    assert!(said.contains("added team backend"), "{said}");
+    relevo(path, &["team", "add", "front"]);
+    // A team takes no handle, active or not, nor `team` or `equipo`; a handle takes no team's
+    // name.
+    fails(&["team", "add", "ana"], "handle of a person");
+    fails(&["team", "add", "old"], "handle of a person (inactive)");
+    fails(&["team", "add", "team"], "reserved");
+    fails(&["team", "add", "equipo"], "reserved");
+    fails(&["team", "add", "backend"], "already");
+    fails(&["invite", "backend", "--name", "B"], "name of a team");
+    // Joining: active people only, nothing changed otherwise; twice is said, not an error.
+    let said = relevo(path, &["team", "join", "backend", "ana", "bob"]);
+    assert_eq!(said, "ana joined backend\nbob joined backend\n");
+    let said = relevo(path, &["team", "join", "backend", "ana"]);
+    assert_eq!(said, "ana is in backend already\n");
+    fails(&["team", "join", "front", "ana", "old"], "deactivated");
+    fails(&["team", "join", "front", "ana", "zed"], "no person");
+    fails(&["team", "join", "nope", "ana"], "no team named 'nope'");
+    fails(&["team", "join", "front"], "required");
+    relevo(path, &["deactivate", "bob"]);
+    let said = relevo(path, &["teams"]);
+    assert_eq!(said, "backend\tBackend\tana, bob (inactive)\nfront\t\t\n");
+    let said = relevo(path, &["team", "leave", "backend", "bob", "old"]);
+    assert_eq!(said, "bob left backend\nold was not in backend\n");
+    let said = relevo(path, &["team", "remove", "backend"]);
+    assert!(said.contains("removed team backend"), "{said}");
+    assert_eq!(relevo(path, &["teams"]), "front\t\t\n");
+    // The name is free again, for a team or a person.
+    relevo(path, &["invite", "backend", "--name", "B"]);
     std::fs::remove_dir_all(&dir).unwrap();
 }
