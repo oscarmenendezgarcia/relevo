@@ -1,7 +1,11 @@
 name: Release
 
 # Push a tag such as v0.1.0 to build Linux binaries and attach them, with SHA256SUMS, to the
-# GitHub release of that tag (created if missing).
+# GitHub release of that tag (created if missing), with the dist the team's server hands out to
+# the clients (docs/update.md): the pi and Hermes archives, manifest.json, its signature
+# manifest.sig, and all of it in relevo-dist-<version>.tar.gz. The manifest is signed with the
+# Ed25519 key in the repository secret RELEVO_SIGNING_KEY (PEM); the release stops if that key
+# is not the one keys/release-signing-pub.pem holds, which the binaries trust.
 on:
   push:
     tags: ["v*"]
@@ -49,10 +53,23 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
+      - name: Dist, signed
+        env:
+          RELEVO_SIGNING_KEY: ${{ secrets.RELEVO_SIGNING_KEY }}
+        run: |
+          [ -n "$RELEVO_SIGNING_KEY" ] || { echo "the secret RELEVO_SIGNING_KEY is not set" >&2; exit 1; }
+          key=$(mktemp "$RUNNER_TEMP/signing.XXXXXX")
+          trap 'rm -f "$key"' EXIT
+          chmod 0600 "$key"
+          printf '%s\n' "$RELEVO_SIGNING_KEY" > "$key"
+          deploy/make-dist.sh --key "$key" --pub keys/release-signing-pub.pem dist
+          cat dist/manifest.json
+      # Of the binaries and of every archive.
       - name: Checksums
         working-directory: dist
         run: |
@@ -66,4 +83,5 @@ jobs:
         run: |
           gh release view "$TAG" >/dev/null 2>&1 ||
             gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes
-          gh release upload "$TAG" --clobber dist/relevo-* dist/SHA256SUMS
+          gh release upload "$TAG" --clobber dist/relevo-* dist/SHA256SUMS \
+            dist/manifest.json dist/manifest.sig
