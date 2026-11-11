@@ -376,3 +376,167 @@ fn the_note_renderer_passes_its_tests() {
         ),
     }
 }
+
+/// `relevo web` gives the opener a file of its user's, never the address with the key: every
+/// local user can read a command line. The file sends the browser on to the address, and is
+/// gone once the page asked with the key, and when `relevo web` stops.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_key_never_goes_in_the_openers_command_line() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let dir = std::env::temp_dir().join(relevo::db::random_id("relevo-web-open-"));
+    let (bin, run) = (dir.join("bin"), dir.join("run"));
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&run).unwrap();
+    std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // A stand-in opener: it records its arguments, the file it was given and their modes.
+    let seen = dir.join("seen");
+    let opener = bin.join("xdg-open");
+    std::fs::write(
+        &opener,
+        format!(
+            "#!/bin/sh\nout={seen}\nprintf '%s\\n' \"$@\" > \"$out.args\"\n\
+             cp \"$1\" \"$out.file\"\nstat -c %a \"$1\" \"$(dirname \"$1\")\" > \"$out.modes\"\n\
+             touch \"$out.done\"\n",
+            seen = seen.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&opener, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let config = dir.join("config.json");
+    relevo::config::save(
+        &config,
+        &Config {
+            url: "http://127.0.0.1:9".to_string(),
+            token: "rlv_nothing".to_string(),
+            cert: None,
+            adapters: vec![],
+        },
+    )
+    .unwrap();
+
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut child = Command::new(env!("CARGO_BIN_EXE_relevo"))
+        .args(["web"])
+        .env("PATH", path)
+        .env("HOME", &dir)
+        .env("RELEVO_CONFIG", &config)
+        .env("XDG_RUNTIME_DIR", &run)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id() as libc::pid_t;
+    let stdout = child.stdout.take().unwrap();
+    // Whatever fails, the child is stopped below.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut stdout = BufReader::new(stdout);
+        let mut address = String::new();
+        while !address.contains("#k=") {
+            address.clear();
+            assert!(
+                stdout.read_line(&mut address).unwrap() > 0,
+                "no address printed"
+            );
+        }
+        // The full address is still printed, for a browser that cannot open the file.
+        let address = address.trim().to_string();
+        let key = address.split("#k=").nth(1).unwrap().to_string();
+        let port: u16 = address
+            .trim_start_matches("http://127.0.0.1:")
+            .split('/')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let done = dir.join("seen.done");
+        let start = Instant::now();
+        while !done.exists() {
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "the opener never ran"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let args = std::fs::read_to_string(dir.join("seen.args")).unwrap();
+        let file = std::fs::read_to_string(dir.join("seen.file")).unwrap_or_default();
+        let modes = std::fs::read_to_string(dir.join("seen.modes")).unwrap_or_default();
+        let given = std::path::PathBuf::from(args.trim());
+
+        assert!(
+            !args.contains(&key),
+            "the key is in the opener's arguments: {args}"
+        );
+        assert_eq!(args.lines().count(), 1, "{args}");
+        assert!(given.starts_with(&run), "{args}");
+        // It sends the browser on to the address with the key, and only this user can read it.
+        assert!(
+            file.contains(&format!(
+                r#"<meta http-equiv="refresh" content="0;url={address}">"#
+            )),
+            "{file}"
+        );
+        assert_eq!(modes.split_whitespace().collect::<Vec<_>>(), ["600", "700"]);
+        assert!(given.exists());
+        // The page asks with the key: the launcher is gone.
+        let mut conn = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(
+            conn,
+            "GET /api/timeline?tab=board HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\
+             Relevo-Web-Key: {key}\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut answer = String::new();
+        conn.read_to_string(&mut answer).unwrap();
+        assert!(answer.starts_with("HTTP/1.1 502"), "{answer}");
+        assert!(!given.exists());
+        assert!(!given.parent().unwrap().exists());
+    }));
+    // Stop it as Ctrl-C would.
+    unsafe { libc::kill(pid, libc::SIGINT) };
+    let start = Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if start.elapsed() > Duration::from_secs(10) {
+            let _ = child.kill();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// Stopped before the page asked, `relevo web` deletes the launcher too.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_launcher_is_deleted_when_relevo_web_stops() {
+    use std::os::unix::fs::PermissionsExt;
+    let base = std::env::temp_dir().join(relevo::db::random_id("relevo-web-launcher-"));
+    std::fs::create_dir(&base).unwrap();
+    let address = format!("http://127.0.0.1:{PORT}/#k={KEY}");
+    let launcher = web::Launcher::new(&base, &address).unwrap();
+    let file = launcher.path().to_path_buf();
+    assert!(!file.to_string_lossy().contains(KEY));
+    assert!(std::fs::read_to_string(&file).unwrap().contains(&address));
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&file), 0o600);
+    assert_eq!(mode(file.parent().unwrap()), 0o700);
+    let s = for_server("http://127.0.0.1:9", "rlv_nothing");
+    s.keep_launcher(launcher);
+    assert!(file.exists());
+    s.drop_launcher();
+    assert!(!file.exists() && !file.parent().unwrap().exists());
+    assert_eq!(std::fs::read_dir(&base).unwrap().count(), 0);
+    std::fs::remove_dir(&base).unwrap();
+}

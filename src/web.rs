@@ -4,12 +4,17 @@
 //! config. The browser never sees the token.
 //!
 //! Only the tab opened with the secret may ask: the secret goes in the address after `#`, so it
-//! is never sent in a request line, and the page sends it back in `Relevo-Web-Key`. Every request
+//! is never sent in a request line, and the page sends it back in `Relevo-Web-Key`. The browser
+//! is not given that address in its command line, which every local user can read: it opens a
+//! small file of this user's that sends it on (`Launcher`). Every request
 //! must name this server in `Host` (against DNS rebinding) and, if it has an `Origin`, come from
 //! this server's page. The page and its assets hold no data, and are served without the key: a
 //! browser cannot send a header when it opens an address.
 
-use std::sync::Arc;
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::path::{Path as FsPath, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -55,18 +60,95 @@ const SECURITY_HEADERS: [(&str, &str); 5] = [
     ("x-frame-options", "DENY"),
 ];
 
-/// The local server's state: the client of the team's server, the port it listens on and the
-/// key of this run.
+/// The local server's state: the client of the team's server, the port it listens on, the key
+/// of this run, and the launcher file while the page has not used the key yet.
 pub struct Web {
     client: Client,
     port: u16,
     key: String,
+    launcher: Mutex<Option<Launcher>>,
 }
 
 impl Web {
     pub fn new(client: Client, port: u16, key: String) -> Arc<Web> {
-        Arc::new(Web { client, port, key })
+        Arc::new(Web {
+            client,
+            port,
+            key,
+            launcher: Mutex::new(None),
+        })
     }
+
+    /// Keeps `launcher` until the page first asks with the key, or this server stops.
+    pub fn keep_launcher(&self, launcher: Launcher) {
+        *self.launcher.lock().unwrap_or_else(|e| e.into_inner()) = Some(launcher);
+    }
+
+    /// Deletes the launcher file, if it is still there.
+    pub fn drop_launcher(&self) {
+        self.launcher
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+    }
+}
+
+/// The file the browser is told to open: a page that sends it on to the address with the key.
+/// The address itself never goes in a command line (`ps` shows every user's, and a browser
+/// started for it keeps it there while it runs); the file's path does, and only this user can
+/// read the file: it is mode 0600, in a directory of its own of mode 0700. Deleted when dropped.
+pub struct Launcher {
+    dir: PathBuf,
+    file: PathBuf,
+}
+
+impl Launcher {
+    /// Writes the launcher of `address` in a new directory under `base`.
+    pub fn new(base: &FsPath, address: &str) -> std::io::Result<Launcher> {
+        // The address is ours: digits and base64url. Nothing in it needs escaping in HTML.
+        debug_assert!(
+            address
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_:/.#=".contains(&b))
+        );
+        let dir = base.join(crate::db::random_id("relevo-web-"));
+        std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+        let launcher = Launcher {
+            file: dir.join("open.html"),
+            dir,
+        };
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&launcher.file)?;
+        write!(
+            f,
+            "<!doctype html>\n<meta charset=\"utf-8\">\n<meta name=\"referrer\" content=\"no-referrer\">\n\
+             <meta http-equiv=\"refresh\" content=\"0;url={address}\">\n<title>Relevo</title>\n\
+             <p><a href=\"{address}\">Open Relevo's timeline</a></p>\n"
+        )?;
+        Ok(launcher)
+    }
+
+    /// What the opener is given.
+    pub fn path(&self) -> &FsPath {
+        &self.file
+    }
+}
+
+impl Drop for Launcher {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Where launchers go: `$XDG_RUNTIME_DIR` (this user's only), else the temporary directory.
+fn launcher_base() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|d| d.is_absolute() && d.is_dir())
+        .unwrap_or_else(std::env::temp_dir)
 }
 
 /// A new key: 32 random bytes, base64url.
@@ -125,7 +207,12 @@ fn same(a: &[u8], b: &[u8]) -> bool {
 /// Checks `Host`, `Origin` and, for the API, the key, and refuses every method but GET; then adds the security headers to the
 /// answer, refusal or not.
 async fn guard(State(web): State<Arc<Web>>, req: Request, next: Next) -> Response {
-    let mut res = match check(&web, &req) {
+    let checked = check(&web, &req);
+    if checked.is_ok() && req.uri().path().starts_with("/api/") {
+        // The page has the key: the launcher is not needed any more.
+        web.drop_launcher();
+    }
+    let mut res = match checked {
         // GET only: axum would route HEAD to a GET handler too, which would ask the team's
         // server. Anything else is no route at all.
         Ok(()) if req.method() != Method::GET => {
@@ -240,26 +327,42 @@ pub async fn run(port: Option<u16>, no_open: bool) -> Result<()> {
     let web = Web::new(client, port, key);
     println!("Relevo's timeline for {}:\n  {address}", config.url);
     println!("It only reads: nothing is delivered, handled or claimed. Ctrl-C stops it.");
-    if !no_open && !open_browser(&address).await {
-        println!("Open the address above in your browser.");
+    if !no_open {
+        let opened = match Launcher::new(&launcher_base(), &address) {
+            Ok(launcher) => {
+                let opened = open_browser(launcher.path()).await;
+                if opened {
+                    web.keep_launcher(launcher);
+                }
+                opened
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "could not write the launcher");
+                false
+            }
+        };
+        if !opened {
+            println!("Open the address above in your browser.");
+        }
     }
     tokio::select! {
-        _ = crate::serve::serve(listener, router(web), None, crate::serve::Limits::default()) => {}
+        _ = crate::serve::serve(listener, router(web.clone()), None, crate::serve::Limits::default()) => {}
         _ = tokio::signal::ctrl_c() => {}
     }
+    web.drop_launcher();
     Ok(())
 }
 
-/// Asks the system to open `address` in the browser: `open` on macOS, `xdg-open` elsewhere.
+/// Asks the system to open `file` in the browser: `open` on macOS, `xdg-open` elsewhere.
 /// Whether it could.
-async fn open_browser(address: &str) -> bool {
+async fn open_browser(file: &FsPath) -> bool {
     let opener = if cfg!(target_os = "macos") {
         "open"
     } else {
         "xdg-open"
     };
     let started = tokio::process::Command::new(opener)
-        .arg(address)
+        .arg(file)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
