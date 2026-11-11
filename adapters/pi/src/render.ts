@@ -80,7 +80,7 @@ export function optional(t: Thread): boolean {
 /** What kind of thread it is: `direct`, `team: @backend` or `global board` (a team question to everyone from a server before 0.4.0). */
 export function kindLabel(t: Thread): string {
   if (t.kind === "global") return "global board";
-  if (t.kind === "team") return t.teams ? `team: ${t.teams.map((n) => `@${n}`).join(", ")}` : "team question to everyone";
+  if (t.kind === "team") return t.teams?.length ? `team: ${t.teams.map((n) => `@${n}`).join(", ")}` : "team question to everyone";
   return "direct";
 }
 
