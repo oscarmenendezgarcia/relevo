@@ -182,7 +182,7 @@ What a person reads in `relevo web` (see `docs/web.md`): their threads, newest f
 
 | Param | |
 |---|---|
-| `tab` | `board` (the `global` threads the person takes part in) or `threads` (their `direct` and `team` threads). Required. |
+| `tab` | `board` (the `global` threads the person takes part in) or `threads` (their `direct` and `team` threads, and the `global` threads that name them: what is *for* them). Required. |
 | `show` | optional, only with `tab=threads`: `all` (default), `waiting` (pending for the person), `answered` (opened by someone else, and the person has written in it), `closed`. |
 | `team` | optional, only with `tab=threads`: a team's name; only threads that named it. |
 | `with` | optional, only with `tab=threads`: a handle; only threads that person takes part in. |
