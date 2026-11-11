@@ -711,7 +711,14 @@ def render_event(thread: dict, notes: list, me: Optional[str], resumed: bool = F
                 "relevo_thread: if it is no longer pending for your person, or this chat already answered it or "
                 "is working on it, answer exactly [SILENT] and do nothing else. Otherwise: " + head)
     pending = is_pending(thread)
-    if pending:
+    own = is_optional(thread) and me is not None and thread.get("from") == me
+    if own:
+        # Answers to the person's own question, as relevo mcp and pi say: theirs to read, not the
+        # agent's to answer (a reply here goes to everyone the question went to).
+        head += (". This is your person's own question to a team or to everyone, and these notes answer it: "
+                 "they are for your person to read, not for you to answer. Answer exactly [SILENT], unless your "
+                 "person asked you to follow up on it or to close it.")
+    elif pending:
         head += ". If it is not for you, answer exactly [SILENT] and leave it: it stays pending for your person."
     else:
         head += "; answer exactly [SILENT] if it is not for you."

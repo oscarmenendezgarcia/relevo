@@ -1006,6 +1006,21 @@ class Tools(Base):
             self.assertIn("\nPending for your person: they have not handled it yet.", named)
             self.assertIn('"claim": true', named)
             self.assertIn("It names your person.", named)
+        # Answers to the person's own question to a team or the board: theirs to read, not the agent's
+        # to answer, as relevo mcp and pi say.
+        for kind, teams in (("team", ["backend"]), ("global", [])):
+            asked = {**thread, "kind": kind, "teams": teams, "named": False, "pending": False, "from": "oscar"}
+            event = client.render_event(asked, [{"id": "n_2", "author": "ana", "text": "I do."}], "oscar")
+            self.assertTrue(event.startswith(
+                "New in Relevo thread r_1. Your reply in this chat is written in the thread. This is your person's "
+                "own question to a team or to everyone, and these notes answer it: they are for your person to "
+                "read, not for you to answer. Answer exactly [SILENT], unless your person asked you to follow up "
+                "on it or to close it."), event)
+            self.assertNotIn("if it is not for you", event)
+            # Someone else's question: optional, as before.
+            other = client.render_event({**asked, "from": "ana"}, [], "oscar")
+            self.assertIn("answer exactly [SILENT] if it is not for you", other)
+            self.assertNotIn("own question", other)
         # A team question from a server before 0.4.0 (no `teams`, no `named`): to everyone, optional.
         old_team = client.render_thread_head({**thread, "kind": "team"}, "oscar")
         self.assertIn("A question from @ana to the whole team.", old_team)
