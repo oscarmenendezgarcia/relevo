@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Relevo</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<div class="app">
+  <aside class="side" id="side">
+    <div class="brand"><img src="/mark.svg" alt=""><span>relevo</span></div>
+    <div class="me" id="me" hidden></div>
+    <div class="group">
+      <div class="sec">Show</div>
+      <div id="show"></div>
+    </div>
+    <div class="group">
+      <div class="sec">Your teams</div>
+      <div id="teams"></div>
+    </div>
+    <div class="group">
+      <div class="sec">People</div>
+      <div id="people"></div>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="tabs" role="tablist">
+      <button class="tab on" id="tab-board" role="tab" aria-selected="true">Board</button>
+      <button class="tab" id="tab-threads" role="tab" aria-selected="false">Your threads</button>
+      <button class="refresh" id="refresh" title="Refresh" aria-label="Refresh">&#x21bb;</button>
+    </div>
+    <div class="banner" id="banner" role="status" hidden></div>
+    <section class="feed" id="feed" aria-live="polite"></section>
+    <button class="loadmore" id="loadmore" hidden>Load more</button>
+    <div class="empty" id="footer" hidden></div>
+  </main>
+</div>
+</body>
+</html>

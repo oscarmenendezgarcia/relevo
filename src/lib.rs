@@ -18,6 +18,7 @@ pub mod session;
 pub mod timeline;
 pub mod tls;
 pub mod update;
+pub mod web;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

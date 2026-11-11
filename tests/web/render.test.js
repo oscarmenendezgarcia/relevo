@@ -1,0 +1,170 @@
+// The note renderer of relevo web (src/web/app.js), run with plain node by tests/web.rs:
+// `node tests/web/render.test.js`. Note text is untrusted: it must come out as text nodes and a
+// few allowed elements, never as HTML.
+'use strict';
+const assert = require('node:assert/strict');
+const path = require('node:path');
+const { parseNote, parseInline, toDom, withoutTitle, relative } = require(
+  path.join(__dirname, '..', '..', 'src', 'web', 'app.js')
+);
+
+// A document that records what is built, and refuses every way of parsing HTML.
+function fakeDocument() {
+  const refuse = (what) => () => {
+    throw new Error(what + ' used');
+  };
+  function node(tag) {
+    const n = { tag, children: [], className: '', _text: null };
+    Object.defineProperty(n, 'textContent', {
+      set(v) {
+        n.children = [];
+        n._text = String(v);
+      },
+      get() {
+        return n._text !== null ? n._text : n.children.map((c) => c.textContent).join('');
+      },
+    });
+    for (const bad of ['innerHTML', 'outerHTML']) {
+      Object.defineProperty(n, bad, { set: refuse(bad), get: refuse(bad) });
+    }
+    n.insertAdjacentHTML = refuse('insertAdjacentHTML');
+    n.setAttribute = refuse('setAttribute');
+    n.appendChild = (c) => {
+      n._text = null;
+      n.children.push(c);
+      return c;
+    };
+    return n;
+  }
+  return {
+    created: [],
+    createElement(tag) {
+      this.created.push(tag);
+      return node(tag);
+    },
+    createTextNode(text) {
+      const t = { tag: '#text', children: [] };
+      Object.defineProperty(t, 'textContent', { get: () => text });
+      return t;
+    },
+    createDocumentFragment() {
+      return node('#fragment');
+    },
+    write: refuse('document.write'),
+  };
+}
+
+// The tree as compact markup, to compare: text escaped so that it cannot pass for a tag.
+function show(n) {
+  if (n.tag === '#text') return n.textContent.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const inner = n._text !== null ? n._text.replace(/&/g, '&amp;').replace(/</g, '&lt;') : n.children.map(show).join('');
+  if (n.tag === '#fragment') return inner;
+  const cls = n.className ? '.' + n.className : '';
+  return '<' + n.tag + cls + '>' + inner + '</' + n.tag + '>';
+}
+
+function render(text) {
+  const doc = fakeDocument();
+  return { html: show(toDom(parseNote(text), doc)), tags: doc.created };
+}
+
+const ALLOWED = new Set(['p', 'br', 'code', 'pre', 'strong', 'em', 'span']);
+let count = 0;
+function check(name, f) {
+  f();
+  count++;
+}
+
+check('script tags and HTML stay text', () => {
+  const r = render('Hi <script>alert(1)</script> <img src=x onerror=alert(2)> &amp;');
+  assert.equal(r.html, '<p>Hi &lt;script>alert(1)&lt;/script> &lt;img src=x onerror=alert(2)> &amp;amp;</p>');
+  assert.deepEqual(r.tags, ['p']);
+});
+
+check('paragraphs and line breaks', () => {
+  assert.equal(render('one\ntwo\n\n\nthree').html, '<p>one<br></br>two</p><p>three</p>');
+  assert.equal(render('\n\n').html, '');
+});
+
+check('fenced code blocks, with a script inside', () => {
+  const r = render('Look:\n```js\n<script>x()</script>\n  **not bold**\n```\nafter');
+  assert.equal(
+    r.html,
+    '<p>Look:</p><pre><code>&lt;script>x()&lt;/script>\n  **not bold**</code></pre><p>after</p>'
+  );
+  // Tildes, longer fences, and an unclosed fence that runs to the end.
+  assert.equal(render('~~~~\na\n~~~\nb\n~~~~').html, '<pre><code>a\n~~~\nb</code></pre>');
+  assert.equal(render('```\n@ana <b>').html, '<pre><code>@ana &lt;b></code></pre>');
+  // A fence closes only with the same character.
+  assert.equal(render('```\na\n~~~\n```').html, '<pre><code>a\n~~~</code></pre>');
+});
+
+check('inline code, bold, italic', () => {
+  assert.equal(render('use `a <b> c` now').html, '<p>use <code>a &lt;b> c</code> now</p>');
+  assert.equal(render('``a ` b``').html, '<p><code>a ` b</code></p>');
+  assert.equal(render('a ` lone').html, '<p>a ` lone</p>');
+  assert.equal(render('**bold** and *it*').html, '<p><strong>bold</strong> and <em>it</em></p>');
+  assert.equal(render('**bold *in* it**').html, '<p><strong>bold <em>in</em> it</strong></p>');
+  assert.equal(render('2*3*4 and * not *').html, '<p>2*3*4 and * not *</p>');
+  assert.equal(render('** no **').html, '<p>** no **</p>');
+});
+
+check('mentions are highlighted, as the server reads them', () => {
+  assert.equal(render('@ana look').html, '<p><span.mention>@ana</span> look</p>');
+  assert.equal(render('(@ana).').html, '<p>(<span.mention>@ana</span>).</p>');
+  assert.equal(
+    render('ask @ana/pagos-api@feat/refunds.').html,
+    '<p>ask <span.mention>@ana/pagos-api@feat/refunds</span>.</p>'
+  );
+  // Emails, URLs, @@ and code mention nobody.
+  for (const text of ['pedro@empresa.com', 'https://x.com/@ana', '@@ana', '`@ana`', '@a', '@ alone']) {
+    assert.ok(!render(text).html.includes('mention'), text);
+  }
+});
+
+check('links are text, never links', () => {
+  const r = render('see https://evil.example/?a=<x> and [x](javascript:alert(1))');
+  assert.equal(r.html, '<p>see https://evil.example/?a=&lt;x> and [x](javascript:alert(1))</p>');
+  assert.ok(r.tags.every((t) => ALLOWED.has(t)));
+});
+
+check('only allowed elements, whatever the text', () => {
+  const nasty = [
+    '<iframe src=x>', '```\n</code></pre><script>', '**<b>**', '*<i>*', '`</code>`',
+    '@<script>', '\u0000‮ text', '<!-- x -->', '<svg onload=alert(1)>',
+  ];
+  for (const text of nasty) {
+    const r = render(text);
+    assert.ok(r.tags.every((t) => ALLOWED.has(t)), text + ': ' + r.tags);
+    assert.ok(!/<(script|iframe|svg|img|a)\b/.test(r.html), text + ': ' + r.html);
+  }
+  // A node of a kind it does not know is dropped, not built.
+  const doc = fakeDocument();
+  const frag = toDom([{ t: 'script', text: 'x' }, { t: 'p', children: [{ t: 'a', text: 'y' }] }], doc);
+  assert.equal(show(frag), '<p></p>');
+});
+
+check('the title line is not shown twice', () => {
+  assert.equal(withoutTitle('# Refunds\nbody', 'Refunds'), 'body');
+  assert.equal(withoutTitle('\nRefunds\nbody', 'Refunds'), 'body');
+  assert.equal(withoutTitle('Other\nbody', 'Refunds'), 'Other\nbody');
+});
+
+check('relative times', () => {
+  const now = new Date(2026, 10, 11, 15, 0, 0);
+  const ago = (mins) => new Date(now.getTime() - mins * 60000).toISOString();
+  assert.equal(relative(ago(0.5), now), 'just now');
+  assert.equal(relative(ago(12), now), '12 min ago');
+  assert.equal(relative(ago(120), now), '2 h ago');
+  assert.equal(relative(new Date(2026, 10, 11, 8, 5).toISOString(), now), '08:05');
+  assert.equal(relative(new Date(2026, 10, 10, 19, 25).toISOString(), now), 'yesterday 19:25');
+  assert.equal(relative(new Date(2026, 10, 9, 9, 0).toISOString(), now), 'Monday');
+  assert.equal(relative(new Date(2026, 9, 3, 9, 0).toISOString(), now), '3 Oct');
+  assert.equal(relative(new Date(2025, 9, 3, 9, 0).toISOString(), now), '3 Oct 2025');
+});
+
+check('parseInline keeps line breaks inside a paragraph', () => {
+  assert.deepEqual(parseInline('a\nb'), [{ t: 'text', text: 'a' }, { t: 'br' }, { t: 'text', text: 'b' }]);
+});
+
+console.log('renderer: ' + count + ' checks passed');
