@@ -201,8 +201,8 @@ CREATE TABLE IF NOT EXISTS thread_teams (
 );
 ";
 
-/// Names that mean "your team" in a mention (and "everyone" in the deprecated `to`), so no
-/// person nor team may take them.
+/// Names no person nor team may take: 0.3's whole team, which the deprecated `to` still reads
+/// as "everyone". In a note's text they name nobody (a team is always named).
 pub const RESERVED_HANDLES: [&str; 2] = ["team", "equipo"];
 
 /// A session not seen for this long is forgotten, and so are its claims.
@@ -572,7 +572,7 @@ pub fn invite(
         bail!("handle must match ^[a-z0-9][a-z0-9_-]{{1,31}}$");
     }
     if RESERVED_HANDLES.contains(&handle) {
-        bail!("'{handle}' is reserved: in a mention it means the writer's team");
+        bail!("'{handle}' is reserved: it was 0.3's whole team, and @{handle} names nobody");
     }
     if team_id(conn, handle)?.is_some() {
         bail!(
@@ -805,7 +805,7 @@ pub fn add_team(conn: &Connection, name: &str, title: Option<&str>, now: i64) ->
         bail!("a team name must match ^[a-z0-9][a-z0-9_-]{{1,31}}$");
     }
     if RESERVED_HANDLES.contains(&name) {
-        bail!("'{name}' is reserved: in a mention it means the writer's team");
+        bail!("'{name}' is reserved: it was 0.3's whole team, and @{name} names nobody");
     }
     let person: Option<bool> = conn
         .query_row("SELECT active FROM people WHERE handle = ?1", [name], |r| {

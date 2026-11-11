@@ -315,43 +315,40 @@ async fn a_person_in_a_team_mentioned_too_is_reached_once_and_named() {
 }
 
 #[tokio::test]
-async fn at_team_is_your_one_team() {
+async fn at_team_is_no_name_a_team_is_always_named() {
     let s = server(
         &["ana", "bob", "carl", "dan"],
         &[("backend", &["ana", "bob"]), ("front", &["carl", "dan"])],
     );
-    for text in [
-        "@team deploy?",
-        "@Equipo ¿despliegue?",
-        "@team @backend once",
+    // In one team or several or none, `@team` and `@equipo` name nobody: a team is named.
+    for (text, unknown) in [
+        ("@team deploy?", "team"),
+        ("@Equipo ¿despliegue?", "equipo"),
+        ("@team @backend once", "team"),
+        ("@team/pagos deploy?", "team"),
     ] {
-        let v = s.ok("ana", json!({ "text": text })).await;
-        assert_eq!(v["kind"], "team", "{text}");
-        assert_eq!(v["to"]["teams"], json!(["backend"]), "{text}");
-        assert_eq!(v["reached"], 1, "{text}");
+        let (status, v) = s.send("ana", json!({ "text": text })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+        assert_eq!(code(&v), "UNKNOWN_PERSON", "{text}: {v}");
+        assert_eq!(v["error"]["unknown"], json!([unknown]), "{text}");
+        assert!(message(&v).contains("@backend, @front"), "{v}");
+        assert!(message(&v).contains("(@handle)"), "{v}");
     }
-    // In several teams, or none: name one.
-    db::join_team(&s.app.db(), "front", &["ana".to_string()]).unwrap();
-    let (status, v) = s.send("ana", json!({ "text": "@team deploy?" })).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(code(&v), "BAD_REQUEST");
-    assert!(message(&v).contains("@backend, @front"), "{v}");
     db::leave_team(&s.app.db(), "backend", &["ana".to_string()]).unwrap();
-    db::leave_team(&s.app.db(), "front", &["ana".to_string()]).unwrap();
-    let (_, v) = s.send("ana", json!({ "text": "@equipo deploy?" })).await;
-    assert_eq!(code(&v), "BAD_REQUEST");
-    assert!(message(&v).contains("you are in none"), "{v}");
-    // No context on it.
-    let (_, v) = s
-        .send("bob", json!({ "text": "@team/pagos deploy?" }))
-        .await;
-    assert_eq!(code(&v), "BAD_REQUEST");
+    let (_, v) = s.send("ana", json!({ "text": "@team deploy?" })).await;
+    assert_eq!(code(&v), "UNKNOWN_PERSON");
+    // With no team on the server: name the people.
+    let none = server(&["ana", "bob"], &[]);
+    let (_, v) = none.send("ana", json!({ "text": "@team deploy?" })).await;
+    assert_eq!(code(&v), "UNKNOWN_PERSON");
+    assert!(message(&v).contains("there are none"), "{v}");
+    assert_eq!(s.notes() + none.notes(), 0);
 }
 
 #[tokio::test]
 async fn nobody_but_you_is_no_recipients() {
     let s = server(&["ana", "bob"], &[("solo", &["ana"]), ("empty", &[])]);
-    for text in ["@solo anyone?", "@empty anyone?", "@team anyone?"] {
+    for text in ["@solo anyone?", "@empty anyone?"] {
         let (status, v) = s.send("ana", json!({ "text": text })).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
         assert_eq!(code(&v), "NO_RECIPIENTS", "{text}: {v}");
@@ -478,7 +475,6 @@ async fn malformed_mentions_are_bad_requests_before_the_session_counts() {
         "@bob/pagos @bob/front",
         "@bob/Pagos@ deploy",
         "@bob/.x",
-        "@team/x",
         twenty_one.as_str(),
     ] {
         let (status, v) = agent.send(json!({ "text": text })).await;
@@ -640,8 +636,8 @@ async fn a_reply_cannot_mention_a_team_and_a_failed_send_writes_nothing() {
     let before = s.thread("ana", &thread).await;
     for (text, expected) in [
         ("@backend thoughts?", "BAD_REQUEST"),
-        ("@team thoughts?", "BAD_REQUEST"),
-        ("@equipo thoughts?", "BAD_REQUEST"),
+        ("@team thoughts?", "UNKNOWN_PERSON"),
+        ("@equipo thoughts?", "UNKNOWN_PERSON"),
         ("@dan @backend thoughts?", "BAD_REQUEST"),
         ("@dan @zed thoughts?", "UNKNOWN_PERSON"),
         ("@dan @old thoughts?", "UNKNOWN_PERSON"),

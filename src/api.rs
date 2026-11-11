@@ -1180,7 +1180,7 @@ fn write_as(
             if req.close && row.kind != "direct" && row.opener_id != caller.person_id {
                 return Err(ApiError::forbidden());
             }
-            let names = reply_names(tx, caller, &whom.mentions, now)?;
+            let names = reply_names(tx, &whom.mentions, now)?;
             if req.text.is_some() {
                 let recent: i64 = tx.query_row(
                     "SELECT count(*) FROM notes WHERE thread_id = ?1 AND created_at > ?2",
@@ -1469,13 +1469,12 @@ struct Resolved {
     teams: Vec<(i64, String)>,
 }
 
-/// Finds whom the mentions name: an active person's handle, a team's name, or `team` (your one
-/// team). Names that are none of these fail with `UNKNOWN_PERSON`, all of them at once; `@team`
-/// with no team or several of yours, and a context on a team, with `BAD_REQUEST`. With
-/// `people_only` (the deprecated `to`), a team's name is unknown.
+/// Finds whom the mentions name: an active person's handle or a team's name (`team` and
+/// `equipo` are neither). Names that are none of these fail with `UNKNOWN_PERSON`, all of them at
+/// once; a context on a team, with `BAD_REQUEST`. With `people_only` (the deprecated `to`), a
+/// team's name is unknown.
 fn resolve(
     conn: &Connection,
-    caller: &Caller,
     mentions: &[Mention],
     people_only: bool,
     now: i64,
@@ -1487,69 +1486,33 @@ fn resolve(
     let mut unknown = Vec::new();
     let mut refused = None;
     for m in mentions {
-        let team = if m.name == "team" {
-            let mine: Vec<(i64, String)> = conn
-                .prepare_cached(
-                    "SELECT t.id, t.name FROM team_members m JOIN teams t ON t.id = m.team_id
-                     WHERE m.person_id = ?1 ORDER BY t.name",
-                )?
-                .query_map([caller.person_id], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<rusqlite::Result<_>>()?;
-            match mine.as_slice() {
-                [one] => Some(one.clone()),
-                [] => {
-                    refused.get_or_insert(ApiError::bad_request(
-                        "@team means your team, and you are in none: name a team (@name) or the \
-                         people the note is for (@handle), or write no @ to post on the global \
-                         board",
-                    ));
-                    None
-                }
-                several => {
-                    let names: Vec<String> = several.iter().map(|(_, n)| format!("@{n}")).collect();
-                    refused.get_or_insert(ApiError::bad_request(format!(
-                        "@team means your team, and you are in several: {}; name the one you mean",
-                        names.join(", ")
-                    )));
-                    None
-                }
-            }
+        let person: Option<i64> = conn
+            .prepare_cached("SELECT id FROM people WHERE handle = ?1 AND active = 1")?
+            .query_row([&m.name], |r| r.get(0))
+            .optional()?;
+        if let Some(id) = person {
+            out.people.push((id, m.name.clone(), m.context.clone()));
+            continue;
+        }
+        let team: Option<i64> = if people_only {
+            None
         } else {
-            let person: Option<i64> = conn
-                .prepare_cached("SELECT id FROM people WHERE handle = ?1 AND active = 1")?
+            conn.prepare_cached("SELECT id FROM teams WHERE name = ?1")?
                 .query_row([&m.name], |r| r.get(0))
-                .optional()?;
-            if let Some(id) = person {
-                out.people.push((id, m.name.clone(), m.context.clone()));
-                continue;
-            }
-            let team: Option<i64> = if people_only {
-                None
-            } else {
-                conn.prepare_cached("SELECT id FROM teams WHERE name = ?1")?
-                    .query_row([&m.name], |r| r.get(0))
-                    .optional()?
-            };
-            match team {
-                Some(id) => {
-                    if let Some(context) = &m.context {
-                        refused.get_or_insert(ApiError::bad_request(format!(
-                            "'@{}/{context}': @{} is a team, and a team takes no context",
-                            m.name, m.name
-                        )));
-                    }
-                    Some((id, m.name.clone()))
-                }
-                None => {
-                    unknown.push(m.name.clone());
-                    None
-                }
-            }
+                .optional()?
         };
-        if let Some(team) = team
-            && !out.teams.iter().any(|(id, _)| *id == team.0)
-        {
-            out.teams.push(team);
+        let Some(id) = team else {
+            unknown.push(m.name.clone());
+            continue;
+        };
+        if let Some(context) = &m.context {
+            refused.get_or_insert(ApiError::bad_request(format!(
+                "'@{}/{context}': @{} is a team, and a team takes no context",
+                m.name, m.name
+            )));
+        }
+        if !out.teams.iter().any(|(seen, _)| *seen == id) {
+            out.teams.push((id, m.name.clone()));
         }
     }
     if !unknown.is_empty() {
@@ -1567,22 +1530,15 @@ fn resolve(
 /// of the note that opened it.
 fn reply_names(
     conn: &Connection,
-    caller: &Caller,
     mentions: &[Mention],
     now: i64,
 ) -> Result<Vec<(i64, String, Option<String>)>, ApiError> {
-    let team_in_reply = |name: &str| {
-        ApiError::bad_request(format!(
+    let resolved = resolve(conn, mentions, false, now)?;
+    if let Some((_, name)) = resolved.teams.first() {
+        return Err(ApiError::bad_request(format!(
             "@{name} is a team, and a team cannot be mentioned in a reply: open a new thread for \
              it, or name its people (@handle)"
-        ))
-    };
-    if mentions.iter().any(|m| m.name == "team") {
-        return Err(team_in_reply("team"));
-    }
-    let resolved = resolve(conn, caller, mentions, false, now)?;
-    if let Some((_, name)) = resolved.teams.first() {
-        return Err(team_in_reply(name));
+        )));
     }
     Ok(resolved.people)
 }
@@ -1638,7 +1594,7 @@ fn open_thread(
     text: &str,
     now: i64,
 ) -> Result<(String, Named), ApiError> {
-    let r = resolve(conn, caller, &whom.mentions, whom.people_only, now)?;
+    let r = resolve(conn, &whom.mentions, whom.people_only, now)?;
     let kind = match (r.teams.is_empty(), r.people.is_empty()) {
         (false, _) => "team",
         (true, false) => "direct",

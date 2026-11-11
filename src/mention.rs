@@ -2,13 +2,12 @@
 //! from the text, as far as that can go without the database: where they are, what they say, and
 //! the checks on their form. Who they name is `api`'s to find out.
 
-use crate::db::{CONTEXT_FORMAT, RESERVED_HANDLES, valid_context};
+use crate::db::{CONTEXT_FORMAT, valid_context};
 
 /// At most this many distinct people and teams in one note.
 pub const MAX_MENTIONS: usize = 20;
 
-/// One mention: a name in lowercase (`team` for `@team` and `@equipo`), and the context it was
-/// written with, if any.
+/// One mention: a name in lowercase, and the context it was written with, if any.
 #[derive(Debug, PartialEq, Clone)]
 pub struct Mention {
     pub name: String,
@@ -18,26 +17,20 @@ pub struct Mention {
 /// The distinct mentions of `text`, in the order they first appear, without `me` (the writer:
 /// mentioning yourself is ignored). Fails, with the message for `BAD_REQUEST`, when the same name
 /// comes with two different contexts (or once with one and once without), when a context is
-/// malformed or on `@team`, or when there are more than `MAX_MENTIONS`.
+/// malformed, or when there are more than `MAX_MENTIONS`.
 pub fn mentions(text: &str, me: &str) -> Result<Vec<Mention>, String> {
     let mut out: Vec<Mention> = Vec::new();
     for found in scan(text) {
         if found.name == me {
             continue;
         }
-        if let Some(context) = &found.context {
-            if found.name == "team" {
-                return Err(format!(
-                    "'@{}/{context}': @team takes no context",
-                    found.written
-                ));
-            }
-            if !valid_context(context) {
-                return Err(format!(
-                    "'@{}/{context}': a context must be {CONTEXT_FORMAT}",
-                    found.written
-                ));
-            }
+        if let Some(context) = &found.context
+            && !valid_context(context)
+        {
+            return Err(format!(
+                "'@{}/{context}': a context must be {CONTEXT_FORMAT}",
+                found.written
+            ));
         }
         match out.iter().find(|m| m.name == found.name) {
             Some(seen) if seen.context == found.context => {}
@@ -74,7 +67,7 @@ pub fn mentions_only(text: &str, me: &str) -> bool {
 /// A mention as found in the text, before any check.
 #[derive(Debug, PartialEq)]
 struct Found {
-    /// The name, lowercased, `equipo` read as `team`.
+    /// The name, lowercased.
     name: String,
     /// As written, for messages.
     written: String,
@@ -126,13 +119,8 @@ fn scan(text: &str) -> Vec<Found> {
             }
             next = last.max(end);
         }
-        let lower = name.to_lowercase();
         out.push(Found {
-            name: if RESERVED_HANDLES.contains(&lower.as_str()) {
-                "team".to_string()
-            } else {
-                lower
-            },
+            name: name.to_lowercase(),
             written: name,
             context,
         });
@@ -409,7 +397,7 @@ mod tests {
             ("@ana-/x", &["ana"]),
             ("@ana/x`y`", &["ana/x"]),
             ("@team", &["team"]),
-            ("@Equipo", &["team"]),
+            ("@Equipo", &["equipo"]),
             ("@backend", &["backend"]),
         ];
         for (text, expected) in cases {
@@ -486,7 +474,12 @@ mod tests {
         };
         assert_eq!(
             mentions("@ana @Ana @bob @ana. @team @equipo", "zoe").unwrap(),
-            vec![m("ana", None), m("bob", None), m("team", None)]
+            vec![
+                m("ana", None),
+                m("bob", None),
+                m("team", None),
+                m("equipo", None)
+            ]
         );
         // Yourself: ignored, with or without a context.
         assert_eq!(
@@ -500,6 +493,11 @@ mod tests {
         assert!(!mentions_only("hi", "zoe"));
         assert!(!mentions_only("@zoe @ana", "zoe"));
         assert!(!mentions_only("`@zoe` hi", "zoe"));
+        // `@team` is a name like any other here (who it names is the database's to say).
+        assert_eq!(
+            mentions("@team/pagos", "zoe").unwrap(),
+            vec![m("team", Some("pagos"))]
+        );
         assert_eq!(
             mentions("@ana/pagos-api and @ana/Pagos-Api", "zoe").unwrap(),
             vec![m("ana", Some("pagos-api"))]
@@ -508,8 +506,6 @@ mod tests {
             "@ana/pagos-api @ana",
             "@ana @ana/pagos-api",
             "@ana/x @ana/y",
-            "@team/pagos",
-            "@equipo/x",
             "@ana/x@",
             "@ana/a@b@c",
             "@ana/.x",

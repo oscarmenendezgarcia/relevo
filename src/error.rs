@@ -3,6 +3,8 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 
+use crate::db::RESERVED_HANDLES;
+
 /// An error as the protocol shows it: `{ "error": { "code", "message", ...extra } }`.
 #[derive(Debug)]
 pub struct ApiError {
@@ -41,8 +43,36 @@ impl ApiError {
 
     /// Names that are no active person nor team: `unknown`, with the people (`valid`, each with
     /// their `about`) and the teams (`teams`, with their members) that can be named.
+    /// `@team` and `@equipo` are among them like any other name, with a word on naming the team.
     pub fn unknown_person(unknown: &[String], valid: Value, teams: Value) -> Self {
         let names: Vec<String> = unknown.iter().map(|n| format!("@{n}")).collect();
+        let hint = match unknown
+            .iter()
+            .find(|n| RESERVED_HANDLES.contains(&n.as_str()))
+        {
+            None => String::new(),
+            Some(reserved) => {
+                let named: Vec<String> = teams
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|t| t["name"].as_str())
+                    .map(|n| format!("@{n}"))
+                    .collect();
+                if named.is_empty() {
+                    format!(
+                        ". @{reserved} is no team: a team is always named, and there are none; \
+                         name the people (@handle)"
+                    )
+                } else {
+                    format!(
+                        ". @{reserved} is no team: a team is always named; name the team ({}) \
+                         or the people (@handle)",
+                        named.join(", ")
+                    )
+                }
+            }
+        };
         ApiError {
             extra: vec![
                 ("valid", valid),
@@ -55,7 +85,7 @@ impl ApiError {
                 format!(
                     "no active person or team is named {}; see 'valid' for the people and \
                      'teams' for the teams (nothing was sent: a note never falls back to the \
-                     global board)",
+                     global board){hint}",
                     names.join(", ")
                 ),
             )
