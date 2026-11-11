@@ -169,9 +169,9 @@ function toDom(blocks, doc) {
 }
 
 /// The note `text` as a `div.md`.
-function renderNote(text, doc, extra) {
+function renderNote(text, doc) {
   const div = doc.createElement('div');
-  div.className = 'md' + (extra ? ' ' + extra : '');
+  div.className = 'md';
   div.appendChild(toDom(parseNote(text), doc));
   return div;
 }
@@ -210,29 +210,73 @@ function pickKey(hash, kept) {
   return new URLSearchParams(String(hash || '').replace(/^#/, '')).get('k') || kept || '';
 }
 
+/// A note as one paragraph, for a row's preview (the row clamps it to two lines): line breaks
+/// are spaces, and a code block is its first line as inline code.
+function preview(text) {
+  const flat = (n) =>
+    n.t === 'br' ? { t: 'text', text: ' ' } : n.children ? Object.assign({}, n, { children: n.children.map(flat) }) : n;
+  const children = [];
+  parseNote(text).forEach((b) => {
+    if (children.length) children.push({ t: 'text', text: ' ' });
+    if (b.t === 'pre') {
+      const lines = b.text.split('\n');
+      children.push({ t: 'code', text: lines[0] + (lines.length > 1 ? '…' : '') });
+    } else {
+      b.children.forEach((c) => children.push(flat(c)));
+    }
+  });
+  return children.length ? [{ t: 'p', children }] : [];
+}
+
+/// What a row shows of the first note: what comes after its title, without the @mentions it
+/// starts with.
+function excerpt(text, title) {
+  return withoutTitle(text, title).trim().replace(LEADING_MENTIONS, '');
+}
+
 // ---------- time ----------
 
-const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 function hhmm(d) {
   return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
 }
 
-/// "just now", "12 min ago", "2 h ago", "14:05", "yesterday 19:25", "Monday", "3 Nov".
-function relative(iso, now) {
+/// Calendar days from `d` to `now`.
+function daysTo(d, now) {
+  const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  return Math.round((day(now) - day(d)) / 86400000);
+}
+
+function date(d, now) {
+  return d.getDate() + ' ' + MONTHS[d.getMonth()] + (d.getFullYear() === now.getFullYear() ? '' : ' ' + d.getFullYear());
+}
+
+/// A row's time: "now", "15m", "3h", "Tue", "4 Nov", "4 Nov 2025".
+function short(iso, now) {
   const d = new Date(iso);
   const secs = (now - d) / 1000;
+  if (secs < 60) return 'now';
+  if (secs < 3600) return Math.floor(secs / 60) + 'm';
+  if (secs < 86400) return Math.floor(secs / 3600) + 'h';
+  return daysTo(d, now) < 7 ? DAYS[d.getDay()] : date(d, now);
+}
+
+/// A note's time in a conversation: "16:32", "Tue 16:32", "4 Nov 16:32".
+function noteTime(iso, now) {
+  const d = new Date(iso);
+  const days = daysTo(d, now);
+  if (days === 0) return hhmm(d);
+  return (days < 7 ? DAYS[d.getDay()] : date(d, now)) + ' ' + hhmm(d);
+}
+
+/// The foot's "Updated …": "just now", "2 min ago", "3 h ago".
+function ago(then, now) {
+  const secs = (now - then) / 1000;
   if (secs < 60) return 'just now';
   if (secs < 3600) return Math.floor(secs / 60) + ' min ago';
-  if (secs < 6 * 3600) return Math.floor(secs / 3600) + ' h ago';
-  const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
-  const days = Math.round((day(now) - day(d)) / 86400000);
-  if (days === 0) return hhmm(d);
-  if (days === 1) return 'yesterday ' + hhmm(d);
-  if (days < 7) return DAYS[d.getDay()];
-  const year = d.getFullYear() === now.getFullYear() ? '' : ' ' + d.getFullYear();
-  return d.getDate() + ' ' + MONTHS[d.getMonth()] + year;
+  return Math.floor(secs / 3600) + ' h ago';
 }
 
 function absolute(iso) {
@@ -272,11 +316,15 @@ if (typeof module === 'object' && module.exports) {
     parseInline,
     toDom,
     renderNote,
+    preview,
+    excerpt,
     withoutTitle,
     shownTitle,
     pickKey,
     askShown,
-    relative,
+    short,
+    noteTime,
+    ago,
     absolute,
   };
 }
@@ -305,27 +353,34 @@ if (typeof document !== 'undefined') {
   const REFRESH_MS = 30000;
   const $ = (id) => document.getElementById(id);
   const state = {
+    // The view: Everyone (`board`) or For you (`threads`), with a `show` and maybe a team.
     tab: 'board',
-    filter: { show: 'all' },
-    // The latest answer (for the side bar), and the threads of the view shown.
+    show: 'all',
+    team: null,
+    // The latest answer (counts, teams, you); For you's pending threads, shown first with All;
+    // the threads of the view, their cursor, and every name known.
     data: null,
+    needs: [],
     threads: [],
     cursor: null,
     names: {},
+    // Conversations open, loaded, being loaded and failed; the one the person just opened.
     open: new Set(),
     convos: new Map(),
-    // Conversations being loaded, and those whose last load failed.
     convoLoading: new Set(),
     convoFailed: new Set(),
+    opening: null,
     lastOk: null,
     lastTry: 0,
-    // Each view (tab and filter) the person picks is a new generation: an answer for an older
-    // one is dropped when it comes. `busy` is the generation a load is running for, if any.
+    // Each view the person picks is a new generation: an answer for an older one is dropped when
+    // it comes. `busy` is the generation a load is running for, if any.
     gen: 0,
     busy: null,
-    // No answer yet for this view; and whether the last try for it failed.
+    // No answer yet for this view (its old rows stay meanwhile); the last try for it failed; it
+    // has taken over 300 ms.
     loading: true,
     failed: false,
+    slow: false,
   };
 
   function el(tag, cls, text) {
@@ -350,28 +405,29 @@ if (typeof document !== 'undefined') {
 
   const you = () => (state.data ? state.data.you : '');
   const nameOf = (handle) => (handle === you() ? 'You' : state.names[handle] || handle);
+  const authorOf = (handle) => (handle === you() ? 'Your agent' : state.names[handle] || handle);
+  // For you with All: two groups, Needs you and Earlier.
+  const grouped = () => state.tab === 'threads' && state.show === 'all' && !state.team;
 
-  function via(note) {
-    return note.via + (note.context ? ' in ' + note.context : '');
-  }
-
-  /// A time, relative; `tick` moves it on in place.
-  function timeEl(iso, cls) {
-    const t = el('span', cls, relative(iso, new Date()));
-    t.dataset.at = iso;
+  /// A time; `tick` moves it on in place.
+  function timeEl(iso, format) {
+    const t = el('time', '', format(iso, new Date()));
+    t.dateTime = iso;
     t.title = absolute(iso);
+    t.format = format;
     return t;
   }
 
   function tick() {
     const now = new Date();
-    document.querySelectorAll('[data-at]').forEach((t) => {
-      const text = relative(t.dataset.at, now);
+    document.querySelectorAll('time').forEach((t) => {
+      const text = t.format(t.dateTime, now);
       if (t.textContent !== text) t.textContent = text;
     });
+    renderFoot();
   }
 
-  /// A short line for screen readers (the feed itself is not read out again on each refresh).
+  /// A short line for screen readers (the list itself is not read out again on each refresh).
   function announce(text) {
     const box = $('announce');
     box.textContent = '';
@@ -380,7 +436,6 @@ if (typeof document !== 'undefined') {
 
   /// Unreachable server, wrong key, refused request: a line at the top; what is shown stays.
   function problem(err) {
-    const banner = $('banner');
     let text;
     if (err.status === 403) {
       text = "This page's key is missing or wrong: open the address relevo web printed.";
@@ -393,8 +448,8 @@ if (typeof document !== 'undefined') {
       text = "Can't reach relevo web: is it still running?";
     }
     if (state.lastOk) text += ' Last updated ' + hhmm(state.lastOk) + '.';
-    banner.textContent = text;
-    banner.hidden = false;
+    $('banner').textContent = text;
+    $('banner').hidden = false;
   }
 
   function fine() {
@@ -419,55 +474,67 @@ if (typeof document !== 'undefined') {
     return body;
   }
 
-  function query(before, limit) {
+  function query(show, before, limit) {
     const q = new URLSearchParams({ tab: state.tab });
     if (state.tab === 'threads') {
-      if (state.filter.show && state.filter.show !== 'all') q.set('show', state.filter.show);
-      if (state.filter.team) q.set('team', state.filter.team);
-      if (state.filter.with) q.set('with', state.filter.with);
+      if (show !== 'all') q.set('show', show);
+      if (state.team) q.set('team', state.team);
     }
     if (before) q.set('before', before);
     if (limit) q.set('limit', String(limit));
     return '/api/timeline?' + q.toString();
   }
 
-  function setBusy() {
-    $('refresh').classList.toggle('busy', state.busy !== null);
-    $('loadmore').disabled = state.busy !== null;
-  }
-
   /// Every page shown, asked again (so a thread far down that was closed or handled is shown so),
-  /// for the view shown; an answer for a view no longer shown is dropped.
+  /// and with For you's All every pending thread, whatever page it is on. An answer for a view no
+  /// longer shown is dropped.
   async function refresh() {
     const gen = state.gen;
     if (state.busy === gen) return;
     state.busy = gen;
     state.lastTry = Date.now();
-    setBusy();
+    const slow = setTimeout(() => {
+      if (gen === state.gen && state.loading) {
+        state.slow = true;
+        renderFoot();
+      }
+    }, 300);
     try {
-      const ask = async (before, limit) => {
-        const v = await api(query(before, limit));
+      const ask = (show) => async (before, limit) => {
+        const v = await api(query(show, before, limit));
         return gen === state.gen ? v : null;
       };
-      const got = await askShown(ask, state.threads.length, state.cursor);
+      let needs = null;
+      if (grouped()) {
+        needs = await askShown(ask('waiting'), 50, null);
+        if (!needs) return;
+      }
+      const shown = state.loading ? 0 : state.threads.length;
+      const got = await askShown(ask(state.show), shown, state.loading ? null : state.cursor);
       if (!got) return;
-      const before = new Map(state.threads.map((t) => [t.id, t]));
-      const added = state.loading ? 0 : got.threads.filter((t) => !before.has(t.id)).length;
+      // Not on a view's first load: what is new, or has a new note, is tinted for a moment.
+      const again = !state.loading;
+      const before = new Map();
+      if (again) state.needs.concat(state.threads).forEach((t) => before.set(t.id, t));
+      const all = (needs ? needs.threads : []).concat(got.threads);
+      const isNew = (t) => again && !before.has(t.id);
+      const fresh = new Set(all.filter((t) => isNew(t) || (again && before.get(t.id).notes !== t.notes)).map((t) => t.id));
+      const added = new Set(all.filter(isNew).map((t) => t.id)).size;
+      if (state.loading) state.open.clear();
       state.data = got.first;
-      state.names = Object.assign({}, state.names, got.first.names);
+      state.names = Object.assign({}, state.names, needs ? needs.first.names : {}, got.first.names);
+      state.needs = needs ? needs.threads : [];
       state.threads = got.threads;
       state.cursor = got.cursor;
-      state.loading = false;
-      state.failed = false;
+      state.loading = state.failed = state.slow = false;
       fine();
-      render();
+      render(fresh);
       if (added) announce(added === 1 ? '1 new thread' : added + ' new threads');
       // A conversation open whose thread grew is read again; the copy shown stays until then.
       state.open.forEach((id) => {
-        const t = got.threads.find((x) => x.id === id);
+        const t = all.find((x) => x.id === id);
         const was = before.get(id);
-        const grew = t && was && (t.notes !== was.notes || t.status !== was.status);
-        if (!state.convos.has(id) || grew) loadConvo(id);
+        if (!state.convos.has(id) || (t && was && (t.notes !== was.notes || t.status !== was.status))) loadConvo(id);
       });
     } catch (err) {
       if (gen !== state.gen) return;
@@ -475,8 +542,8 @@ if (typeof document !== 'undefined') {
       problem(err);
       render();
     } finally {
+      clearTimeout(slow);
       if (state.busy === gen) state.busy = null;
-      setBusy();
     }
   }
 
@@ -484,9 +551,9 @@ if (typeof document !== 'undefined') {
     const gen = state.gen;
     if (state.busy !== null || !state.cursor) return;
     state.busy = gen;
-    setBusy();
+    $('loadmore').disabled = true;
     try {
-      const v = await api(query(state.cursor, 20));
+      const v = await api(query(state.show, state.cursor, 20));
       if (gen !== state.gen) return;
       const ids = new Set(state.threads.map((t) => t.id));
       state.threads = state.threads.concat(v.threads.filter((t) => !ids.has(t.id)));
@@ -498,7 +565,7 @@ if (typeof document !== 'undefined') {
       if (gen === state.gen) problem(err);
     } finally {
       if (state.busy === gen) state.busy = null;
-      setBusy();
+      $('loadmore').disabled = false;
     }
   }
 
@@ -508,6 +575,7 @@ if (typeof document !== 'undefined') {
     try {
       const t = await api('/api/timeline/threads/' + encodeURIComponent(id));
       state.names = Object.assign({}, state.names, t.names);
+      t.loaded = Date.now();
       state.convos.set(id, t);
       state.convoFailed.delete(id);
       fine();
@@ -517,212 +585,116 @@ if (typeof document !== 'undefined') {
     } finally {
       state.convoLoading.delete(id);
     }
-    const box = document.getElementById(convoId(id));
-    if (box && state.open.has(id)) fillConvo(box, id);
+    if (state.open.has(id) && !state.loading) renderFeed();
   }
 
-  /// Another tab or filter: a new generation, and its first page.
-  function select(tab, filter) {
+  /// Another tab or filter: a new generation. Its rows replace the old ones when they come.
+  function select(tab, show, team) {
     state.gen++;
     state.tab = tab;
-    if (filter) state.filter = filter;
-    state.threads = [];
-    state.cursor = null;
-    state.open.clear();
+    state.show = show || 'all';
+    state.team = team || null;
     state.loading = true;
-    state.failed = false;
-    render();
+    state.failed = state.slow = false;
+    renderTabs();
+    renderFilters();
     refresh();
   }
 
   // ---------- drawing ----------
 
-  function filterButton(label, count, on, onclick) {
-    const b = el('button', 'filter' + (on ? ' on' : ''));
-    b.append(el('span', '', label));
-    if (count !== undefined) b.append(el('b', '', String(count)));
-    b.setAttribute('aria-pressed', on ? 'true' : 'false');
-    b.onclick = onclick;
-    return b;
-  }
-
-  function renderSide() {
-    const v = state.data;
-    if (!v) return;
-    const me = $('me');
-    const teams = v.teams.length ? ' · in ' + v.teams.map((t) => '@' + t).join(', ') : '';
-    const who = el('div', 'who', state.names[v.you] || v.you);
-    who.append(el('small', '', '@' + v.you + teams));
-    me.replaceChildren(avatar(v.you), who);
-    me.hidden = false;
-
-    const inThreads = state.tab === 'threads';
-    const f = state.filter;
-    const show = [
-      ['all', 'All', v.counts.threads],
-      ['waiting', 'Waiting for you', v.counts.waiting],
-      ['answered', 'Answered by your agent', v.counts.answered],
-      ['closed', 'Closed', v.counts.closed],
-    ].map(([value, label, n]) =>
-      filterButton(label, n, inThreads && f.show === value && !f.team && !f.with, () =>
-        select('threads', { show: value })
-      )
-    );
-    const teams$ = v.teams.map((t) =>
-      filterButton('@' + t, v.counts.teams[t] || 0, inThreads && f.team === t, () =>
-        select('threads', { show: 'all', team: t })
-      )
-    );
-    const people = v.people.map((h) =>
-      filterButton('@' + h, undefined, inThreads && f.with === h, () =>
-        select('threads', { show: 'all', with: h })
-      )
-    );
-    // Drawn again only when something in it changed, so a focused filter keeps its focus.
-    const sig = JSON.stringify([v.you, v.teams, v.counts, v.people, state.names[v.you], state.tab, f]);
-    if (sig === renderSide.sig) return;
-    renderSide.sig = sig;
-    $('show').replaceChildren(...show);
-    $('teams').replaceChildren(...(teams$.length ? teams$ : [el('div', 'none', 'No team')]));
-    $('people').replaceChildren(...(people.length ? people : [el('div', 'none', 'Nobody yet')]));
-  }
-
-  /// "@pedro → you", "@luis → @product", "@oscar → everyone".
-  function target(t) {
+  /// Where the thread went: "you", "@pedro", "@product", "everyone".
+  function where(t) {
     if (t.kind === 'global') return 'everyone';
     if (t.kind === 'team') return t.teams.map((n) => '@' + n).join(', ');
     const others = t.participants.filter((h) => h !== t.from);
     return others.map((h) => (h === you() ? 'you' : '@' + h)).join(', ') || 'you';
   }
 
-  function replies(n) {
-    return n === 1 ? '1 reply' : n + ' replies';
+  /// The answer a row shows: by someone else when the person started the thread, else the latest.
+  const answerOf = (t) => (t.from === you() ? t.last_other_note : t.last_note);
+
+  function md(text, cls) {
+    const div = el('div', cls);
+    div.appendChild(toDom(preview(text), document));
+    return div;
   }
 
-  function chips(t) {
-    const out = [];
-    const me = you();
-    const last = t.last_note || t.first_note;
-    if (t.kind === 'global') {
-      if (t.pending) out.push(['pend', 'mentions you · waiting for you']);
-      if (t.status === 'closed') out.push(['done', 'resolved']);
-      if (t.notes > 1) out.push(['', replies(t.notes - 1)]);
-      else out.push(['', t.status === 'open' ? 'open · no replies' : 'no replies']);
-      return out;
-    }
-    if (t.pending) out.push(['pend', 'waiting for you']);
-    t.teams.forEach((n) => out.push(['team', 'to @' + n]));
-    if (t.from !== me && t.handled_by_you && !t.pending) {
-      out.push(['done', last && last.author === me ? 'answered by your agent' : 'handled by your agent']);
-    }
-    if (t.from === me) {
-      // Someone answered: the latest note is theirs, or you handled (or have pending) a note by
-      // someone else. In a direct thread of two, that is the other person.
-      const other = t.participants.filter((h) => h !== me);
-      if (t.last_note && t.last_note.author !== me) {
-        out.push(['done', nameOf(t.last_note.author) + ' answered']);
-      } else if (t.handled_by_you || t.pending) {
-        const who = t.kind === 'direct' && other.length === 1 ? nameOf(other[0]) + ' answered' : 'answered';
-        out.push(['done', who]);
-      }
-    }
-    if (t.kind === 'team' && !t.named && t.from !== me) out.push(['', 'optional for you']);
-    if (t.status === 'closed') {
-      if (t.kind === 'team') out.push(['done', 'resolved']);
-      else if (t.closed_by === me) out.push(['closed', 'closed by your agent']);
-      else if (t.closed_by) out.push(['closed', 'closed by ' + nameOf(t.closed_by)]);
-      else out.push(['closed', 'closed']);
-    } else if (t.kind === 'direct' && !t.pending) {
-      out.push(['', 'open']);
-    }
-    if (t.notes > 1) out.push(['', replies(t.notes - 1)]);
-    return out;
-  }
-
-  const convoId = (id) => 'convo-' + id;
-
-  /// The conversation of thread `id` in `box`: the copy loaded (kept while a newer one loads),
-  /// else a line saying it loads, or that it could not.
-  function fillConvo(box, id) {
-    const t = state.convos.get(id);
-    if (!t) {
-      if (state.convoFailed.has(id) && !state.convoLoading.has(id)) {
-        const retry = el('button', 'retry', 'Try again');
-        retry.onclick = (e) => {
-          // The button is gone once the box is redrawn: the post must not take the click.
-          e.stopPropagation();
-          loadConvo(id);
-          fillConvo(box, id);
-        };
-        box.replaceChildren(el('div', 'meta', "Couldn't load the conversation. "), retry);
-      } else {
-        box.replaceChildren(el('div', 'meta', 'Loading the conversation…'));
-      }
-      return;
-    }
-    if (box.shown === t) return;
-    box.shown = t;
-    box.replaceChildren(
-      ...t.notes.map((n) => {
-        const row = el('div', 'note');
-        const bubble = el('div', 'bubble');
-        const meta = el('div', 'meta');
-        meta.append(el('b', '', nameOf(n.author)), ' · ' + via(n) + ' · ', timeEl(n.created_at));
-        bubble.append(meta, renderNote(n.text, document));
-        row.append(avatar(n.author), bubble);
-        return row;
-      })
-    );
-  }
-
-  function moreLabel(t, open) {
-    if (open) return 'Hide conversation';
-    return t.notes === 1 ? 'Read the whole note' : 'See conversation · ' + t.notes + ' notes';
-  }
-
-  function post(t) {
-    const open = state.open.has(t.id);
-    const a = el('article', 'post');
-    a.dataset.id = t.id;
-    const first = t.first_note;
-    const content = el('div', 'content');
-
-    const head = el('div', 'head');
-    head.append(el('b', '', nameOf(t.from)), el('span', 'h', '@' + t.from + ' → ' + target(t)));
-    head.append(timeEl(first.created_at, 't'));
-    content.append(head, el('div', 'via', 'via ' + via(first)));
-    // The title is the post's control: a button, for the keyboard and screen readers.
-    const title = el('button', 'title', shownTitle(t.title, first.text));
-    title.setAttribute('aria-expanded', open ? 'true' : 'false');
-    title.setAttribute('aria-controls', convoId(t.id));
-    content.append(title);
-    const rest = withoutTitle(first.text, t.title);
-    if (rest.trim()) {
-      content.append(renderNote(rest + (first.truncated ? '…' : ''), document, 'body clip'));
-    }
-    // The answer: the latest note by someone else, never the person's own (docs/web.md).
-    const answer = t.last_other_note;
-    if (answer) {
-      const n = answer;
-      const reply = el('div', 'reply');
-      const rh = el('div', 'head');
-      rh.append(el('b', '', nameOf(n.author)), el('span', 'h', 'via ' + via(n)), timeEl(n.created_at, 't'));
-      reply.append(rh, renderNote(n.text + (n.truncated ? '…' : ''), document, 'body clip'));
-      content.append(reply);
-    }
-    const chipBox = el('div', 'chips');
-    chips(t).forEach(([cls, text]) => chipBox.append(el('span', 'chip ' + cls, text)));
-    content.append(chipBox);
-    // Shown when there is more than the preview; `markCut` adds it too when a preview is cut by
-    // its height.
-    if (open || t.notes > 2 || first.truncated || (answer && answer.truncated)) {
-      content.append(el('div', 'more', moreLabel(t, open)));
-    }
+  /// The conversation, every note once, in place of the row's previews: the first note without
+  /// its title, which is just above.
+  function convo(t, full) {
     const box = el('div', 'convo');
-    box.id = convoId(t.id);
-    box.hidden = !open;
-    if (open) fillConvo(box, t.id);
-    content.append(box);
+    box.id = 'convo-' + t.id;
+    if (!full) {
+      if (state.convoFailed.has(t.id) && !state.convoLoading.has(t.id)) {
+        const retry = el('button', 'retry', 'Try again');
+        retry.onclick = () => {
+          loadConvo(t.id);
+          renderFeed();
+        };
+        const line = el('div', 'who', "Couldn't load the conversation.");
+        line.append(retry);
+        box.append(line);
+      } else {
+        box.append(el('div', 'who', 'Loading…'));
+      }
+      return box;
+    }
+    full.notes.forEach((n, i) => {
+      const note = el('div');
+      const who = el('div', 'who');
+      who.append(el('b', '', authorOf(n.author)), ' · ' + n.via + (n.context ? ' in ' + n.context : '') + ' · ', timeEl(n.created_at, noteTime));
+      note.append(who);
+      const text = i === 0 ? withoutTitle(n.text, full.title) : n.text;
+      if (text.trim()) note.append(renderNote(text, document));
+      box.append(note);
+    });
+    if (state.opening === t.id) {
+      box.classList.add('opening');
+      state.opening = null;
+    }
+    return box;
+  }
+
+  function row(t) {
+    const open = state.open.has(t.id);
+    const full = open ? state.convos.get(t.id) : null;
+    const first = t.first_note;
+    const a = el('article', 'row' + (t.status === 'closed' ? ' closed' : ''));
+    a.dataset.id = t.id;
+    const content = el('div');
+
+    const meta = el('div', 'meta');
+    meta.append(el('b', '', nameOf(t.from)), el('span', 'label', 'via ' + first.via), el('span', 'tag', where(t)));
+    if (t.notes > 1) meta.append(el('span', 'label', '· ' + t.notes + ' notes'));
+    if (t.status === 'closed') meta.append(el('span', 'label closed-label', 'Closed'));
+    meta.append(timeEl((t.last_note || first).created_at, short));
+    // The title is the row's control: a button in a heading, for the keyboard and screen readers.
+    const title = el('button', '', shownTitle(t.title, first.text));
+    title.setAttribute('aria-expanded', String(open));
+    if (open) title.setAttribute('aria-controls', 'convo-' + t.id);
+    const h3 = el('h3');
+    h3.append(title);
+    content.append(meta, h3);
+
+    if (!full) {
+      const rest = excerpt(first.text, t.title);
+      if (rest) content.append(md(rest + (first.truncated ? '…' : ''), 'excerpt'));
+      const answer = answerOf(t);
+      if (answer) {
+        const line = md(answer.text + (answer.truncated ? '…' : ''), 'answer');
+        const p = line.firstChild || line.appendChild(el('p'));
+        p.prepend(el('b', '', authorOf(answer.author)), ' ');
+        content.append(line);
+      }
+    }
+    if (t.pending) {
+      const chips = el('div', 'chips');
+      chips.append(el('span', 'status', 'Waiting for you'));
+      if (t.kind === 'global') chips.append(el('span', 'label', 'mentioned you'));
+      content.append(chips);
+    }
+    if (open) content.append(convo(t, full));
     a.append(avatar(t.from), content);
     a.onclick = (e) => {
       if (e.target.closest('.convo')) return;
@@ -733,103 +705,177 @@ if (typeof document !== 'undefined') {
   }
 
   function toggle(id) {
+    if (state.loading) return;
     if (state.open.has(id)) state.open.delete(id);
     else {
       state.open.add(id);
+      state.opening = id;
       if (!state.convos.has(id)) loadConvo(id);
     }
-    render();
-    const again = document.querySelector('[data-id="' + CSS.escape(id) + '"] .title');
+    renderFeed();
+    const again = document.querySelector('[data-id="' + CSS.escape(id) + '"] h3 button');
     if (again) again.focus({ preventScroll: true });
   }
 
-  /// Previews cut by their height fade out at the bottom, and say the post can be opened.
-  function markCut(root) {
-    root.querySelectorAll('.post').forEach((p) => {
-      let cut = false;
-      p.querySelectorAll('.clip').forEach((c) => {
-        const is = c.scrollHeight > c.clientHeight + 1;
-        c.classList.toggle('cut', is);
-        cut = cut || is;
-      });
-      const content = p.querySelector('.content');
-      if (cut && !content.querySelector('.more')) {
-        const t = state.threads.find((x) => x.id === p.dataset.id);
-        if (t) content.insertBefore(el('div', 'more', moreLabel(t, false)), content.querySelector('.convo'));
-      }
+  /// What a row shows: drawn again only when it changes, so focus, a text selection and an open
+  /// conversation stay as they are when nothing in that thread changed.
+  function rowSig(t) {
+    const notes = [t.first_note, t.last_note, t.last_other_note].filter(Boolean);
+    const handles = [t.from, ...t.participants, ...notes.map((n) => n.author)];
+    const open = state.open.has(t.id);
+    const full = open && state.convos.get(t.id);
+    const convoState = !open ? '' : full ? full.loaded : state.convoFailed.has(t.id) && !state.convoLoading.has(t.id) ? 'failed' : 'loading';
+    return JSON.stringify([t, convoState, you(), handles.map((h) => state.names[h])]);
+  }
+
+  /// Puts `nodes` in `parent`, in order, moving only what must move (a node moved loses focus and
+  /// selection): what is gone goes first.
+  function place(parent, nodes) {
+    const keep = new Set(nodes);
+    for (const c of [...parent.children]) if (!keep.has(c)) c.remove();
+    nodes.forEach((n, i) => {
+      const at = parent.children[i];
+      if (at !== n) parent.insertBefore(n, at || null);
     });
   }
 
-  /// What a post shows: drawn again only when it changes, so focus, a text selection and an open
-  /// conversation stay as they are when nothing in that thread changed.
-  function postSig(t) {
-    const notes = [t.first_note, t.last_note, t.last_other_note].filter(Boolean);
-    const handles = [t.from, t.closed_by, ...t.participants, ...notes.map((n) => n.author)];
-    const names = handles.map((h) => h && state.names[h]);
-    return JSON.stringify([t, state.open.has(t.id), you(), names]);
+  const SHOWS = [
+    ['all', 'All', 'threads'],
+    ['waiting', 'Needs you', 'waiting'],
+    ['answered', 'Answered', 'answered'],
+    ['closed', 'Closed', 'closed'],
+  ];
+
+  /// The view's name, for the heading of a list with no groups (read by screen readers only).
+  function viewName() {
+    if (state.tab === 'board') return 'Everyone';
+    if (state.team) return 'For you: @' + state.team;
+    return 'For you: ' + SHOWS.find(([s]) => s === state.show)[1];
   }
 
-  function renderFeed() {
+  function renderFeed(fresh) {
     const feed = $('feed');
     const focused = document.activeElement;
-    const focusedPost = focused && focused.closest ? focused.closest('.post') : null;
+    const focusedRow = focused && focused.closest ? focused.closest('.row') : null;
     const old = new Map();
-    for (const p of feed.children) old.set(p.dataset.id, p);
-    const nodes = state.threads.map((t) => {
-      const sig = postSig(t);
-      const was = old.get(t.id);
-      if (was && was.sig === sig) return was;
-      const p = post(t);
-      p.sig = sig;
-      return p;
+    feed.querySelectorAll('.row').forEach((r) => old.set(r.dataset.id, r));
+    const rows = (threads) =>
+      threads.map((t) => {
+        const sig = rowSig(t);
+        const was = old.get(t.id);
+        if (was && was.sig === sig) return was;
+        const r = row(t);
+        r.sig = sig;
+        if (fresh && fresh.has(t.id)) r.classList.add('fresh');
+        return r;
+      });
+    let groups;
+    if (grouped()) {
+      const needs = new Set(state.needs.map((t) => t.id));
+      groups = [
+        ['needs', 'Needs you', state.needs],
+        ['earlier', 'Earlier', state.threads.filter((t) => !needs.has(t.id) && !t.pending)],
+      ].filter(([, , list]) => list.length);
+    } else {
+      groups = state.threads.length ? [['flat', viewName(), state.threads]] : [];
+    }
+    renderFeed.sections = renderFeed.sections || new Map();
+    const sections = groups.map(([key, name, list]) => {
+      let s = renderFeed.sections.get(key);
+      if (!s) {
+        s = el('section');
+        s.append(el('h2'), el('div', 'list'));
+        renderFeed.sections.set(key, s);
+      }
+      const h2 = s.firstChild;
+      h2.className = key === 'flat' ? 'sr' : '';
+      const head = [name, key === 'needs' ? list.length : ''];
+      if (h2.head !== String(head)) {
+        h2.head = String(head);
+        h2.replaceChildren(name + (key === 'needs' ? ' ' : ''));
+        if (key === 'needs') h2.append(el('span', 'n', String(list.length)));
+      }
+      place(s.lastChild, rows(list));
+      return s;
     });
-    // Takes out what is gone or redrawn first, so the posts that stay never move (moving a node
-    // detaches it, and it loses focus and selection) unless the order changed.
-    const keep = new Set(nodes);
-    for (const p of [...feed.children]) if (!keep.has(p)) p.remove();
-    nodes.forEach((n, i) => {
-      const at = feed.children[i];
-      if (at !== n) feed.insertBefore(n, at || null);
-    });
-    while (feed.children.length > nodes.length) feed.lastElementChild.remove();
-    // The post that had focus, if it was drawn again.
-    if (focusedPost && !focusedPost.isConnected) {
-      const again = feed.querySelector('[data-id="' + CSS.escape(focusedPost.dataset.id) + '"] .title');
+    place(feed, sections);
+    // The row that had focus, if it was drawn again.
+    if (focusedRow && !focusedRow.isConnected) {
+      const again = feed.querySelector('[data-id="' + CSS.escape(focusedRow.dataset.id) + '"] h3 button');
       if (again) again.focus({ preventScroll: true });
     }
-    markCut(feed);
   }
 
   function renderTabs() {
     for (const [tab, id] of [['board', 'tab-board'], ['threads', 'tab-threads']]) {
       const on = state.tab === tab;
-      $(id).classList.toggle('on', on);
       $(id).setAttribute('aria-selected', String(on));
       $(id).tabIndex = on ? 0 : -1;
       if (on) $('feed').setAttribute('aria-labelledby', id);
     }
+    const n = state.data ? state.data.counts.waiting : 0;
+    $('for-you-n').textContent = n > 0 ? String(n) : '';
   }
 
-  function render() {
-    renderTabs();
-    renderSide();
-    renderFeed();
-    $('loadmore').hidden = !state.cursor;
-    const footer = $('footer');
-    let text = '';
-    if (state.loading) {
-      text = state.failed ? "Couldn't load this view. It is tried again every 30 seconds, or with ↻." : 'Loading…';
-    } else if (state.cursor) {
-      text = '';
-    } else if (state.tab === 'board') {
-      text = state.threads.length
-        ? 'Notes with no @, for everyone. Team notes and direct notes are seen only by the people in them.'
-        : 'Nothing here yet. A note with no @ goes here, for everyone to see.';
-    } else {
-      text = state.threads.length ? '' : 'No threads here.';
+  /// For you's filters, drawn again only when they change; the one focused keeps the focus.
+  function renderFilters() {
+    const v = state.data;
+    const nav = $('filters');
+    nav.hidden = state.tab !== 'threads' || !v;
+    if (nav.hidden) return;
+    const sig = JSON.stringify([v.teams, v.counts, state.show, state.team]);
+    if (sig === nav.sig) return;
+    nav.sig = sig;
+    const focused = nav.contains(document.activeElement) ? document.activeElement.dataset.f : null;
+    const button = (key, label, n, on, pick) => {
+      const b = el('button', '', label + ' ');
+      b.append(el('b', '', String(n)));
+      b.dataset.f = key;
+      b.setAttribute('aria-pressed', String(on));
+      b.onclick = pick;
+      return b;
+    };
+    const shows = SHOWS.map(([show, label, count]) =>
+      button(show, label, v.counts[count], !state.team && state.show === show, () => select('threads', show))
+    );
+    const teams = v.teams.map((t) =>
+      button('@' + t, '@' + t, v.counts.teams[t] || 0, state.team === t, () => select('threads', 'all', t))
+    );
+    const sep = el('span', 'sep');
+    sep.setAttribute('aria-hidden', 'true');
+    nav.replaceChildren(...shows, ...(teams.length ? [sep, ...teams] : []));
+    if (focused) {
+      const again = nav.querySelector('[data-f="' + CSS.escape(focused) + '"]');
+      if (again) again.focus();
     }
-    footer.textContent = text;
-    footer.hidden = !text;
+  }
+
+  function renderFoot() {
+    const foot = $('foot');
+    const text = state.loading && state.slow ? 'Loading…' : state.lastOk ? 'Updated ' + ago(state.lastOk, new Date()) : '';
+    if (foot.textContent !== text) foot.textContent = text;
+    foot.hidden = !text;
+  }
+
+  function render(fresh) {
+    renderTabs();
+    renderFilters();
+    if (state.loading && state.failed) {
+      // Not the old view's rows under the new one's name.
+      $('feed').replaceChildren();
+    } else if (!state.loading) {
+      renderFeed(fresh);
+    }
+    const empty = $('empty');
+    let text = '';
+    if (state.loading && state.failed) text = "Couldn't load this. It is tried again every 30 seconds.";
+    else if (!state.loading && !state.threads.length && !state.needs.length) {
+      text = state.tab === 'board' ? 'Nothing on the board yet.' : grouped() ? 'Nothing for you yet.' : 'Nothing here.';
+    }
+    empty.textContent = text;
+    empty.hidden = !text;
+    $('loadmore').hidden = state.loading || !state.cursor;
+    renderFoot();
   }
 
   $('tab-board').onclick = () => select('board');
@@ -849,7 +895,7 @@ if (typeof document !== 'undefined') {
     $(tabs[to]).focus();
     if (to !== at) select(to === 0 ? 'board' : 'threads');
   });
-  $('refresh').onclick = () => refresh();
+  $('foot').onclick = () => refresh();
   $('loadmore').onclick = () => loadMore();
   setInterval(() => {
     if (document.visibilityState === 'visible') refresh();
@@ -857,10 +903,10 @@ if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && Date.now() - state.lastTry > REFRESH_MS) refresh();
   });
-  // Relative times move on even when nothing new comes, in place.
+  // Times move on even when nothing new comes, in place.
   setInterval(() => {
     if (document.visibilityState === 'visible') tick();
-  }, 60000);
+  }, 30000);
   render();
   refresh();
 }

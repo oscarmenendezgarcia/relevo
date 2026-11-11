@@ -420,10 +420,10 @@ mod tests {
         assert!(!same(b"abc", b"ab"));
     }
 
-    /// Small text in `--faint` (times, counts, labels) is readable: at least 4.5:1 (WCAG AA) on
-    /// every background it sits on, in the dark theme and in the light one.
+    /// All text is readable: at least 4.5:1 (WCAG AA) on every background it sits on, in the dark
+    /// theme and in the light one, the amber pill included.
     #[test]
-    fn faint_text_has_enough_contrast_in_both_themes() {
+    fn all_text_has_enough_contrast_in_both_themes() {
         fn colours(name: &str) -> Vec<[f64; 3]> {
             STYLE
                 .match_indices(&format!("{name}: #"))
@@ -445,17 +445,30 @@ mod tests {
             };
             0.2126 * f(rgb[0]) + 0.7152 * f(rgb[1]) + 0.0722 * f(rgb[2])
         }
-        let faint = colours("--faint");
-        assert_eq!(faint.len(), 2, "a dark and a light --faint");
-        for background in ["--page", "--bg", "--panel", "--panel2", "--hover"] {
-            let backgrounds = colours(background);
-            assert_eq!(backgrounds.len(), 2, "{background}");
+        for (text, background) in [
+            ("--text", "--bg"),
+            ("--text", "--soft"),
+            ("--body", "--bg"),
+            ("--faint", "--bg"),
+            ("--faint", "--soft"),
+            ("--need", "--bg"),
+            ("--need", "--soft"),
+            ("--mention", "--bg"),
+            ("--tag", "--tag-bg"),
+            ("--pill-text", "--pill"),
+        ] {
+            let (fg, bg) = (colours(text), colours(background));
+            assert_eq!(
+                (fg.len(), bg.len()),
+                (2, 2),
+                "{text} and {background}, dark and light"
+            );
             for theme in 0..2 {
-                let (a, b) = (luminance(faint[theme]), luminance(backgrounds[theme]));
+                let (a, b) = (luminance(fg[theme]), luminance(bg[theme]));
                 let ratio = (a.max(b) + 0.05) / (a.min(b) + 0.05);
                 assert!(
                     ratio >= 4.5,
-                    "--faint on {background}, theme {theme}: {ratio:.2}"
+                    "{text} on {background}, theme {theme}: {ratio:.2}"
                 );
             }
         }

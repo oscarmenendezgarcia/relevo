@@ -10,35 +10,22 @@
 <script src="/app.js" defer></script>
 </head>
 <body>
-<div class="app">
-  <aside class="side" id="side">
-    <div class="brand"><img src="/mark.svg" alt=""><span>relevo</span></div>
-    <div class="me" id="me" hidden></div>
-    <div class="group">
-      <div class="sec">Show</div>
-      <div id="show"></div>
+<div class="page">
+  <header>
+    <img class="mark" src="/mark.svg" alt="" width="24" height="24">
+    <h1>relevo</h1>
+    <div class="seg" id="tabs" role="tablist" aria-label="Threads">
+      <button id="tab-board" role="tab" aria-selected="true" aria-controls="feed">Everyone</button>
+      <button id="tab-threads" role="tab" aria-selected="false" aria-controls="feed" tabindex="-1">For you <span class="cnt" id="for-you-n"></span></button>
     </div>
-    <div class="group">
-      <div class="sec">Your teams</div>
-      <div id="teams"></div>
-    </div>
-    <div class="group">
-      <div class="sec">People</div>
-      <div id="people"></div>
-    </div>
-  </aside>
-  <main class="main">
-    <div class="tabs" id="tabs" role="tablist">
-      <button class="tab on" id="tab-board" role="tab" aria-selected="true" aria-controls="feed">Everyone</button>
-      <button class="tab" id="tab-threads" role="tab" aria-selected="false" aria-controls="feed" tabindex="-1">Your threads</button>
-      <button class="refresh" id="refresh" title="Refresh" aria-label="Refresh">&#x21bb;</button>
-    </div>
-    <div class="banner" id="banner" role="status" hidden></div>
-    <div class="sr" id="announce" role="status"></div>
-    <section class="feed" id="feed" role="tabpanel" aria-labelledby="tab-board"></section>
-    <button class="loadmore" id="loadmore" hidden>Load more</button>
-    <div class="empty" id="footer" hidden></div>
-  </main>
+  </header>
+  <div class="banner" id="banner" role="status" hidden></div>
+  <div class="sr" id="announce" role="status"></div>
+  <nav class="filters" id="filters" aria-label="Filters" hidden></nav>
+  <div id="feed" role="tabpanel" aria-labelledby="tab-board"></div>
+  <p class="empty" id="empty" hidden></p>
+  <button class="more" id="loadmore" hidden>Load more</button>
+  <button class="foot" id="foot" title="Refresh now"></button>
 </div>
 </body>
 </html>

@@ -4,7 +4,7 @@
 'use strict';
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { parseNote, parseInline, toDom, withoutTitle, shownTitle, pickKey, askShown, relative, absolute } = require(
+const { parseNote, parseInline, toDom, preview, excerpt, withoutTitle, shownTitle, pickKey, askShown, short, noteTime, ago, absolute } = require(
   path.join(__dirname, '..', '..', 'src', 'web', 'app.js')
 );
 
@@ -179,17 +179,41 @@ check('absolute times are in English', () => {
   assert.match(t, /15:31/);
 });
 
-check('relative times', () => {
+check('a row\'s times are short', () => {
   const now = new Date(2026, 10, 11, 15, 0, 0);
-  const ago = (mins) => new Date(now.getTime() - mins * 60000).toISOString();
-  assert.equal(relative(ago(0.5), now), 'just now');
-  assert.equal(relative(ago(12), now), '12 min ago');
-  assert.equal(relative(ago(120), now), '2 h ago');
-  assert.equal(relative(new Date(2026, 10, 11, 8, 5).toISOString(), now), '08:05');
-  assert.equal(relative(new Date(2026, 10, 10, 19, 25).toISOString(), now), 'yesterday 19:25');
-  assert.equal(relative(new Date(2026, 10, 9, 9, 0).toISOString(), now), 'Monday');
-  assert.equal(relative(new Date(2026, 9, 3, 9, 0).toISOString(), now), '3 Oct');
-  assert.equal(relative(new Date(2025, 9, 3, 9, 0).toISOString(), now), '3 Oct 2025');
+  const ago_ = (mins) => new Date(now.getTime() - mins * 60000).toISOString();
+  assert.equal(short(ago_(0.5), now), 'now');
+  assert.equal(short(ago_(15), now), '15m');
+  assert.equal(short(ago_(180), now), '3h');
+  assert.equal(short(new Date(2026, 10, 10, 9, 0).toISOString(), now), 'Tue');
+  assert.equal(short(new Date(2026, 10, 5, 9, 0).toISOString(), now), 'Thu');
+  assert.equal(short(new Date(2026, 10, 4, 9, 0).toISOString(), now), '4 Nov');
+  assert.equal(short(new Date(2025, 9, 3, 9, 0).toISOString(), now), '3 Oct 2025');
+});
+
+check('a note\'s time in a conversation, and the foot\'s', () => {
+  const now = new Date(2026, 10, 11, 17, 0, 0);
+  assert.equal(noteTime(new Date(2026, 10, 11, 16, 32).toISOString(), now), '16:32');
+  assert.equal(noteTime(new Date(2026, 10, 10, 9, 5).toISOString(), now), 'Tue 09:05');
+  assert.equal(noteTime(new Date(2026, 10, 1, 9, 5).toISOString(), now), '1 Nov 09:05');
+  assert.equal(ago(new Date(now.getTime() - 20000), now), 'just now');
+  assert.equal(ago(new Date(now.getTime() - 125000), now), '2 min ago');
+  assert.equal(ago(new Date(now.getTime() - 3 * 3600000), now), '3 h ago');
+});
+
+check('a row\'s preview is one paragraph, only allowed elements', () => {
+  const doc = fakeDocument();
+  const text = 'Here is the **snippet** <img src=x>\nnext line:\n```js\nconst x = 1;\nmore\n```\nInline `<b>`';
+  assert.equal(
+    show(toDom(preview(text), doc)),
+    '<p>Here is the <strong>snippet</strong> &lt;img src=x> next line: <code>const x = 1;…</code> Inline <code>&lt;b></code></p>'
+  );
+  assert.ok(doc.created.every((t) => ALLOWED.has(t)));
+  assert.deepEqual(preview(''), []);
+  // The first note after its title, without the @mentions it starts with.
+  assert.equal(excerpt('@oscar Release train\nWhen does it ship?', '@oscar Release train'), 'When does it ship?');
+  assert.equal(excerpt('Title\n@ana @bob: look', 'Title'), 'look');
+  assert.equal(excerpt('Title only', 'Title only'), '');
 });
 
 check('parseInline keeps line breaks inside a paragraph', () => {

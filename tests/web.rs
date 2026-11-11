@@ -139,6 +139,10 @@ async fn the_page_and_its_assets_need_no_key_and_carry_the_security_headers() {
     assert!(page.contains(r#"href="/favicon.svg""#));
     // The key is never in the page: it lives in the address's fragment only.
     assert!(!page.contains(KEY));
+    // The page is one column with Everyone first, a tablist, and no side bar.
+    assert!(page.contains(r#"role="tablist""#));
+    assert!(page.find("Everyone").unwrap() < page.find("For you").unwrap());
+    assert!(!page.contains("<aside"));
 }
 
 #[tokio::test]
