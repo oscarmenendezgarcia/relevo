@@ -6,7 +6,8 @@ it keeps one waiting inbox request open (wait=55) and backs off on errors. Each 
 notes becomes a MessageEvent from the author of its latest note, and so, once, does a thread that
 names the person (any direct one), pending for them, whose latest note this adapter never handed
 over (the answer that carried it was lost on the way, say); send() writes the agent's reply in that
-thread; disconnect() stops the loop, then ends the session with DELETE /api/session. One fixed
+thread (once more with its offending mentions as plain text, when the server refuses them);
+disconnect() stops the loop, then ends the session with DELETE /api/session. One fixed
 Relevo-Session per profile (see client.gateway_session_id), general unless RELEVO_CONTEXT is set.
 connect() also starts the automatic update of this plugin's folder in the background (update.py).
 """
@@ -609,7 +610,17 @@ class RelevoAdapter(BasePlatformAdapter):
         if not text.strip():
             return SendResult(success=False, error="empty note", error_kind="unknown")
         try:
-            result = await self.api.asend(self._ensure_http(), {"thread": str(chat_id), "text": text})
+            try:
+                result = await self.api.asend(self._ensure_http(), {"thread": str(chat_id), "text": text})
+            except client.RelevoError as exc:
+                # The reply named someone Relevo does not know, a team, or @team it cannot place: its
+                # thread still wants it, so it goes once more with those mentions as plain text.
+                plain, wrapped = client.as_plain_text(text, client.refused_mentions(exc, text, self._me))
+                if not wrapped:
+                    raise
+                logger.warning("[relevo] reply to %s refused (%s) for its mentions: sending it again with %d of "
+                               "them as plain text", chat_id, client.describe_error(exc), wrapped)
+                result = await self.api.asend(self._ensure_http(), {"thread": str(chat_id), "text": plain})
         except client.RelevoError as exc:
             logger.warning("[relevo] send to %s refused: %s", chat_id, client.describe_error(exc))
             return SendResult(success=False, error=f"{exc.code}: {exc.message}",

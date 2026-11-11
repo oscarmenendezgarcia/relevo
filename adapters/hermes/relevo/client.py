@@ -974,3 +974,194 @@ def describe_refusal(exc: RelevoError, me: Optional[str] = None) -> str:
                  "or wait.")
     return text
 
+
+# -- mentions (docs/protocol.md, "Mentions"), as the server reads them ------------------------------
+
+_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{1,31}")
+
+
+def _may_precede(c: str) -> bool:
+    """An `@` after a letter or digit (any script), `.`, `_`, `-`, `+`, `/`, `@` or a backtick starts no
+    mention: `pedro@empresa.com`, `https://x.com/@ana`, `@@ana`."""
+    return not (c.isalnum() or c in "._-+/@`")
+
+
+def _is_name_char(c: str) -> bool:
+    return c.isascii() and (c.isalnum() or c in "_-")
+
+
+def _is_context_char(c: str) -> bool:
+    return c.isascii() and (c.isalnum() or c in "._-/@")
+
+
+def _unindent(line: str) -> Optional[str]:
+    spaces = len(line) - len(line.lstrip(" "))
+    return line[spaces:] if spaces <= 3 else None
+
+
+def _fence_opens(line: str) -> Optional[tuple[str, int]]:
+    rest = _unindent(line)
+    if not rest or rest[0] not in "`~":
+        return None
+    fence = rest[0]
+    run = len(rest) - len(rest.lstrip(fence))
+    if run < 3 or (fence == "`" and "`" in rest[run:]):
+        return None
+    return fence, run
+
+
+def _fence_closes(line: str, fence: str, length: int) -> bool:
+    rest = _unindent(line)
+    if rest is None:
+        return False
+    run = len(rest) - len(rest.lstrip(fence))
+    return run >= length and all(c in " \t\r" for c in rest[run:])
+
+
+def _spans(text: str, mask: list, offset: int) -> None:
+    """Marks the inline code spans of `text`: a run of n backticks opens one that the next run of
+    exactly n closes; a run nothing closes is plain text."""
+    def run_at(i: int) -> int:
+        j = i
+        while j < len(text) and text[j] == "`":
+            j += 1
+        return j - i
+
+    i = 0
+    while i < len(text):
+        if text[i] != "`":
+            i += 1
+            continue
+        n = run_at(i)
+        j, close = i + n, None
+        while j < len(text):
+            if text[j] == "`":
+                m = run_at(j)
+                if m == n:
+                    close = j
+                    break
+                j += m
+            else:
+                j += 1
+        if close is None:
+            i += n
+        else:
+            for k in range(i, close + n):
+                mask[offset + k] = True
+            i = close + n
+
+
+def _code_mask(text: str) -> list:
+    """Which characters of `text` are code: fenced code blocks and inline code spans."""
+    mask = [False] * len(text)
+    open_fence: Optional[tuple[str, int]] = None
+    prose_start: Optional[int] = None
+    prose: list = []
+    start = 0
+    for line in text.split("\n"):
+        end = start + len(line)
+        through = min(end + 1, len(text))
+        if open_fence is not None:
+            for k in range(start, through):
+                mask[k] = True
+            if _fence_closes(line, *open_fence):
+                open_fence = None
+        else:
+            fence = _fence_opens(line)
+            if fence is not None:
+                if prose_start is not None:
+                    prose.append((prose_start, start))
+                    prose_start = None
+                for k in range(start, through):
+                    mask[k] = True
+                open_fence = fence
+            elif prose_start is None:
+                prose_start = start
+        start = end + 1
+    if prose_start is not None:
+        prose.append((prose_start, len(text)))
+    for a, b in prose:
+        _spans(text[a:b], mask, a)
+    return mask
+
+
+def mentions(text: str) -> list:
+    """Every mention of `text` outside code, in order, repeats included, as the server reads them
+    (src/mention.rs): (start, end, name), `end` past the context if one follows, `name` lowercased
+    with `equipo` read as `team`."""
+    mask = _code_mask(text)
+    out = []
+    i = 0
+    while i < len(text):
+        if text[i] != "@" or mask[i] or (i > 0 and not _may_precede(text[i - 1])):
+            i += 1
+            continue
+        start = end = i + 1
+        while end < len(text) and not mask[end] and _is_name_char(text[end]):
+            end += 1
+        name_end = end
+        while name_end > start and text[name_end - 1] == "-":
+            name_end -= 1
+        name = text[start:name_end]
+        if not _NAME.fullmatch(name):
+            i += 1
+            continue
+        stop = name_end
+        if name_end == end and end < len(text) and text[end] == "/" and not mask[end]:
+            to = end + 1
+            while to < len(text) and not mask[to] and _is_context_char(text[to]):
+                to += 1
+            last = to
+            while last > end + 1 and text[last - 1] in ".,;:!?)-/'":
+                last -= 1
+            stop = max(last, end) if last > end + 1 else end
+        lower = name.lower()
+        out.append((i, stop, "team" if lower in ("team", "equipo") else lower))
+        i = max(stop, i + 1)
+    return out
+
+
+def as_plain_text(text: str, names: set) -> tuple[str, int]:
+    """`text` with each mention of `names` (lowercased; `team` for @team and @equipo) put in backticks,
+    so it is plain text and sends the note to nobody. Returns the text and how many it wrapped."""
+    out, last, wrapped = [], 0, 0
+    for start, end, name in mentions(text):
+        if name in names:
+            out += [text[last:start], "`", text[start:end], "`"]
+            last, wrapped = end, wrapped + 1
+    out.append(text[last:])
+    return "".join(out), wrapped
+
+
+_MAX_MENTIONS = 20
+
+
+def refused_mentions(exc: RelevoError, text: str, me: Optional[str], *, reply: bool = True) -> set:
+    """The mentions of `text` a refused send failed on, when it failed on its mentions: the names
+    UNKNOWN_PERSON did not know (and, in a `reply`, the teams it lists, which a reply cannot mention
+    either: the server says so only once the unknown names are gone), or those a BAD_REQUEST about
+    mentions names (a team in a reply, @team when the person is in no team or several, a context on
+    a team or malformed, a person with two contexts), or, with more than 20 distinct names, those
+    past the 20th. Empty otherwise."""
+    if exc.code == "UNKNOWN_PERSON":
+        names = {n.lower() for n in _names(exc.details.get("unknown"))}
+        if reply:
+            teams = exc.details.get("teams")
+            names |= {str(t.get("name")) for t in teams if isinstance(t, dict)} if isinstance(teams, list) else set()
+        return names
+    if exc.code != "BAD_REQUEST":
+        return set()
+    message = exc.message
+    named = re.match(r"^'?@([A-Za-z0-9][A-Za-z0-9_-]*)", message)
+    if named and any(why in message for why in (
+            "cannot be mentioned in a reply", "means your team", "takes no context", "a context must be",
+            "is mentioned twice with different contexts")):
+        name = named.group(1).lower()
+        return {"team" if name in ("team", "equipo") else name}
+    if re.match(r"^at most \d+ people and teams can be mentioned", message):
+        distinct: list = []
+        for _, _, name in mentions(text):
+            if name != me and name not in distinct:
+                distinct.append(name)
+        return set(distinct[_MAX_MENTIONS:])
+    return set()

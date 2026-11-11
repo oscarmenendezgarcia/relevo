@@ -484,6 +484,81 @@ class Outbound(Base):
         self.assertIn("THREAD_CLOSED", result.error)
         self.assertEqual(result.error_kind, "forbidden")
 
+    async def test_a_reply_whose_mentions_are_refused_goes_once_more_with_them_as_plain_text(self):
+        """The agent's reply is the thread's: an @ the server refuses (nobody it knows, a team in a reply)
+        must not lose it. It is sent once more with those mentions in backticks, and the log says so."""
+        a = self.make_adapter()
+        await a.connect()
+        opened = self.bob.send(to=["oscar"], text="Who can approve the refunds migration?")
+        await self.until(lambda: len(self.events) == 1)
+        chat = opened["thread"]
+        bodies: list = []
+        real = a.api.asend
+
+        async def counted(http, payload):
+            bodies.append(payload["text"])
+            return await real(http, payload)
+
+        a.api.asend = counted
+        cases = [
+            # Nobody it knows, and a team (which a reply cannot mention): both plain text, in one retry.
+            ("@zoe or @backend can, cc @ana; not `@carl`, nor me@example.com.",
+             "`@zoe` or `@backend` can, cc @ana; not `@carl`, nor me@example.com."),
+            # A team alone in a reply: refused with BAD_REQUEST, which names it.
+            ("@Backend: approved.\n```\n@decorator\n```", "`@Backend`: approved.\n```\n@decorator\n```"),
+            # @team (Oscar's one team) in a reply, with a context on a person already in it.
+            ("Done, @team. @ana/pagos-api FYI", "Done, `@team`. @ana/pagos-api FYI"),
+        ]
+        for text, written in cases:
+            bodies.clear()
+            with self.assertLogs(_PKG, level="WARNING") as logs:
+                result = await a.send(chat, text, metadata=FINAL)
+            self.assertTrue(result.success, result.error)
+            self.assertEqual(bodies, [text, written])
+            self.assertEqual(self.bob.thread(chat)["notes"][-1]["text"], written)
+            self.assertTrue(any("for its mentions: sending it again with" in line for line in logs.output), logs.output)
+            # Never the note text in the log.
+            self.assertFalse(any("approved" in line or "@zoe" in line for line in logs.output), logs.output)
+        # Ana, named in the first reply, was added to the thread.
+        self.assertIn("ana", self.bob.thread(chat)["participants"])
+        # Once only: still refused after it, the reply fails (and says so), it is not dropped silently.
+        bodies.clear()
+        many = " ".join(f"@p{i:02}" for i in range(21))
+        with self.assertLogs(_PKG, level="WARNING") as logs:
+            result = await a.send(chat, f"Ask {many}", metadata=FINAL)
+        self.assertFalse(result.success)
+        self.assertIn("UNKNOWN_PERSON", result.error)
+        self.assertEqual(len(bodies), 2)
+        self.assertIn("`@p20`", bodies[1])
+        self.assertTrue(any("refused: UNKNOWN_PERSON" in line for line in logs.output), logs.output)
+        # Refusals that are not about mentions are not retried.
+        self.bob.send(thread=chat, close=True)
+        bodies.clear()
+        closed = await a.send(chat, "@ana too late", metadata=FINAL)
+        self.assertIn("THREAD_CLOSED", closed.error)
+        self.assertEqual(len(bodies), 1)
+
+    def test_the_offending_mentions_are_read_as_the_server_reads_them(self):
+        """client.mentions follows docs/protocol.md (and src/mention.rs): outside code, after a character
+        that may precede one, with its context, without trailing punctuation."""
+        def found(text):
+            return [text[start:end] for start, end, _ in client.mentions(text)]
+
+        self.assertEqual(found("@ana, (@bob) @Carl/Pagos-API@feat/x: and @team."),
+                         ["@ana", "@bob", "@Carl/Pagos-API@feat/x", "@team"])
+        for text in ("pedro@empresa.com", "https://x.com/@ana", "@@ana", "`@ana`", "```\n@ana\n```", "@a", "@1",
+                     "x`@ana", "~~~\n@ana"):
+            self.assertEqual(found(text), [], text)
+        self.assertEqual([n for _, _, n in client.mentions("@Equipo @TEAM @Ana-")], ["team", "team", "ana"])
+        self.assertEqual(client.as_plain_text("@ana and `@ana` and @ana/x", {"ana"}),
+                         ("`@ana` and `@ana` and `@ana/x`", 2))
+        refused = client.RelevoError(400, "BAD_REQUEST", "at most 20 people and teams can be mentioned in one "
+                                                         "note; this one mentions 22")
+        text = "@oscar " + " ".join(f"@p{i:02}" for i in range(22)) + " @p00"
+        self.assertEqual(client.refused_mentions(refused, text, "oscar"), {"p20", "p21"})
+        other = client.RelevoError(400, "BAD_REQUEST", "text is empty")
+        self.assertEqual(client.refused_mentions(other, text, "oscar"), set())
+
     async def test_a_refused_final_is_neither_retried_nor_rewritten(self):
         """The base class would retry it and then send a plain-text copy with a gateway banner."""
         a = self.make_adapter()
