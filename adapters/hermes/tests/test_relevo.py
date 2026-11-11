@@ -2065,12 +2065,16 @@ echo run >> "$STUB_DIR/runs"
 printf '%s\\n' "$@" > "$STUB_DIR/args"
 printf 'url=%s\\ntoken=%s\\nconfig=%s\\n' "$RELEVO_URL" "$RELEVO_TOKEN" "$RELEVO_CONFIG" > "$STUB_DIR/env"
 sleep "${STUB_SLEEP:-0}"
+# As relevo installing a new plugin: the folder (--path, the 6th argument) now holds STUB_VERSION.
+if [ -n "$STUB_VERSION" ]; then sed -i "s/^version:.*/version: $STUB_VERSION/" "$6/plugin.yaml"; fi
 if [ -n "$STUB_OUT" ]; then printf '%s\\n' "$STUB_OUT"; fi
 if [ -n "$STUB_ERR" ]; then printf '%s\\n' "$STUB_ERR" >&2; fi
 exit "${STUB_CODE:-0}"
 """
 INSTALLED = ("the Hermes plugin (/home/oscar/.hermes/plugins/relevo): installed 0.4.0 over 0.3.0; restart the "
              "Hermes gateway to use it")
+BINARY_ONLY = ("relevo (/home/oscar/.local/bin/relevo): installed 0.4.0 over 0.3.0; it takes effect at the next "
+               "start of relevo")
 
 
 class _Chat:
@@ -2132,18 +2136,29 @@ class AutoUpdate(Base):
     def setUp(self) -> None:
         super().setUp()
         self.saved = {k: os.environ.get(k) for k in ("RELEVO_AUTO_UPDATE", "RELEVO_BIN", "PATH", "STUB_DIR",
-                                                     "STUB_OUT", "STUB_ERR", "STUB_CODE", "STUB_SLEEP")}
+                                                     "STUB_OUT", "STUB_ERR", "STUB_CODE", "STUB_SLEEP",
+                                                     "STUB_VERSION")}
         self.stub_dir = Path(tempfile.mkdtemp(prefix="stub-", dir=_TMP))
         stub = self.stub_dir / "relevo"
         stub.write_text(_STUB)
         stub.chmod(0o755)
-        for k in ("RELEVO_AUTO_UPDATE", "STUB_OUT", "STUB_ERR", "STUB_CODE", "STUB_SLEEP"):
+        for k in ("RELEVO_AUTO_UPDATE", "STUB_OUT", "STUB_ERR", "STUB_CODE", "STUB_SLEEP", "STUB_VERSION"):
             os.environ.pop(k, None)
         os.environ["RELEVO_BIN"], os.environ["STUB_DIR"] = str(stub), str(self.stub_dir)
         self.folder = (_TMP / ".hermes" / "plugins" / "relevo").resolve()
+        self.assertEqual(self.folder, update_module.FOLDER)
+        self.plugin_yaml = (self.folder / "plugin.yaml").read_text()
+        self.retry_delays = update_module.RETRY_DELAYS
+        update_module.RETRY_DELAYS = (0.2, 0.2)
+        update_module._told.clear()
 
     async def asyncTearDown(self) -> None:
         await self.finished()
+        for task in list(update_module._notices):
+            task.cancel()
+        (self.folder / "plugin.yaml").write_text(self.plugin_yaml)
+        update_module.RETRY_DELAYS = self.retry_delays
+        update_module._told.clear()
         for k, v in self.saved.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -2191,8 +2206,13 @@ class AutoUpdate(Base):
         await self.finished()
         self.assertEqual(self.runs(), 1)
 
+    def set_version(self, version: str) -> None:
+        """As another client of this machine updating the plugin's folder."""
+        (self.folder / "plugin.yaml").write_text(re.sub(r"(?m)^version:.*$", f"version: {version}",
+                                                        self.plugin_yaml))
+
     async def test_what_it_installed_is_told_once_in_a_home_channel_and_logged(self):
-        os.environ["STUB_OUT"] = INSTALLED
+        os.environ["STUB_OUT"], os.environ["STUB_VERSION"] = INSTALLED, "0.4.0"
         telegram, discord, relevo, work = _Chat(success=False), _Chat(), _Chat(), _Chat()
         # Relevo's own home is a teammates' thread, never told; nor is another profile's home.
         runner = _Runner({"relevo": ("t_1", relevo), "telegram": ("42", telegram), "discord": ("7", discord)},
@@ -2211,6 +2231,7 @@ class AutoUpdate(Base):
         self.assertEqual(chat, "7")
         self.assertIn("Restart the Hermes gateway to use it", text)
         self.assertIn("it was not restarted", text)
+        self.assertIn("the Hermes plugin is now 0.4.0, and this gateway still runs 0.3.0", text)
         self.assertIn(INSTALLED, text)
         said = "\n".join(logs.output)
         self.assertIn(f"update: {INSTALLED}", said)
@@ -2220,13 +2241,62 @@ class AutoUpdate(Base):
         self.assertEqual(await update_module.tell_home(runner, "work", "x"), "discord:9")
         self.assertEqual(work.sent, [("9", "x")])
 
-    async def test_with_no_home_channel_it_is_logged(self):
-        os.environ["STUB_OUT"] = INSTALLED
+    async def test_with_no_home_channel_it_is_logged_and_tried_again(self):
+        os.environ["STUB_OUT"], os.environ["STUB_VERSION"] = INSTALLED, "0.4.0"
         a = self.connected(_Runner({}))
         with self.assertLogs(self.LOG, "WARNING") as logs:
             self.assertTrue(await a.connect())
             await self.finished()
-            await self.until(lambda: any("no Hermes home channel" in line for line in logs.output))
+            # Once, and once after each of the RETRY_DELAYS.
+            await self.until(lambda: sum("no Hermes home channel" in line for line in logs.output) == 3)
+            await asyncio.sleep(0.6)
+        self.assertEqual(sum("no Hermes home channel" in line for line in logs.output), 3)
+
+    async def test_a_home_channel_that_comes_later_is_told(self):
+        """Relevo may connect before Telegram: the notice waits for a home channel that takes it."""
+        os.environ["STUB_OUT"], os.environ["STUB_VERSION"] = INSTALLED, "0.4.0"
+        home = _Chat(success=False)
+        a = self.connected(_Runner({"telegram": ("42", home)}))
+        self.assertTrue(await a.connect())
+        await self.finished()
+        await self.until(lambda: home.sent)
+        home.success = True
+        await self.until(lambda: len(home.sent) == 2)
+        await asyncio.sleep(0.6)
+        self.assertEqual(len(home.sent), 2)
+        self.assertIn("Restart the Hermes gateway", home.sent[1][1])
+
+    async def test_a_new_binary_or_pi_extension_takes_no_restart(self):
+        """relevo installed something, but not this plugin: nothing to restart, nothing told."""
+        os.environ["STUB_OUT"] = BINARY_ONLY
+        home = _Chat()
+        a = self.connected(_Runner({"telegram": ("42", home)}))
+        with self.assertLogs(self.LOG, "INFO") as logs:
+            self.assertTrue(await a.connect())
+            await self.finished()
+            await self.until(lambda: logs.output)
+            await asyncio.sleep(0.3)
+        self.assertIn(f"update: {BINARY_ONLY}", "\n".join(logs.output))
+        self.assertEqual(home.sent, [])
+
+    async def test_a_plugin_another_client_updated_is_told_at_connect_once(self):
+        """A relevo mcp (or pi) of this machine updated the plugin's folder first: this gateway's own
+        update finds it up to date, and the person is still told, once, to restart the gateway."""
+        os.environ["RELEVO_AUTO_UPDATE"] = "0"
+        self.set_version("0.4.0")
+        home = _Chat()
+        runner = _Runner({"telegram": ("42", home)})
+        self.assertTrue(await self.connected(runner).connect())
+        await self.until(lambda: home.sent)
+        self.assertIn("the Hermes plugin is now 0.4.0, and this gateway still runs 0.3.0", home.sent[0][1])
+        # A reconnect says nothing more; a still newer one is told again.
+        self.assertTrue(await self.connected(runner).connect())
+        await asyncio.sleep(0.3)
+        self.assertEqual(len(home.sent), 1)
+        self.set_version("0.5.0")
+        self.assertTrue(await self.connected(runner).connect())
+        await self.until(lambda: len(home.sent) == 2)
+        self.assertIn("now 0.5.0", home.sent[1][1])
 
     async def test_the_runner_seam_is_hermes_own(self):
         """The plugin calls the runner's home-channel methods: they must exist with these shapes."""
