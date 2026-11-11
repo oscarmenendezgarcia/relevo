@@ -55,8 +55,8 @@ const MARK: &str = include_str!("../assets/brand/relevo-mark.svg");
 const FAVICON: &str = include_str!("../assets/brand/relevo-mark-small.svg");
 
 /// What every answer carries: nothing is kept, nothing runs or loads but this server's own
-/// files, nothing is framed, sniffed or told where it came from.
-const SECURITY_HEADERS: [(&str, &str); 5] = [
+/// files, nothing is framed, sniffed, told where it came from, or readable by another origin.
+const SECURITY_HEADERS: [(&str, &str); 7] = [
     ("cache-control", "no-store"),
     (
         "content-security-policy",
@@ -66,6 +66,8 @@ const SECURITY_HEADERS: [(&str, &str); 5] = [
     ("x-content-type-options", "nosniff"),
     ("referrer-policy", "no-referrer"),
     ("x-frame-options", "DENY"),
+    ("cross-origin-resource-policy", "same-origin"),
+    ("cross-origin-opener-policy", "same-origin"),
 ];
 
 /// The local server's state: the client of the team's server, the port it listens on, the key of
@@ -308,6 +310,15 @@ fn check(web: &Web, req: &Request) -> Result<Option<String>, &'static str> {
     {
         return Err("requests from other pages are refused");
     }
+    // The browser says where the request came from. Only `cross-site` is refused: a request with
+    // no such header (an old browser, a tool of this user's) is refused for nothing.
+    if req
+        .headers()
+        .get("sec-fetch-site")
+        .is_some_and(|site| site.as_bytes() == b"cross-site")
+    {
+        return Err("requests from another site are refused");
+    }
     if req.uri().path().starts_with("/api/") {
         let given = req
             .headers()
@@ -386,10 +397,9 @@ pub async fn run(port: Option<u16>, no_open: bool) -> Result<()> {
     let key = new_key();
     let address = format!("http://127.0.0.1:{port}/#k={key}");
     let web = Web::new(client, port, key);
-    println!("Relevo's timeline for {}:\n  {address}", config.url);
-    println!("It only reads: nothing is delivered, handled or claimed. Ctrl-C stops it.");
+    let mut opened = false;
     if !no_open {
-        let opened = match Launcher::new(&launcher_base(), &address) {
+        opened = match Launcher::new(&launcher_base(), &address) {
             Ok(launcher) => {
                 let opened = open_browser(launcher.path()).await;
                 if opened {
@@ -402,9 +412,27 @@ pub async fn run(port: Option<u16>, no_open: bool) -> Result<()> {
                 false
             }
         };
-        if !opened {
-            println!("Open the address above in your browser.");
+    }
+    // The address holds the key of this run. It goes to stdout in full only where it cannot be
+    // kept: a terminal, or the line the person has to copy because no browser opened. With the
+    // browser open and stdout going to a file, or to a service unit, the key stays out of it.
+    let quiet = opened && !stdout_is_terminal();
+    println!(
+        "Relevo's timeline for {}:\n  {}",
+        config.url,
+        if quiet {
+            format!("http://127.0.0.1:{port}/")
+        } else {
+            address
         }
+    );
+    println!("It only reads: nothing is delivered, handled or claimed. Ctrl-C stops it.");
+    if quiet {
+        println!(
+            "Opened in your browser. The key of this run is not printed: stdout is no terminal."
+        );
+    } else if !opened {
+        println!("Open the address above in your browser.");
     }
     tokio::select! {
         _ = crate::serve::serve(listener, router(web.clone()), None, crate::serve::Limits::default()) => {}
@@ -412,6 +440,13 @@ pub async fn run(port: Option<u16>, no_open: bool) -> Result<()> {
     }
     web.drop_launcher();
     Ok(())
+}
+
+/// Whether stdout is the terminal of the person reading this now: the one place the key of the
+/// address may be printed.
+fn stdout_is_terminal() -> bool {
+    // SAFETY: `isatty` only asks about this process's own standard output.
+    unsafe { libc::isatty(libc::STDOUT_FILENO) == 1 }
 }
 
 /// Asks the system to open `file` in the browser: `open` on macOS, `xdg-open` elsewhere.

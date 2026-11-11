@@ -5,9 +5,13 @@
 use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
+use std::io::{BufRead, BufReader};
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 use std::process::{Child, Command, ExitStatus, Stdio};
+#[cfg(target_os = "linux")]
+use std::sync::Mutex;
 #[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
@@ -132,6 +136,41 @@ fn assert_security_headers(headers: &HeaderMap, what: &str) {
     assert_eq!(get("x-content-type-options"), "nosniff", "{what}");
     assert_eq!(get("referrer-policy"), "no-referrer", "{what}");
     assert_eq!(get("x-frame-options"), "DENY", "{what}");
+    assert_eq!(get("cross-origin-resource-policy"), "same-origin", "{what}");
+    assert_eq!(get("cross-origin-opener-policy"), "same-origin", "{what}");
+}
+
+/// What a browser says about where a request came from: only `cross-site` is refused, and a
+/// request that says nothing is refused for nothing.
+#[tokio::test]
+async fn a_request_from_another_site_is_refused() {
+    let s = setup().await;
+    let key = ("relevo-web-key", s.key.as_str());
+    for path in ["/", "/app.js", "/api/timeline?tab=board"] {
+        let (status, headers, body) = ask(
+            &s.web,
+            "GET",
+            path,
+            &[key, ("sec-fetch-site", "cross-site")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "cross-site {path}");
+        assert_eq!(json(&body)["error"]["code"], "FORBIDDEN");
+        assert_security_headers(&headers, "cross-site");
+    }
+    for site in ["none", "same-origin", "same-site", ""] {
+        let (status, _, _) = ask(
+            &s.web,
+            "GET",
+            "/api/timeline?tab=board",
+            &[key, ("sec-fetch-site", site)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{site}");
+    }
+    // Without the header at all, as a browser that does not send it.
+    let (status, _, _) = ask(&s.web, "GET", "/api/timeline?tab=board", &[key]).await;
+    assert_eq!(status, StatusCode::OK);
 }
 
 fn sessions(app: &App) -> i64 {
@@ -487,6 +526,8 @@ fn the_note_renderer_passes_its_tests() {
 #[cfg(target_os = "linux")]
 struct WebRun {
     child: Child,
+    /// What it has printed, gathered as it comes by a thread of this test's.
+    out: Arc<Mutex<String>>,
     /// The temporary folder of this run.
     dir: PathBuf,
     /// `$XDG_RUNTIME_DIR`, where the launcher goes.
@@ -497,9 +538,9 @@ struct WebRun {
 
 #[cfg(target_os = "linux")]
 impl WebRun {
-    /// Starts it, and waits for the opener to have run: by then the launcher file is there and
-    /// the server is listening.
-    fn start(tag: &str) -> WebRun {
+    /// Starts `relevo` with these arguments. The opener is a stand-in of this test's, and the
+    /// team's server a port nothing listens on, so every ask is a 502.
+    fn start(tag: &str, args: &[&str]) -> WebRun {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = std::env::temp_dir().join(relevo::db::random_id(&format!("relevo-web-{tag}-")));
@@ -532,8 +573,8 @@ impl WebRun {
             },
         )
         .unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_relevo"))
-            .args(["web"])
+        let mut child = Command::new(env!("CARGO_BIN_EXE_relevo"))
+            .args(args)
             .env(
                 "PATH",
                 format!(
@@ -545,20 +586,50 @@ impl WebRun {
             .env("HOME", &dir)
             .env("RELEVO_CONFIG", &config)
             .env("XDG_RUNTIME_DIR", &run)
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        let run = WebRun {
+        // Its stdout, gathered line by line as it comes: the pipe must not fill, and the test
+        // reads what was printed.
+        let out = Arc::new(Mutex::new(String::new()));
+        let mut pipe = child.stdout.take().unwrap();
+        let gathered = out.clone();
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(&mut pipe);
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                gathered.lock().unwrap().push_str(&line);
+                line.clear();
+            }
+        });
+        WebRun {
             child,
+            out,
             dir,
             run,
             seen,
-        };
+        }
+    }
+
+    /// Waits for the opener to have run: by then the launcher file is there.
+    fn wait_opener(&self) {
         wait_until("the opener never ran", || {
-            run.seen.with_extension("done").exists()
+            self.seen.with_extension("done").exists()
         });
-        run
+    }
+
+    /// Everything printed so far.
+    fn printed(&self) -> String {
+        self.out.lock().unwrap().clone()
+    }
+
+    /// Waits until `needle` is among what was printed.
+    fn wait_printed(&self, needle: &str) {
+        let wanted = needle.to_string();
+        wait_until(&format!("it never printed {wanted:?}"), || {
+            self.printed().contains(&wanted)
+        });
     }
 
     /// What the opener was given: one argument per line.
@@ -662,7 +733,8 @@ fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
 #[cfg(target_os = "linux")]
 #[test]
 fn the_key_never_goes_in_the_openers_command_line() {
-    let run = WebRun::start("open");
+    let run = WebRun::start("open", &["web"]);
+    run.wait_opener();
     let args = run.opener_args();
     let key = run.key();
     let launcher = run.launcher();
@@ -704,7 +776,8 @@ fn the_launcher_is_deleted_however_relevo_web_is_stopped() {
         ("SIGTERM", libc::SIGTERM),
         ("SIGHUP", libc::SIGHUP),
     ] {
-        let mut run = WebRun::start("stop");
+        let mut run = WebRun::start("stop", &["web"]);
+        run.wait_opener();
         let launcher = run.launcher();
         assert!(
             launcher.exists() && launcher.parent().unwrap().exists(),
@@ -724,6 +797,25 @@ fn the_launcher_is_deleted_however_relevo_web_is_stopped() {
             "{name}: its folder is left behind"
         );
     }
+}
+
+/// Stdout piped (as in a service unit): the key of the address is not printed, only the URL
+/// without it, so the key does not end up in a log.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_key_is_not_printed_when_stdout_is_not_a_terminal() {
+    let run = WebRun::start("key-quiet", &["web"]);
+    run.wait_printed("http://127.0.0.1:");
+    let printed = run.printed();
+    let key = run.key();
+    assert!(
+        !printed.contains(&key),
+        "key was printed to non-terminal stdout: {printed}"
+    );
+    assert!(
+        printed.contains("http://127.0.0.1:"),
+        "URL was not printed at all: {printed}"
+    );
 }
 
 /// Stopped before the page asked, `relevo web` deletes the launcher too.
