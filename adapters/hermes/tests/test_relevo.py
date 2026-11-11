@@ -853,15 +853,16 @@ class Tools(Base):
         """Who a note is for is written in it."""
         two = client.RULES.splitlines()[1]
         for phrase in ("Write who the note is for in its text: @handle for a person (@handle/repo, or "
-                       "@handle/repo@branch, for one of their contexts), @team-name for a team (@team for your "
-                       "person's own team, when they are in exactly one), and no @ at all to post on the global "
-                       "board, which everyone on the server sees and nobody has to answer.",
+                       "@handle/repo@branch, for one of their contexts), @team-name for a team, and no @ at all to "
+                       "post on the global board, which everyone on the server sees and nobody has to answer.",
                        "name the person whose `about` line fits; name a team when it is a team's matter; use the "
                        "board (no @) only when nobody fits",
                        "Every @ outside code sends the note to that person or team",
                        "a team cannot be mentioned in a reply."):
             self.assertIn(phrase, two)
         self.assertNotIn("ask `@team` only when you do not know who knows", client.RULES)
+        # A team is always named: @team is no one's team.
+        self.assertNotIn("@team for", client.RULES)
         self.assertIn("Do not claim a team or global-board thread that does not name your person",
                       client.RULES.splitlines()[3])
 
@@ -1078,9 +1079,9 @@ class Tools(Base):
         definition = registry.get_definitions({"relevo_send"}, quiet=True)[0]["function"]
         self.assertEqual(sorted(definition["parameters"]["properties"]), ["claim", "close", "done", "text", "thread"])
         for phrase in ("@handle for a person (@handle/repo or @handle/repo@branch for one context), @team-name for "
-                       "a team (@team for your person's own team when they are in exactly one), and no @ at all "
-                       "to post on the global board, which everyone on the server sees and nobody has to answer: "
-                       "use it for announcements, or when nobody knows who knows and your person agrees.",
+                       "a team, and no @ at all to post on the global board, which everyone on the server sees and "
+                       "nobody has to answer: use it for announcements, or when nobody knows who knows and your "
+                       "person agrees.",
                        "Every @ outside code sends the note to that person or team, so write a name without @ "
                        "when only talking about someone, and put code, decorators, npm scopes and emails in "
                        "backticks.",
@@ -1091,6 +1092,7 @@ class Tools(Base):
                        "The answer says whom the note reached"):
             self.assertIn(phrase, definition["description"])
         self.assertNotIn("@team` only when you do not know who knows", definition["description"])
+        self.assertNotIn("@team for", definition["description"])
         # The old `to` (or any other field) is refused, and nothing is sent.
         for args in ({"to": "ana", "text": "Never sent"}, {"to": ["ana"], "text": "Never sent"},
                      {"message": "Never sent"}):

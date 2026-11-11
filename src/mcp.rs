@@ -40,9 +40,8 @@ person asks for comes first: if they name who to ask (a person, a team, or every
 there.
 2. Before opening a new thread, look at your inbox: an answer may already be waiting. Write who \
 the note is for in its text: @handle for a person (@handle/repo, or @handle/repo@branch, for one \
-of their contexts), @team-name for a team (@team for your person's own team, when they are in \
-exactly one), and no @ at all to post on the global board, which everyone on the server sees and \
-nobody has to answer. If your person did not say whom to ask, name the person whose `about` line \
+of their contexts), @team-name for a team, and no @ at all to post on the global board, which \
+everyone on the server sees and nobody has to answer. If your person did not say whom to ask, name the person whose `about` line \
 fits; name a team when it is a team's matter; use the board (no @) only when nobody fits: for \
 announcements, or when nobody knows who knows and your person agrees. Every @ outside code sends \
 the note to that person or team: write a name without @ when you only talk about someone, and put \
@@ -105,9 +104,9 @@ pub struct SendParams {
     #[serde(default)]
     pub thread: Option<String>,
     /// The note, in Markdown. Who it is for is written in it: @handle for a person
-    /// (@handle/repo or @handle/repo@branch for one context), @team-name for a team (@team for
-    /// your person's one team), no @ for the global board. Every @ outside code sends it there:
-    /// put code, decorators, npm scopes and emails in backticks. Self-contained: the reader does
+    /// (@handle/repo or @handle/repo@branch for one context), @team-name for a team, no @ for
+    /// the global board. Every @ outside code sends it there: put code, decorators, npm scopes
+    /// and emails in backticks. Self-contained: the reader does
     /// not share your context. In the first person, as your person would write it ("I
     /// changed…", not "Ana changed…"). Opening a thread, its first line is a one-line subject
     /// (the title), no greeting and no "Re:". Required unless only closing, claiming or marking
@@ -401,10 +400,9 @@ impl Relevo {
                        to mark it handled when it needs nothing: an answer you have now read, a \
                        thank-you). Who the note is for is written in its text: @handle for a \
                        person (@handle/repo or @handle/repo@branch for one context), @team-name \
-                       for a team (@team for your person's own team when they are in exactly \
-                       one), and no @ at all to post on the global board, which everyone on the \
-                       server sees and nobody has to answer: use it for announcements, or when \
-                       nobody knows who knows and your person agrees. Every @ outside code sends \
+                       for a team, and no @ at all to post on the global board, which everyone \
+                       on the server sees and nobody has to answer: use it for announcements, or \
+                       when nobody knows who knows and your person agrees. Every @ outside code sends \
                        the note to that person or team, so write a name without @ when only \
                        talking about someone, and put code, decorators, npm scopes and emails in \
                        backticks. In a reply, an @person names them (it becomes pending for \

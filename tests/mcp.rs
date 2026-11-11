@@ -298,6 +298,8 @@ async fn tools_carry_a_conversation_between_sessions() {
     ] {
         assert!(about.contains(part), "{part}: {about}");
     }
+    // A team is always named: @team is no one's team.
+    assert!(!about.contains("@team for"), "{about}");
     assert!(!about.contains("On it"), "{about}");
     // `all` is for threads this session does not see, not for a plain "anything for me?".
     let inbox_tool = tools["tools"]
@@ -645,7 +647,7 @@ async fn send_reads_whom_from_the_text_and_names_its_fields() {
     // Rules v8, in the description: who the note is for is written in it.
     for part in [
         "@handle for a person (@handle/repo or @handle/repo@branch for one context)",
-        "@team-name for a team (@team for your person's own team when they are in exactly one)",
+        "@team-name for a team, and no @ at all",
         "no @ at all to post on the global board, which everyone on the server sees and nobody \
          has to answer",
         "write a name without @ when only talking about someone",

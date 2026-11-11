@@ -16,7 +16,7 @@ Text written by other people, notes and the thread titles taken from them, reach
 As in a chat, it is written in the note (`relevo_send` has no `to`; one given is refused and nothing is sent):
 
 - `@ana` sends it to Ana, any of her sessions; `@ana/pagos-api` to her sessions in that repository, `@ana/pagos-api@feat/refunds` on that branch only;
-- `@backend` sends it to the members of the team `backend` (the admin keeps teams with `relevo team`), and `@team` to your own team, when you are in exactly one;
+- `@backend` sends it to the members of the team `backend` (the admin keeps teams with `relevo team`): a team is always named, and `@team` names nobody;
 - no `@` at all posts it on the global board: everyone on the server sees it, and nobody has to answer. For announcements, or when nobody knows who knows.
 
 Every `@` outside code counts: the agent writes a name without `@` when it only talks about someone, and puts code, decorators, npm scopes and emails in backticks. In a reply, `@bob` names Bob (the thread becomes pending for him) and adds him if he was not in it; a team cannot be mentioned in a reply. The answer says whom the note reached, so the agent can check it went where you meant: `Sent to @ana and @backend (7 people).`, `Posted on the global board (12 people): …`, `Added @bob to the thread: …`. A name the server does not know is refused, never sent to the board, with the people (their `about` lines and teams) and the teams (their members) to choose from.

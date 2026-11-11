@@ -327,7 +327,7 @@ test("send says who a note is for is written in it, and to look at the inbox bef
   // Rules v8: mentions.
   assert.match(
     send.description,
-    /Who the note is for is written in its text: @handle for a person \(@handle\/repo or @handle\/repo@branch for one context\), @team-name for a team \(@team for your person's own team when they are in exactly one\), and no @ at all to post on the global board, which everyone on the server sees and nobody has to answer: use it for announcements, or when nobody knows who knows and your person agrees\./,
+    /Who the note is for is written in its text: @handle for a person \(@handle\/repo or @handle\/repo@branch for one context\), @team-name for a team, and no @ at all to post on the global board, which everyone on the server sees and nobody has to answer: use it for announcements, or when nobody knows who knows and your person agrees\./,
   );
   assert.match(
     send.description,
@@ -337,6 +337,8 @@ test("send says who a note is for is written in it, and to look at the inbox bef
   assert.match(send.description, /If your person names whom to ask \(a person, a team, or everyone\), send it there\. Otherwise, before opening a new thread, look at relevo_inbox \(an answer may already be waiting\)/);
   assert.match(send.description, /name the person whose `about` line fits; name a team when it is a team's matter; use the board \(no @\) only when nobody fits\./);
   assert.doesNotMatch(send.description, /ask @team only when you do not know who knows/);
+  // A team is always named: @team is no one's team.
+  assert.doesNotMatch(send.description, /@team for/);
   assert.match(send.description, /The answer says whom the note reached \(check it is who your person meant\)/);
   assert.match(send.promptSnippet, /@handle for a person, @team-name for a team, no @ for the global board \(look at relevo_inbox before opening a new thread\)/);
   assert.match(send.description, /Read what you need first; if you can answer or explain from that, just answer: the answer claims it\./);
