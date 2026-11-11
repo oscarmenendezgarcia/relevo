@@ -4,13 +4,18 @@
 //! config. The browser never sees the token.
 //!
 //! Only the tab opened with the secret may ask: the secret goes in the address after `#`, so it
-//! is never sent in a request line, and the page sends it back in `Relevo-Web-Key`. The browser
+//! is never sent in a request line, and the page sends it back in `Relevo-Web-Key`. It is a
+//! one-time key: the first answer that goes well trades it for a session key of this server's
+//! (`SESSION_HEADER`), which the page holds in the tab and this process holds in memory, and the
+//! address's key is refused from then on — the copy the browser kept of the address (history, a
+//! synced session) is worth nothing. The browser
 //! is not given that address in its command line, which every local user can read: it opens a
 //! small file of this user's that sends it on (`Launcher`). Every request
 //! must name this server in `Host` (against DNS rebinding) and, if it has an `Origin`, come from
 //! this server's page. The page and its assets hold no data, and are served without the key: a
 //! browser cannot send a header when it opens an address.
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path as FsPath, PathBuf};
@@ -36,6 +41,9 @@ use crate::config;
 
 /// The header the page sends its key in.
 pub const KEY_HEADER: &str = "relevo-web-key";
+/// The header the answer to the first request carries the session key in, and the only way to
+/// get it: it never goes in the address.
+pub const SESSION_HEADER: &str = "relevo-web-session";
 /// The most the team's server may answer with: a long thread of 64 KiB notes fits.
 const MAX_ANSWER: u64 = 32 * 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -60,12 +68,17 @@ const SECURITY_HEADERS: [(&str, &str); 5] = [
     ("x-frame-options", "DENY"),
 ];
 
-/// The local server's state: the client of the team's server, the port it listens on, the key
-/// of this run, and the launcher file while the page has not used the key yet.
+/// The local server's state: the client of the team's server, the port it listens on, the key of
+/// the address while it has not been traded, the session keys handed out, and the launcher file
+/// while the page has not used the key yet.
 pub struct Web {
     client: Client,
     port: u16,
-    key: String,
+    /// The key of the address, until the page trades it for a session key; then nothing.
+    key: Mutex<Option<String>>,
+    /// The session keys this server issued. They live here and in the tab, nowhere else, and die
+    /// with this process.
+    sessions: Mutex<HashSet<String>>,
     launcher: Mutex<Option<Launcher>>,
 }
 
@@ -74,7 +87,8 @@ impl Web {
         Arc::new(Web {
             client,
             port,
-            key,
+            key: Mutex::new(Some(key)),
+            sessions: Mutex::new(HashSet::new()),
             launcher: Mutex::new(None),
         })
     }
@@ -90,6 +104,35 @@ impl Web {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take();
+    }
+
+    /// Whether `given` is the key of the address, which works until it is traded for a session
+    /// key.
+    fn is_address_key(&self, given: &[u8]) -> bool {
+        self.key
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_deref()
+            .is_some_and(|key| same(given, key.as_bytes()))
+    }
+
+    /// Whether `given` is a session key this server handed out.
+    fn knows_session(&self, given: &[u8]) -> bool {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|session| same(given, session.as_bytes()))
+    }
+
+    /// Takes `session` as one of this server's keys and retires the key of the address: what the
+    /// browser kept of that address — in the history, in a synced session — asks for nothing.
+    fn accept_session(&self, session: &str) {
+        *self.key.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(session.to_string());
     }
 }
 
@@ -215,10 +258,24 @@ async fn guard(State(web): State<Arc<Web>>, req: Request, next: Next) -> Respons
     let mut res = match checked {
         // GET only: axum would route HEAD to a GET handler too, which would ask the team's
         // server. Anything else is no route at all.
-        Ok(()) if req.method() != Method::GET => {
+        Ok(_) if req.method() != Method::GET => {
             refused(StatusCode::NOT_FOUND, "NOT_FOUND", "no such route")
         }
-        Ok(()) => next.run(req).await,
+        Ok(session) => {
+            let mut res = next.run(req).await;
+            // The key of the address is only spent when the page really got its session key: a
+            // first request that went wrong (the team's server down) is tried again with it.
+            if let Some(session) = session
+                && res.status().is_success()
+            {
+                web.accept_session(&session);
+                res.headers_mut().insert(
+                    HeaderName::from_static(SESSION_HEADER),
+                    HeaderValue::from_str(&session).expect("base64url is a header value"),
+                );
+            }
+            res
+        }
         Err(why) => refused(StatusCode::FORBIDDEN, "FORBIDDEN", why),
     };
     let headers = res.headers_mut();
@@ -231,8 +288,9 @@ async fn guard(State(web): State<Arc<Web>>, req: Request, next: Next) -> Respons
     res
 }
 
-/// Why the request is refused, if it is.
-fn check(web: &Web, req: &Request) -> Result<(), &'static str> {
+/// Why the request is refused, if it is. `Ok(Some(session))` is the page asking with the key of
+/// the address: `session` is the key to give it, if the answer goes well.
+fn check(web: &Web, req: &Request) -> Result<Option<String>, &'static str> {
     let host = req
         .headers()
         .get(header::HOST)
@@ -251,16 +309,19 @@ fn check(web: &Web, req: &Request) -> Result<(), &'static str> {
         return Err("requests from other pages are refused");
     }
     if req.uri().path().starts_with("/api/") {
-        let key = req
+        let given = req
             .headers()
             .get(KEY_HEADER)
             .map(HeaderValue::as_bytes)
             .unwrap_or_default();
-        if !same(key, web.key.as_bytes()) {
+        if web.is_address_key(given) {
+            return Ok(Some(new_key()));
+        }
+        if !web.knows_session(given) {
             return Err("missing or wrong key: open the address relevo web printed");
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// `GET /api/timeline`, its query string passed on as it came.

@@ -332,24 +332,29 @@ if (typeof module === 'object' && module.exports) {
 // ---------- the page ----------
 
 if (typeof document !== 'undefined') {
-  // The key stays in this tab (sessionStorage: it survives a reload) and leaves the address at
-  // once, so it is not kept in the history, restored with the session, synced or shared.
-  const KEY = (() => {
-    let kept = '';
+  // The key of this tab. The one of the address is good for one trade: the first answer gives
+  // back a session key, which the server keeps in memory and this tab in its `sessionStorage`.
+  // From then on the server refuses the key of the address, so the copy the browser kept of it
+  // (history, a synced session) asks for nothing. The address is cleared of it at once besides.
+  const SESSION_HEADER = 'Relevo-Web-Session';
+  let KEY = '';
+  function keepKey(key) {
+    if (!key) return;
+    KEY = key;
     try {
-      kept = sessionStorage.getItem('relevo-web-key') || '';
-    } catch (e) {
-      kept = '';
-    }
-    const key = pickKey(location.hash, kept);
-    try {
-      if (key) sessionStorage.setItem('relevo-web-key', key);
+      sessionStorage.setItem('relevo-web-key', key);
     } catch (e) {
       // Storage refused: the key lives in this page only, and a reload needs the address again.
     }
-    if (location.hash) history.replaceState(null, '', location.pathname + location.search);
-    return key;
-  })();
+  }
+  let kept = '';
+  try {
+    kept = sessionStorage.getItem('relevo-web-key') || '';
+  } catch (e) {
+    kept = '';
+  }
+  keepKey(pickKey(location.hash, kept));
+  if (location.hash) history.replaceState(null, '', location.pathname + location.search);
   const REFRESH_MS = 30000;
   const $ = (id) => document.getElementById(id);
   const state = {
@@ -464,6 +469,10 @@ if (typeof document !== 'undefined') {
     } catch (e) {
       throw { status: 0 };
     }
+    // The answer to the first request carries this tab's session key: the key of the address is
+    // spent with it.
+    const session = res.headers.get(SESSION_HEADER);
+    if (session) keepKey(session);
     let body = null;
     try {
       body = await res.json();

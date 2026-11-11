@@ -25,6 +25,8 @@ struct Setup {
     /// Ana's and Bob's tokens.
     ana: String,
     bob: String,
+    /// The key of this tab: the address's, traded for a session key (docs/web.md).
+    key: String,
 }
 
 /// A team server on loopback with Ana and Bob, and a `relevo web` for Ana in front of it.
@@ -43,13 +45,28 @@ async fn setup() -> Setup {
     ));
     let url = format!("http://{addr}");
     let web = for_server(&url, &ana.secret);
+    let key = trade(&web).await;
     Setup {
         app,
         web,
         url,
         ana: ana.secret,
         bob: bob.secret,
+        key,
     }
+}
+
+/// Asks once with the key of the address and answers with the session key traded for it.
+async fn trade(web: &Arc<Web>) -> String {
+    let (status, headers, _) = ask(
+        web,
+        "GET",
+        "/api/timeline?tab=board",
+        &[("relevo-web-key", KEY)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    headers[web::SESSION_HEADER].to_str().unwrap().to_string()
 }
 
 fn for_server(url: &str, token: &str) -> Arc<Web> {
@@ -170,10 +187,87 @@ async fn the_api_needs_the_key() {
     assert_eq!(sessions(&s.app), 0, "nothing reached the team's server");
 }
 
+/// The key of the address is good for one trade (docs/web.md): the answer that gives the tab its
+/// session key retires it, so the copy the browser kept of the address — in the history, in a
+/// synced session — asks for nothing.
+#[tokio::test]
+async fn the_key_of_the_address_is_traded_for_a_session_key_once() {
+    let s = setup().await;
+    let web = for_server(&s.url, &s.ana);
+    let (status, headers, _) = ask(
+        &web,
+        "GET",
+        "/api/timeline?tab=board",
+        &[("relevo-web-key", KEY)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let session = headers[web::SESSION_HEADER].to_str().unwrap().to_string();
+    assert!(!session.is_empty() && session != KEY, "{session}");
+
+    // The session key keeps working, as many times as the page refreshes.
+    for _ in 0..3 {
+        let (status, _, _) = ask(
+            &web,
+            "GET",
+            "/api/timeline?tab=board",
+            &[("relevo-web-key", session.as_str())],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    // The address's key is refused, and so is a request with neither key, or a key of another
+    // run of `relevo web`.
+    let other = for_server(&s.url, &s.ana);
+    let foreign = trade(&other).await;
+    for given in ["", KEY, "nope", foreign.as_str()] {
+        for path in [
+            "/api/timeline?tab=board",
+            "/api/timeline/threads/r_aaaaaaaaaaaa",
+        ] {
+            let (status, h, body) = ask(&web, "GET", path, &[("relevo-web-key", given)]).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{given} {path}");
+            assert_eq!(json(&body)["error"]["code"], "FORBIDDEN");
+            assert_security_headers(&h, "403");
+        }
+    }
+}
+
+/// A first request that did not go well trades nothing: the page retries every 30 seconds with
+/// the key of the address, which is still in its `sessionStorage`.
+#[tokio::test]
+async fn a_first_request_that_fails_trades_nothing() {
+    // The team's server cannot be reached at all.
+    let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = free.local_addr().unwrap();
+    drop(free);
+    let web = for_server(&format!("http://{addr}"), "rlv_nothing");
+    let key = [("relevo-web-key", KEY)];
+    let (status, headers, _) = ask(&web, "GET", "/api/timeline?tab=board", &key).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(
+        headers.get(web::SESSION_HEADER).is_none(),
+        "a 502 trades nothing"
+    );
+    let (status, _, _) = ask(&web, "GET", "/api/timeline?tab=board", &key).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "the key still works");
+    // The team's server says no: the same.
+    let s = setup().await;
+    let web = for_server(&s.url, "rlv_wrong");
+    let (status, headers, _) = ask(&web, "GET", "/api/timeline?tab=board", &key).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(
+        headers.get(web::SESSION_HEADER).is_none(),
+        "an error trades nothing"
+    );
+    let (status, _, _) = ask(&web, "GET", "/api/timeline?tab=board", &key).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "the key still works");
+}
+
 #[tokio::test]
 async fn host_and_origin_must_be_this_server() {
     let s = setup().await;
-    let key = ("relevo-web-key", KEY);
+    let key = ("relevo-web-key", s.key.as_str());
     let uri = "/api/timeline?tab=board";
     for host in [
         "evil.example",
@@ -219,7 +313,7 @@ async fn host_and_origin_must_be_this_server() {
 #[tokio::test]
 async fn only_the_two_timeline_routes_are_passed_on_and_only_get() {
     let s = setup().await;
-    let key = ("relevo-web-key", KEY);
+    let key = ("relevo-web-key", s.key.as_str());
     for (method, path) in [
         ("GET", "/api/inbox"),
         ("GET", "/api/inbox?wait=1"),
@@ -277,7 +371,7 @@ async fn the_timeline_is_passed_on_with_the_token_and_changes_nothing() {
     assert_eq!(res.status(), StatusCode::OK);
     let sessions_before = sessions(&s.app);
 
-    let key = ("relevo-web-key", KEY);
+    let key = ("relevo-web-key", s.key.as_str());
     let (status, headers, body) = ask(&s.web, "GET", "/api/timeline?tab=threads", &[key]).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers["content-type"], "application/json");
