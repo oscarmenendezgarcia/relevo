@@ -278,7 +278,7 @@ if (typeof document !== 'undefined') {
     const banner = $('banner');
     let text;
     if (err.status === 403) {
-      text = "This page's key is missing or wrong: open the address `relevo web` printed.";
+      text = "This page's key is missing or wrong: open the address relevo web printed.";
     } else if (err.status === 502 || err.status === 504) {
       text = "Can't reach the team's server.";
     } else if (err.status) {
@@ -480,8 +480,16 @@ if (typeof document !== 'undefined') {
     if (t.from !== me && t.handled_by_you && !t.pending) {
       out.push(['done', last && last.author === me ? 'answered by your agent' : 'handled by your agent']);
     }
-    if (t.from === me && t.last_note && t.last_note.author !== me) {
-      out.push(['done', nameOf(t.last_note.author) + ' answered']);
+    if (t.from === me) {
+      // Someone answered: the latest note is theirs, or you handled (or have pending) a note by
+      // someone else. In a direct thread of two, that is the other person.
+      const other = t.participants.filter((h) => h !== me);
+      if (t.last_note && t.last_note.author !== me) {
+        out.push(['done', nameOf(t.last_note.author) + ' answered']);
+      } else if (t.handled_by_you || t.pending) {
+        const who = t.kind === 'direct' && other.length === 1 ? nameOf(other[0]) + ' answered' : 'answered';
+        out.push(['done', who]);
+      }
     }
     if (t.kind === 'team' && !t.named && t.from !== me) out.push(['', 'optional for you']);
     if (t.status === 'closed') {
@@ -548,7 +556,8 @@ if (typeof document !== 'undefined') {
     content.append(chipBox);
     const open = state.open.has(t.id);
     if (t.notes > 2 || first.truncated || (t.last_note && t.last_note.truncated)) {
-      const more = el('div', 'more', open ? 'Hide conversation' : 'See conversation · ' + t.notes + ' notes');
+      const label = t.notes === 1 ? 'Read the whole note' : 'See conversation · ' + t.notes + ' notes';
+      const more = el('div', 'more', open ? 'Hide conversation' : label);
       content.append(more);
     }
     if (open) {
@@ -564,6 +573,7 @@ if (typeof document !== 'undefined') {
         if (!state.convos.has(t.id)) loadConvo(t.id);
       }
       a.replaceWith(post(t));
+      markCut($('feed'));
       const again = document.querySelector('[data-id="' + CSS.escape(t.id) + '"]');
       if (again) again.focus({ preventScroll: true });
     };
@@ -581,6 +591,11 @@ if (typeof document !== 'undefined') {
     return a;
   }
 
+  /// Previews cut by their height fade out at the bottom.
+  function markCut(root) {
+    root.querySelectorAll('.clip').forEach((c) => c.classList.toggle('cut', c.scrollHeight > c.clientHeight + 1));
+  }
+
   function render() {
     $('tab-board').classList.toggle('on', state.tab === 'board');
     $('tab-threads').classList.toggle('on', state.tab === 'threads');
@@ -589,6 +604,7 @@ if (typeof document !== 'undefined') {
     renderSide();
     const feed = $('feed');
     feed.replaceChildren(...state.threads.map(post));
+    markCut(feed);
     $('loadmore').hidden = !state.cursor;
     const footer = $('footer');
     if (!state.data) {

@@ -124,7 +124,8 @@ button { font: inherit; color: inherit; }
 .via { font-size: 12px; color: var(--faint); margin-top: 1px; overflow-wrap: anywhere; }
 .title { font-weight: 600; margin: 6px 0 2px; overflow-wrap: anywhere; }
 .body { color: var(--body); overflow-wrap: anywhere; }
-.clip { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; line-clamp: 4; overflow: hidden; }
+.clip { max-height: 6.3em; overflow: hidden; }
+.clip.cut { -webkit-mask-image: linear-gradient(to bottom, #000 55%, transparent); mask-image: linear-gradient(to bottom, #000 55%, transparent); }
 .reply { margin-top: 12px; border-left: 2px solid var(--line); padding-left: 12px; }
 .reply .head { font-size: 13.5px; }
 .reply .body { font-size: 14px; }
@@ -172,7 +173,7 @@ button { font: inherit; color: inherit; }
   .side::-webkit-scrollbar { display: none; }
   .brand { margin: 0 6px 0 0; }
   .brand span, .me, .sec, .none { display: none; }
-  .side .group { display: contents; }
+  .side .group, #show, #teams, #people { display: contents; }
   .filter {
     width: auto; flex: 0 0 auto; border: 1px solid var(--line); border-radius: 999px;
     padding: 4px 11px; font-size: 13px;
@@ -180,6 +181,5 @@ button { font: inherit; color: inherit; }
   .filter b { margin-left: 2px; }
   .post { grid-template-columns: 36px 1fr; gap: 10px; padding: 14px 14px; }
   .post > .av { width: 34px; height: 34px; font-size: 13px; }
-  .head .t { margin-left: 0; width: 100%; order: 3; }
   .banner { margin: 10px 12px 0; }
 }
