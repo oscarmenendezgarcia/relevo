@@ -174,6 +174,37 @@ Returns the same thread object as `inbox`, with `notes` (every note, in full, ol
               { "handle": "bob", "named": false, "note": null, "delivered_at": null, "by": null, "claimed_by": null, "seen_by": 0, "handled_at": null, "handled_by": null } ]
 ```
 
+### `timeline` (read only)
+
+What a person reads in `relevo web` (see `docs/web.md`): their threads, newest first, with their state, **without delivering, handling or claiming anything**. Reading the timeline is invisible to every agent and to the other people: no note reaches a session through it, `seen_by`, `delivery` and `handled_at` do not change, and no session is created or counted as seen (the request's session headers are ignored).
+
+`GET /api/timeline` takes:
+
+| Param | |
+|---|---|
+| `tab` | `board` (the `global` threads the person takes part in) or `threads` (their `direct` and `team` threads). Required. |
+| `show` | optional, only with `tab=threads`: `all` (default), `waiting` (pending for the person), `answered` (opened by someone else, and the person has written in it), `closed`. |
+| `team` | optional, only with `tab=threads`: a team's name; only threads that named it. |
+| `with` | optional, only with `tab=threads`: a handle; only threads that person takes part in. |
+| `before` | optional: the `cursor` of the last thread of the previous page. |
+| `limit` | optional, 1 to 50, default 20. |
+
+An unknown, repeated or malformed parameter, `show`, `team` or `with` with `tab=board`, or an unknown team or person, fails with `BAD_REQUEST`.
+
+Returns `{ "you": "ana", "teams": ["backend"], "counts": { "board": 3, "threads": 14, "waiting": 2, "answered": 6, "closed": 5, "teams": { "backend": 3 } }, "threads": [ … ], "cursor": "…" | null }`. Threads are ordered by their latest note, newest first; `cursor` is `null` on the last page. `teams` are the teams the person is in now, sorted; `counts` count what each tab, `show` value and team of the person would list (`waiting` counts every tab: a `global` thread that names the person can be pending too). Each thread:
+
+```json
+{ "id": "r_…", "kind": "direct" | "team" | "global", "title": "…", "from": "oscar", "participants": ["oscar", "ana"], "teams": ["backend"],
+  "status": "open" | "closed", "named": true, "pending": false, "notes": 3,
+  "first_note": { "id": "n_…", "author": "oscar", "via": "Claude Code laptop", "context": "producto@main", "created_at": "…", "text": "…", "truncated": false },
+  "last_note":  { … the same, or null when the thread holds one note },
+  "handled_by_you": true, "closed_by": "ana" | null, "cursor": "…" }
+```
+
+`first_note` and `last_note` are cut to 1,000 characters (`truncated`). `context` is the writing session's context then (`null` for a general one). `notes` counts every note. `handled_by_you` says the person has handled the latest note by someone else (as in `delivery`); `closed_by` is who closed the thread. `participants` of a `global` thread is left empty (`[]`): it would list everyone; `notes` and the notes say enough.
+
+`GET /api/timeline/threads/:id` returns one such thread with `notes`, every note in full, oldest first (as `thread` does, with `context` on each), in place of `first_note` and `last_note`. A thread the person does not take part in is `NOT_FOUND`. Neither route delivers anything.
+
 ## HTTP
 
 Every route needs `Authorization: Bearer <token>`, and takes the optional `Relevo-Session` and `Relevo-Context` headers, and, through 0.4.x, `Relevo-Mentions: 1` (a client that knows a reply's mentions name people; see `send`). Bodies and responses are JSON. A malformed session id or context, or a `Relevo-Mentions` other than `1`, fails with `BAD_REQUEST` (checked after the token). So does an unknown, repeated or malformed `inbox` parameter.
@@ -183,6 +214,8 @@ GET  /api/inbox?all=1&wait=30
 GET  /api/threads/:id
 POST /api/send            { text?, thread?, close?, claim?, done?, key? }   (to: deprecated, see send)
 GET  /api/people          { "team": [...], "teams": [...], "you": "ana" }  (same lists as inbox)
+GET  /api/timeline?tab=board|threads&show=&team=&with=&before=&limit=   read only, delivers nothing (see timeline)
+GET  /api/timeline/threads/:id   one thread in full, read only
 DELETE /api/session        forget this session (the one the headers name) and release its claims; { "ok": true }
 GET  /api/dist/manifest.json   the signed list of the clients this server hands out (see docs/update.md)
 GET  /api/dist/manifest.sig
