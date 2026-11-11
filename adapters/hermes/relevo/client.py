@@ -1052,7 +1052,8 @@ def _spans(text: str, mask: list, offset: int) -> None:
 
 
 def _code_mask(text: str) -> list:
-    """Which characters of `text` are code: fenced code blocks and inline code spans."""
+    """Which characters of `text` are code: fenced code blocks and inline code spans (which do not
+    cross a blank line)."""
     mask = [False] * len(text)
     open_fence: Optional[tuple[str, int]] = None
     prose_start: Optional[int] = None
@@ -1075,6 +1076,11 @@ def _code_mask(text: str) -> list:
                 for k in range(start, through):
                     mask[k] = True
                 open_fence = fence
+            elif not line.strip(" \t\r"):
+                # A blank line ends a paragraph, and no inline span crosses it.
+                if prose_start is not None:
+                    prose.append((prose_start, start))
+                    prose_start = None
             elif prose_start is None:
                 prose_start = start
         start = end + 1

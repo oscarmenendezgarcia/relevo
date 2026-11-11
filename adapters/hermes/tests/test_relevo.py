@@ -547,8 +547,12 @@ class Outbound(Base):
         self.assertEqual(found("@ana, (@bob) @Carl/Pagos-API@feat/x: and @team."),
                          ["@ana", "@bob", "@Carl/Pagos-API@feat/x", "@team"])
         for text in ("pedro@empresa.com", "https://x.com/@ana", "@@ana", "`@ana`", "```\n@ana\n```", "@a", "@1",
-                     "x`@ana", "~~~\n@ana"):
+                     "x`@ana", "~~~\n@ana", "`a\n@ana\nb`", "`a\n\n`@ana`"):
             self.assertEqual(found(text), [], text)
+        # An inline span does not cross a blank line: a stray backtick does not hide the next paragraph.
+        for text in ("`a\n\n@ana `b`", "Build broke in `main.rs\n\n@ana can you run `cargo test`?",
+                     "`a\n \t\r\n@ana `b`", "`a\r\n\r\n@ana\r\n`"):
+            self.assertEqual(found(text), ["@ana"], text)
         self.assertEqual([n for _, _, n in client.mentions("@Equipo @TEAM @Ana-")], ["team", "team", "ana"])
         self.assertEqual(client.as_plain_text("@ana and `@ana` and @ana/x", {"ana"}),
                          ("`@ana` and `@ana` and `@ana/x`", 2))

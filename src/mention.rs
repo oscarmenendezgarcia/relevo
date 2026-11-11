@@ -168,8 +168,8 @@ fn is_trailing(c: char) -> bool {
 /// Which characters of the text are code: in a fenced code block (from a line that starts, after
 /// up to three spaces, with three or more backticks or tildes, to the line that closes it with at
 /// least as many of the same and nothing else, or the end of the note) or in an inline code span
-/// (between two runs of the same number of backticks, on one line or several). A run of backticks
-/// that nothing closes is plain text.
+/// (between two runs of the same number of backticks, on one line or several of the same paragraph:
+/// a span does not cross a blank line). A run of backticks that nothing closes is plain text.
 fn code_mask(chars: &[char]) -> Vec<bool> {
     let mut mask = vec![false; chars.len()];
     // Lines, as [start, end) without the line break; a `\r` before it is left in.
@@ -206,6 +206,11 @@ fn code_mask(chars: &[char]) -> Vec<bool> {
                     let end = (to + 1).min(chars.len());
                     mask[from..end].iter_mut().for_each(|m| *m = true);
                     open = Some(fence);
+                } else if blank(line) {
+                    // A blank line ends a paragraph, and no inline span crosses it.
+                    if let Some(s) = prose_start.take() {
+                        prose.push((s, from));
+                    }
                 } else if prose_start.is_none() {
                     prose_start = Some(from);
                 }
@@ -219,6 +224,11 @@ fn code_mask(chars: &[char]) -> Vec<bool> {
         spans(&chars[from..to], &mut mask[from..to]);
     }
     mask
+}
+
+/// Whether a line is blank: empty, or only spaces, tabs (or the `\r` of a CRLF).
+fn blank(line: &[char]) -> bool {
+    line.iter().all(|c| matches!(c, ' ' | '\t' | '\r'))
 }
 
 /// Up to three spaces of indentation: the rest of the line, or `None` with more.
@@ -418,6 +428,13 @@ mod tests {
             // Across lines.
             ("`a\n@ana\nb` @bob", &["bob"]),
             ("`a\r\n@ana\r\n` @bob", &["bob"]),
+            // But not across a blank line: a stray backtick does not hide the next paragraph.
+            ("`a\n\n@ana `b`", &["ana"]),
+            ("Build broke in `main.rs\n\n@bob can you run `cargo test`?", &["bob"]),
+            ("`a\n \t\r\n@ana `b`", &["ana"]),
+            ("`a\r\n\r\n@ana\r\n`", &["ana"]),
+            ("`a\n\n`@ana`", &[]),
+            ("```\n\n@ana\n```\n@bob", &["bob"]),
             ("a `x` @ana `y`", &["ana"]),
             // After a span's closing backtick: not a mention.
             ("`x`@ana", &[]),
