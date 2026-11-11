@@ -350,10 +350,11 @@ async fn show_team_and_with_filter_the_threads_tab() {
 async fn counts_count_what_each_tab_show_and_team_would_list() {
     let sc = scene().await;
     let v = sc.s.timeline("ana", "tab=board").await;
-    // `waiting` counts every tab: the board thread names Ana, so it is pending too.
+    // `waiting` counts what `show=waiting` lists: not the board thread, pending for Ana too.
+    assert_eq!(v["threads"][0]["pending"], true);
     assert_eq!(
         v["counts"],
-        json!({ "board": 1, "threads": 5, "waiting": 3, "answered": 1, "closed": 2,
+        json!({ "board": 1, "threads": 5, "waiting": 2, "answered": 1, "closed": 2,
                 "teams": { "backend": 2 } })
     );
     // The same whatever the filters.
@@ -361,7 +362,7 @@ async fn counts_count_what_each_tab_show_and_team_would_list() {
         sc.s.timeline("ana", "tab=threads&show=closed&with=carol&limit=1")
             .await;
     assert_eq!(v["counts"]["threads"], 5);
-    assert_eq!(v["counts"]["waiting"], 3);
+    assert_eq!(v["counts"]["waiting"], 2);
 
     // Carol: her team threads, @front included; a team with no thread counts 0.
     let v = sc.s.timeline("carol", "tab=threads").await;
@@ -375,6 +376,33 @@ async fn counts_count_what_each_tab_show_and_team_would_list() {
     assert_eq!(v["counts"]["threads"], 1);
     // Bob's board thread does not name Dan: nothing waits for him there.
     assert_eq!(v["counts"]["waiting"], 0);
+}
+
+/// What the page shows next to each filter is what clicking it lists, for everyone.
+#[tokio::test]
+async fn every_count_is_the_length_of_its_list() {
+    let sc = scene().await;
+    for who in ["ana", "bob", "carol", "dan"] {
+        let v = sc.s.timeline(who, "tab=board").await;
+        let counts = v["counts"].clone();
+        let len = |v: &Value| v["threads"].as_array().unwrap().len() as i64;
+        assert_eq!(counts["board"], len(&v), "{who} board");
+        for (count, query) in [
+            ("threads", "tab=threads&limit=50"),
+            ("waiting", "tab=threads&show=waiting&limit=50"),
+            ("answered", "tab=threads&show=answered&limit=50"),
+            ("closed", "tab=threads&show=closed&limit=50"),
+        ] {
+            let v = sc.s.timeline(who, query).await;
+            assert_eq!(counts[count], len(&v), "{who} {query}");
+        }
+        for (team, n) in counts["teams"].as_object().unwrap() {
+            let v =
+                sc.s.timeline(who, &format!("tab=threads&team={team}&limit=50"))
+                    .await;
+            assert_eq!(*n, len(&v), "{who} {team}");
+        }
+    }
 }
 
 #[tokio::test]

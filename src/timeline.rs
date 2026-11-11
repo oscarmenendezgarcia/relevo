@@ -254,12 +254,12 @@ fn page_sql(params: &Params) -> String {
     )
 }
 
-/// What each tab, `show` value and team of the person's would list (`waiting` over every tab),
-/// in one pass over the person's participant rows.
+/// What each tab, `show` value and team of the person's would list, in one pass over the
+/// person's participant rows.
 const COUNTS_SQL: &str = "
 SELECT coalesce(sum(t.kind = 'global'), 0),
        coalesce(sum(t.kind != 'global'), 0),
-       coalesce(sum(p.waiting), 0),
+       coalesce(sum(t.kind != 'global' AND p.waiting), 0),
        coalesce(sum(t.kind != 'global' AND t.opener_id != p.person_id
                     AND EXISTS (SELECT 1 FROM notes w
                                 WHERE w.thread_id = t.id AND w.author_id = p.person_id)), 0),
