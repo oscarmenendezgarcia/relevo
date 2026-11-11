@@ -158,7 +158,7 @@ test("a note with no mention goes on the global board", async () => {
   const hers = await extension(ana).tool("relevo_inbox", {}, home);
   assert.match(
     hers,
-    new RegExp(`## Thread ${id} \\(global board, open\\)\\n[^\\n]*\\nPosted by @oscar on the global board, to everyone on the server; participants: [^\\n]*\\. It does not name your person\\.`),
+    new RegExp(`## Thread ${id} \\(global board, open\\)\\n[^\\n]*\\nPosted by @oscar on the global board, to everyone on the server\\. It does not name your person\\.`),
   );
 });
 

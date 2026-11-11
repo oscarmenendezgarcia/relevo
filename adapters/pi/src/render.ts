@@ -187,13 +187,14 @@ export interface ThreadOptions {
 export function renderThread(t: Thread, options: ThreadOptions = {}): string {
   const budget = options.budget ?? MAX_CHARS;
   const me = options.me;
-  const opened = t.kind === "global" ? `Posted by @${t.from} on the global board, to everyone on the server` : `Opened by @${t.from}`;
+  // A global thread holds everyone on the server: no list of them (as relevo mcp and Hermes), which
+  // would cost a line of handles in every render of every board note.
+  const opened =
+    t.kind === "global"
+      ? `Posted by @${t.from} on the global board, to everyone on the server`
+      : `Opened by @${t.from}; participants: ${t.participants.map((p) => `@${p}`).join(", ")}`;
   const named = t.kind === "direct" ? "" : namesYou(t) ? " It names your person." : " It does not name your person.";
-  const lines = [
-    `## Thread ${t.id} (${kindLabel(t)}, ${t.status})`,
-    title(t, me),
-    `${opened}; participants: ${t.participants.map((p) => `@${p}`).join(", ")}.${named}`,
-  ];
+  const lines = [`## Thread ${t.id} (${kindLabel(t)}, ${t.status})`, title(t, me), `${opened}.${named}`];
   if (t.context) lines.push(`Addressed to your person in context ${t.context}.`);
   // Set by the background loop: its latest note was never shown in this process. The answer that
   // lost it may have carried earlier notes too, and only the latest one comes back.

@@ -219,7 +219,9 @@ test("a team or global-board arrival that does not name you is optional, answere
   const global = renderArrival(arrivalThread("global"), "oscar");
   assert.match(global, /^Relevo: new in thread r_bbbbbbbbbbbb, on the global board; it does not name your person, so answering is optional\. /);
   assert.match(global, /^## Thread r_bbbbbbbbbbbb \(global board, open\)$/m);
-  assert.match(global, /^Posted by @ana on the global board, to everyone on the server; participants: @ana, @oscar\. It does not name your person\.$/m);
+  // Everyone on the server: not listed, one by one, in every render.
+  assert.match(global, /^Posted by @ana on the global board, to everyone on the server\. It does not name your person\.$/m);
+  assert.doesNotMatch(global, /participants/);
   assert.doesNotMatch(global, /claim: true/);
   // A team question from a server before 0.4.0 (no `teams`, no `named`): a question to everyone, optional.
   const old = { ...arrivalThread("team"), teams: undefined, named: undefined };
@@ -235,7 +237,7 @@ test("a team or global-board arrival that names you is yours to answer, pending,
     assert.match(out, /^Pending for your person: they have not handled it yet\./m);
     assert.match(out, /claim it with relevo_send \{ thread: "r_bbbbbbbbbbbb", claim: true \}/);
     assert.match(out, /mark it handled with relevo_send \{ thread: "r_bbbbbbbbbbbb", done: true \}/);
-    assert.match(out, /participants: @ana, @oscar\. It names your person\.$/m);
+    assert.match(out, kind === "global" ? /to everyone on the server\. It names your person\.$/m : /participants: @ana, @oscar\. It names your person\.$/m);
     assert.doesNotMatch(out, /answering is optional/);
   }
 });
