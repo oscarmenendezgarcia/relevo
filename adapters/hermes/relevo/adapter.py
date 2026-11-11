@@ -7,7 +7,8 @@ notes becomes a MessageEvent from the author of its latest note, and so, once, d
 pending for the person whose latest note this adapter never handed over (the answer that carried it
 was lost on the way, say); send() writes the agent's reply in that thread; disconnect() stops the
 loop, then ends the session with DELETE /api/session. One fixed Relevo-Session per profile (see
-client.gateway_session_id), general unless RELEVO_CONTEXT is set.
+client.gateway_session_id), general unless RELEVO_CONTEXT is set. connect() also starts the automatic
+update of this plugin's folder in the background (update.py).
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, SendResult
 from gateway.platforms.event import MessageEvent, MessageType
 
-from . import client
+from . import client, update
 
 logger = logging.getLogger(__name__)
 
@@ -311,7 +312,17 @@ class RelevoAdapter(BasePlatformAdapter):
                     self.settings.session, self.settings.context or "general",
                     ", trusting the pinned certificate alone" if self.settings.cert
                     and self.settings.url.startswith("https://") else "")
+        self._start_update()
         return True
+
+    def _start_update(self) -> None:
+        """`relevo update --auto` for this plugin's folder, in the background (see update.py); what it
+        installed is told once in a home channel of this profile. Never holds nor fails connect()."""
+        runner, profile = self.gateway_runner, getattr(self, "_owner_profile", None)
+        try:
+            update.start(self.settings, lambda text: update.tell_home(runner, profile, text))
+        except Exception as exc:
+            logger.warning("[relevo] could not start the automatic update: %s", exc)
 
     async def disconnect(self) -> None:
         _LIVE.discard(self)
