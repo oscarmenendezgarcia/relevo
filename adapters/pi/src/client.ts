@@ -160,6 +160,8 @@ export class Client {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.config.token}`,
       "Relevo-Session": this.session,
+      // A reply's @ mentions name people (docs/protocol.md, `send`): this client knows it.
+      "Relevo-Mentions": "1",
     };
     const context = await this.context();
     if (context) headers["Relevo-Context"] = context;

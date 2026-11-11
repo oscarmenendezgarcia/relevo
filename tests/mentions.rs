@@ -48,11 +48,15 @@ impl Server {
         Agent {
             app: self.app.clone(),
             token: self.tokens[who].clone(),
-            headers: [("relevo-session", id), ("relevo-context", context)]
-                .into_iter()
-                .filter(|(_, v)| !v.is_empty())
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
+            headers: [
+                ("relevo-session", id),
+                ("relevo-context", context),
+                ("relevo-mentions", "1"),
+            ]
+            .into_iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
         }
     }
 
@@ -813,4 +817,61 @@ async fn a_person_added_by_a_reply_is_woken() {
     let (_, v) = waiter.await.unwrap();
     assert!(listed(&v, &thread).is_some(), "{v}");
     assert!(start.elapsed().as_secs() < 10);
+}
+
+#[tokio::test]
+async fn a_reply_from_a_client_before_0_4_is_written_as_0_3_wrote_it() {
+    let s = server(&["ana", "bob", "carl"], &[("backend", &["bob", "carl"])]);
+    let opened = s
+        .ok(
+            "ana",
+            json!({ "to": ["bob"], "text": "Refunds: who owns them?" }),
+        )
+        .await;
+    let thread = id(&opened);
+    // A 0.3.x client sends no `Relevo-Mentions`: it cannot know an @ now names people, so its
+    // reply's mentions are not read, and none of them refuses it.
+    let mut old = s.of("bob");
+    old.headers.retain(|(name, _)| name != "relevo-mentions");
+    for text in [
+        "I'll check with @carl tomorrow.",
+        "We use the @Transactional annotation.",
+        "Asking @team and @backend.",
+        "@ana/x and @ana are the same person.",
+    ] {
+        let v = old.ok(json!({ "thread": thread, "text": text })).await;
+        assert_eq!(v["to"], json!({ "people": [], "teams": [] }), "{text}");
+        assert_eq!(v["added"], json!([]), "{text}");
+    }
+    let th = s.thread("ana", &thread).await;
+    assert_eq!(th["participants"], json!(["ana", "bob"]));
+    // A 0.4 client's reply has them read: the same text adds Carl.
+    let v = s
+        .ok(
+            "bob",
+            json!({ "thread": thread, "text": "I'll check with @carl tomorrow." }),
+        )
+        .await;
+    assert_eq!(v["added"], json!(["carl"]));
+    let (_, v) = s
+        .send(
+            "bob",
+            json!({ "thread": thread, "text": "We use the @Transactional annotation." }),
+        )
+        .await;
+    assert_eq!(code(&v), "UNKNOWN_PERSON");
+    // Opening a thread without `to` is 0.4 only: its mentions are read, header or not.
+    let v = old.ok(json!({ "text": "@carl refunds?" })).await;
+    assert_eq!(v["kind"], "direct");
+    assert_eq!(v["to"]["people"], json!(["carl"]));
+    // The header is 1 or absent.
+    let mut odd = s.of("bob");
+    for (name, value) in odd.headers.iter_mut() {
+        if name == "relevo-mentions" {
+            *value = "yes".into();
+        }
+    }
+    let (status, v) = odd.send(json!({ "thread": thread, "text": "hi" })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(message(&v).contains("Relevo-Mentions"), "{v}");
 }

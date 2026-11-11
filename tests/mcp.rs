@@ -883,6 +883,8 @@ async fn a_server_that_does_not_answer_holds_up_the_exit_only_briefly() {
         head.to_lowercase().contains("relevo-session: mcp_"),
         "{head}"
     );
+    // A 0.4 client: a reply's mentions are read (docs/protocol.md, `send`).
+    assert!(head.to_lowercase().contains("relevo-mentions: 1"), "{head}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

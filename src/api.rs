@@ -1105,6 +1105,12 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<(SendResult, Ve
             mentions: recipients(to, &caller.handle)?,
             people_only: true,
         },
+        // A reply from a client before 0.4 (no `Relevo-Mentions: 1`), which cannot know that an
+        // `@` now names people, is written as 0.3 wrote it: its mentions are not read.
+        (None, Some(_)) if req.thread.is_some() && !caller.reads_mentions => Whom {
+            mentions: Vec::new(),
+            people_only: false,
+        },
         (None, Some(text)) => {
             let mentions = mentions(text, &caller.handle).map_err(ApiError::bad_request)?;
             // A new thread that mentions only its writer goes nowhere, not to everyone: only a

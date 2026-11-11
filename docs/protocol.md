@@ -82,6 +82,7 @@ Rules:
 
 - Opening a thread: its mentions say who is in it (see [Mentions](#mentions)). People only: a `direct` thread. At least one team: a `team` thread, to the active members of the teams named and the people named. No mention: a `global` thread, to every active person. Nobody but you (a team whose only active member is you, a note whose only mentions are of yourself, or a server where you are alone) fails with `NO_RECIPIENTS`: a note that mentions only you is not one without mentions, and does not go to the global board.
 - A person may open at most `RELEVO_TEAM_QUESTIONS_PER_DAY` (default 5) `team` and `global` threads, together, in any rolling 24 hours: beyond that, `TEAM_LIMIT`, whose message says to name the people the note is for, or to wait.
+- Through 0.4.x, a note written in a thread has its mentions read only when the request carries `Relevo-Mentions: 1`, which every 0.4 client sends. Without it the note is written as 0.3 wrote it: its mentions are not read, so they name and add nobody and never refuse it. A 0.3.x client cannot know that an `@` in a reply now names people (and 0.3.x clients have no updater), so its replies keep the meaning they had. After 0.4.x every note's mentions are read, header or not. (Opening a thread is unaffected: a 0.3.x client opens one only with `to`.)
 - Writing in a thread: a mention of a team fails with `BAD_REQUEST` (open a new thread for a team). Mentions of people name them in the thread: participants not yet named become named; people who were not participants are added, named, in a `direct` or `team` thread (a `global` thread already holds everyone active when it was opened; someone invited after is added the same way). A context on a mention applies only to a person this note adds; for someone already in the thread it is ignored, and the thread stays addressed where it was for them.
 - Writing a note in an existing thread claims it for the session that wrote it, unless another session of your person holds it; opening a thread claims nothing (see [Claiming](#sessions-and-routing)).
 - Writing in a thread you are not a participant of fails with `NOT_FOUND` (the thread's existence is not revealed).
@@ -175,7 +176,7 @@ Returns the same thread object as `inbox`, with `notes` (every note, in full, ol
 
 ## HTTP
 
-Every route needs `Authorization: Bearer <token>`, and takes the optional `Relevo-Session` and `Relevo-Context` headers. Bodies and responses are JSON. A malformed session id or context fails with `BAD_REQUEST` (checked after the token). So does an unknown, repeated or malformed `inbox` parameter.
+Every route needs `Authorization: Bearer <token>`, and takes the optional `Relevo-Session` and `Relevo-Context` headers, and, through 0.4.x, `Relevo-Mentions: 1` (a client that knows a reply's mentions name people; see `send`). Bodies and responses are JSON. A malformed session id or context, or a `Relevo-Mentions` other than `1`, fails with `BAD_REQUEST` (checked after the token). So does an unknown, repeated or malformed `inbox` parameter.
 
 ```
 GET  /api/inbox?all=1&wait=30

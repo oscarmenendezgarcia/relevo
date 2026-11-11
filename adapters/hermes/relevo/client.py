@@ -418,6 +418,8 @@ class Api:
         headers = {
             "Authorization": f"Bearer {self.settings.token}",
             "Relevo-Session": self.settings.session,
+            # A reply's @ mentions name people (docs/protocol.md, `send`): this client knows it.
+            "Relevo-Mentions": "1",
             "Accept": "application/json",
         }
         if self.settings.context:
