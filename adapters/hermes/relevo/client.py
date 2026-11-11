@@ -1130,15 +1130,18 @@ def mentions(text: str) -> list:
 
 
 def as_plain_text(text: str, names: set) -> tuple[str, int]:
-    """`text` with each mention of `names` (lowercased; `team` for @team and @equipo) put in backticks,
-    so it is plain text and sends the note to nobody. Returns the text and how many it wrapped."""
-    out, last, wrapped = [], 0, 0
-    for start, end, name in mentions(text):
+    """`text` with the `@` of each mention of `names` (lowercased; `team` for @team and @equipo) left out,
+    so it is plain text and sends the note to nobody. Returns the text and how many it changed.
+
+    Only the `@` goes: no backtick is added (one next to a backtick run would merge with it and change
+    which text is code), and what follows it is a name, so nothing around it can become a mention."""
+    out, last, changed = [], 0, 0
+    for start, _, name in mentions(text):
         if name in names:
-            out += [text[last:start], "`", text[start:end], "`"]
-            last, wrapped = end, wrapped + 1
+            out.append(text[last:start])
+            last, changed = start + 1, changed + 1
     out.append(text[last:])
-    return "".join(out), wrapped
+    return "".join(out), changed
 
 
 _MAX_MENTIONS = 20

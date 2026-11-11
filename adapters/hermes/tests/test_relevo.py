@@ -19,6 +19,7 @@ import asyncio
 import importlib
 import json
 import os
+import random
 import re
 import shutil
 import socket
@@ -486,7 +487,7 @@ class Outbound(Base):
 
     async def test_a_reply_whose_mentions_are_refused_goes_once_more_with_them_as_plain_text(self):
         """The agent's reply is the thread's: an @ the server refuses (nobody it knows, a team in a reply)
-        must not lose it. It is sent once more with those mentions in backticks, and the log says so."""
+        must not lose it. It is sent once more with those mentions without their @, and the log says so."""
         a = self.make_adapter()
         await a.connect()
         opened = self.bob.send(to=["oscar"], text="Who can approve the refunds migration?")
@@ -503,11 +504,11 @@ class Outbound(Base):
         cases = [
             # Nobody it knows, and a team (which a reply cannot mention): both plain text, in one retry.
             ("@zoe or @backend can, cc @ana; not `@carl`, nor me@example.com.",
-             "`@zoe` or `@backend` can, cc @ana; not `@carl`, nor me@example.com."),
+             "zoe or backend can, cc @ana; not `@carl`, nor me@example.com."),
             # A team alone in a reply: refused with BAD_REQUEST, which names it.
-            ("@Backend: approved.\n```\n@decorator\n```", "`@Backend`: approved.\n```\n@decorator\n```"),
+            ("@Backend: approved.\n```\n@decorator\n```", "Backend: approved.\n```\n@decorator\n```"),
             # @team (Oscar's one team) in a reply, with a context on a person already in it.
-            ("Done, @team. @ana/pagos-api FYI", "Done, `@team`. @ana/pagos-api FYI"),
+            ("Done, @team. @ana/pagos-api FYI", "Done, team. @ana/pagos-api FYI"),
         ]
         for text, written in cases:
             bodies.clear()
@@ -529,7 +530,8 @@ class Outbound(Base):
         self.assertFalse(result.success)
         self.assertIn("UNKNOWN_PERSON", result.error)
         self.assertEqual(len(bodies), 2)
-        self.assertIn("`@p20`", bodies[1])
+        self.assertNotIn("@p20", bodies[1])
+        self.assertIn(" p20", bodies[1])
         self.assertTrue(any("refused: UNKNOWN_PERSON" in line for line in logs.output), logs.output)
         # Refusals that are not about mentions are not retried.
         self.bob.send(thread=chat, close=True)
@@ -555,13 +557,37 @@ class Outbound(Base):
             self.assertEqual(found(text), ["@ana"], text)
         self.assertEqual([n for _, _, n in client.mentions("@Equipo @TEAM @Ana-")], ["team", "team", "ana"])
         self.assertEqual(client.as_plain_text("@ana and `@ana` and @ana/x", {"ana"}),
-                         ("`@ana` and `@ana` and `@ana/x`", 2))
+                         ("ana and `@ana` and ana/x", 2))
+        # Next to backticks, inline code stays as it was, and nothing else becomes a mention.
+        self.assertEqual(client.as_plain_text("@zzz`x` and @Bob```", {"zzz", "bob"}), ("zzz`x` and Bob```", 2))
+        tricky = "a   @Bob```(\r\n@Bob(   ~~~\r\n@teama@team ```/"
+        plain, _ = client.as_plain_text(tricky, {n for _, _, n in client.mentions(tricky)})
+        self.assertEqual(client.mentions(plain), [])
         refused = client.RelevoError(400, "BAD_REQUEST", "at most 20 people and teams can be mentioned in one "
                                                          "note; this one mentions 22")
         text = "@oscar " + " ".join(f"@p{i:02}" for i in range(22)) + " @p00"
         self.assertEqual(client.refused_mentions(refused, text, "oscar"), {"p20", "p21"})
         other = client.RelevoError(400, "BAD_REQUEST", "text is empty")
         self.assertEqual(client.refused_mentions(other, text, "oscar"), set())
+
+    def test_a_mention_made_plain_text_leaves_no_mention(self):
+        """However the text is written, leaving out the @ of the mentions of some names leaves none of
+        theirs (as the server reads them), and changes no other."""
+        rng = random.Random(4)
+        alphabet = ["@", "`", "``", "```", "~~~", "\n", "\r\n", "\n\n", " ", "   ", "a", "B", "-", "/", "(", ".",
+                    "team", "bob", "x@y", "é"]
+        for _ in range(5000):
+            text = "".join(rng.choice(alphabet) for _ in range(rng.randrange(1, 30)))
+            found = client.mentions(text)
+            names = {n for _, _, n in found}
+            plain, changed = client.as_plain_text(text, names)
+            self.assertEqual(client.mentions(plain), [], repr(text))
+            self.assertEqual((changed, len(plain)), (len(found), len(text) - changed), repr(text))
+            # Some of them only: the others stay as they were.
+            some = {n for n in names if rng.random() < 0.5}
+            plain, changed = client.as_plain_text(text, some)
+            self.assertEqual([n for _, _, n in client.mentions(plain)], [n for _, _, n in found if n not in some],
+                             repr(text))
 
     async def test_a_refused_final_is_neither_retried_nor_rewritten(self):
         """The base class would retry it and then send a plain-text copy with a gateway banner."""
