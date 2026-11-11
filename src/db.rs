@@ -3,7 +3,9 @@
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -620,18 +622,19 @@ pub fn invite(
     if RESERVED_HANDLES.contains(&handle) {
         bail!("'{handle}' is reserved: it was 0.3's whole team, and @{handle} names nobody");
     }
-    if team_id(conn, handle)?.is_some() {
-        bail!(
-            "'{handle}' is the name of a team: a handle cannot be one, so that @{handle} means one thing"
-        );
-    }
     one_line("name", name)?;
     if let Some(about) = about {
         one_line("about", about)?;
     }
     check_label(label)?;
-    // A failed invite must not leave the person created or reactivated.
-    let tx = conn.unchecked_transaction()?;
+    // IMMEDIATE so the team-name check and the insert are one atomic step: a concurrent
+    // `team add <handle>` sees the person and fails, not a silent duplicate @-name.
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    if team_id(&tx, handle)?.is_some() {
+        bail!(
+            "'{handle}' is the name of a team: a handle cannot be one, so that @{handle} means one thing"
+        );
+    }
     tx.execute(
         "INSERT INTO people (handle, name, about, created_at) VALUES (?1, ?2, coalesce(?3, ''), ?4)
          ON CONFLICT (handle) DO UPDATE SET name = ?2, about = coalesce(?3, about), active = 1",
@@ -853,7 +856,13 @@ pub fn add_team(conn: &Connection, name: &str, title: Option<&str>, now: i64) ->
     if RESERVED_HANDLES.contains(&name) {
         bail!("'{name}' is reserved: it was 0.3's whole team, and @{name} names nobody");
     }
-    let person: Option<bool> = conn
+    if let Some(title) = title {
+        one_line("title", title)?;
+    }
+    // IMMEDIATE so the person-handle check and the insert are one atomic step: a concurrent
+    // `invite <name>` sees the team and fails, not a silent duplicate @-name.
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let person: Option<bool> = tx
         .query_row("SELECT active FROM people WHERE handle = ?1", [name], |r| {
             r.get(0)
         })
@@ -862,16 +871,14 @@ pub fn add_team(conn: &Connection, name: &str, title: Option<&str>, now: i64) ->
         let state = if active { "" } else { " (inactive)" };
         bail!("'{name}' is the handle of a person{state}: a team cannot take it");
     }
-    if team_id(conn, name)?.is_some() {
+    if team_id(&tx, name)?.is_some() {
         bail!("there is a team named '{name}' already");
     }
-    if let Some(title) = title {
-        one_line("title", title)?;
-    }
-    conn.execute(
+    tx.execute(
         "INSERT INTO teams (name, title, created_at) VALUES (?1, coalesce(?2, ''), ?3)",
         params![name, title, now],
     )?;
+    tx.commit()?;
     Ok(())
 }
 

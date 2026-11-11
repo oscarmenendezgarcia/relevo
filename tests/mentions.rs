@@ -902,3 +902,37 @@ async fn a_reply_from_a_client_before_0_4_is_written_as_0_3_wrote_it() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(message(&v).contains("Relevo-Mentions"), "{v}");
 }
+
+#[tokio::test]
+async fn the_per_minute_limit_fires_even_with_a_mention() {
+    let s = server(&["ana", "bob", "carl"], &[]);
+    // Open 3 threads, 20 replies each: 60 notes, one short of the per-minute limit.
+    for _ in 0..3 {
+        let thread = s.open("ana", "@bob start").await;
+        for i in 1..20 {
+            s.ok("ana", json!({ "thread": thread, "text": i.to_string() }))
+                .await;
+        }
+    }
+    // The 61st is a note with a mention: the mention does not buy a free pass.
+    let (status, v) = s.send("ana", json!({ "text": "@carl 61st" })).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(code(&v), "RATE_LIMITED");
+}
+
+#[tokio::test]
+async fn the_per_thread_limit_fires_even_with_a_mention() {
+    let s = server(&["ana", "bob", "carl"], &[]);
+    // Reply 20 times in one thread: exactly at the per-thread-per-hour limit.
+    let thread = s.open("ana", "@bob first").await;
+    for i in 1..20 {
+        s.ok("bob", json!({ "thread": thread, "text": i.to_string() }))
+            .await;
+    }
+    // The 21st reply has a mention: still refused with THREAD_BUSY.
+    let (status, v) = s
+        .send("bob", json!({ "thread": thread, "text": "@carl 21st" }))
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(code(&v), "THREAD_BUSY");
+}
