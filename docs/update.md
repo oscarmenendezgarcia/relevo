@@ -58,7 +58,7 @@ Every client installs what the key signs, within the hour and with nobody approv
 - Before signing, the workflow checks that the tag is `v` and the version of `Cargo.toml`, and that the tagged commit is on `main`; it refuses a key that is not the one `keys/release-signing-pub.pem` holds.
 - Third-party actions are pinned to a commit (`dtolnay/rust-toolchain`, `actions/*`): what they build is signed. Update a pin on purpose, reading what changed.
 
-The environment, its reviewers and the ruleset are repository settings: the owner sets them once, before the first release that carries the dist.
+The environment, its reviewers and the ruleset are repository settings: the owner sets them once, before the first release that carries the dist. On a private repository under GitHub Free, required reviewers and rulesets are not available (they need GitHub Pro, or a public repository): the environment then keeps only its rule that allows tags `v*`, so anyone with write access to the repository can push a release tag, and with it a commit on `main`, and the workflow signs it. Then only people trusted to release get write access; the owner adds the reviewers and the ruleset as soon as the plan allows.
 
 ## If the key is lost
 
