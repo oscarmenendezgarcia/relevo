@@ -17,6 +17,8 @@ export function loadExtension(options: Options) {
   const handlers = new Map<string, Array<(event: any, ctx: any) => unknown>>();
   const sent: Sent[] = [];
   const notified: string[] = [];
+  /** The level of each notice in `notified`. */
+  const levels: string[] = [];
   /** Custom messages the agent has in its session: what it actually sees. */
   const seen: any[] = [];
   const followUps: any[] = [];
@@ -107,7 +109,12 @@ export function loadExtension(options: Options) {
       cwd,
       mode,
       hasUI: mode !== "print",
-      ui: { notify: (text: string) => notified.push(text) },
+      ui: {
+        notify: (text: string, level = "info") => {
+          notified.push(text);
+          levels.push(level);
+        },
+      },
       isIdle: () => !streaming && !compacting,
     };
   }
@@ -117,6 +124,7 @@ export function loadExtension(options: Options) {
     sent,
     seen,
     notified,
+    levels,
     session,
     ctx,
     emit,
