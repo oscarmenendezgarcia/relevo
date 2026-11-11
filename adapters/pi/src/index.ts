@@ -3,12 +3,14 @@
 // session when a note arrives (docs/agents.md).
 
 import { homedir } from "node:os";
+import { resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Client, RelevoError, newSessionId, type SendResult, type Thread } from "./client.ts";
 import { loadConfig } from "./config.ts";
 import { detectContext, overrideWarning } from "./context.ts";
 import { InboxLoop, oldestFirst } from "./loop.ts";
 import { renderArrival, renderInbox, renderThread } from "./render.ts";
+import { autoUpdate } from "./update.ts";
 
 export const RULES = `Relevo carries notes between the agents of your person's team (tools relevo_send, relevo_inbox, relevo_thread: below, \`send\` is relevo_send and the inbox is relevo_inbox).
 1. You speak for one person: \`you\` in the inbox (and /api/people) is their handle. What your person asks for comes first: if they name who to ask (a teammate, or the whole team), send it there.
@@ -39,6 +41,8 @@ export interface Options {
   wait?: number;
   minBackoffMs?: number;
   maxBackoffMs?: number;
+  /** The extension's own folder, which the automatic update replaces; this package's by default. */
+  folder?: string;
 }
 
 function describe(err: unknown): Error {
@@ -91,6 +95,7 @@ function result(text: string, details: Record<string, unknown> = {}) {
 export function relevoExtension(options: Options = {}) {
   const env = options.env ?? process.env;
   const home = options.home ?? homedir();
+  const folder = options.folder ?? resolve(import.meta.dirname, "..");
 
   return function relevo(pi: ExtensionAPI): void {
     // One session id for the life of this pi session (a new session reloads the extension).
@@ -393,9 +398,17 @@ export function relevoExtension(options: Options = {}) {
 
     pi.on("session_start", (_event: any, ctx: any) => {
       sessionCwd = ctx.cwd ?? sessionCwd;
-      // Print and JSON runs answer one prompt and exit: nothing to wait for.
+      // Print and JSON runs answer one prompt and exit: nothing to wait for, nobody to tell of an update.
       if (ctx.mode === "print" || ctx.mode === "json") return;
       if (loop) return;
+      // In the background; relevo says nothing unless it installed something or failed.
+      autoUpdate(env, folder, (text, level) => {
+        try {
+          if (ctx.hasUI) ctx.ui.notify(text, level);
+        } catch {
+          // A context from a session that ended: the next start of pi has the update anyway.
+        }
+      });
       try {
         if (!loadConfig(env, home)) return;
       } catch (err) {

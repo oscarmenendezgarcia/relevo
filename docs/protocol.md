@@ -161,6 +161,9 @@ GET  /api/threads/:id
 POST /api/send            { to | thread, text, close?, claim?, done?, key? }
 GET  /api/people          { "team": [...], "you": "ana" }  (same list as inbox)
 DELETE /api/session        forget this session (the one the headers name) and release its claims; { "ok": true }
+GET  /api/dist/manifest.json   the signed list of the clients this server hands out (see docs/update.md)
+GET  /api/dist/manifest.sig
+GET  /api/dist/<name>          a file the manifest lists
 GET  /health              no token; { "ok": true }
 ```
 
@@ -186,7 +189,7 @@ Ids: threads `r_` + 12 base32 chars, notes `n_` + 12, tokens `t_` + 12 (random).
 There is no sign-up. The admin runs the binary on the server:
 
 ```
-relevo serve [--addr 127.0.0.1:7878] [--db relevo.db] [--team-questions-per-day 5] [--tls [--tls-name NAME]… | --tls-cert PEM --tls-key PEM]
+relevo serve [--addr 127.0.0.1:7878] [--db relevo.db] [--team-questions-per-day 5] [--tls [--tls-name NAME]… | --tls-cert PEM --tls-key PEM] [--dist DIR]
 relevo tls-fingerprint [--db relevo.db]                                                  # SHA-256 of the certificate serve --tls uses
 relevo invite <handle> --name "Ana" [--about "payments backend"] [--label "Claude Code"]   # creates the person (or reuses), prints a new token once
 relevo token add <handle> --label "Codex desktop"                                          # another agent for the same person (active people only)
@@ -207,7 +210,7 @@ The database records the version of its layout. From layout 6 on (relevo 0.3.0),
 
 `backup` copies the database with SQLite's `VACUUM INTO`: one consistent snapshot, taken without stopping the server (a plain copy of a database in WAL mode can miss what is still in its `-wal` file). It only reads the database, as `check-db` does: it never creates one, and copies one made by another version too, so it can be kept before an upgrade. The copy is created 0600 under a hidden name, checked (`PRAGMA quick_check`), and only then given its name; an existing file is never overwritten. When `<dest>` is a directory (with `--keep N` it must be one, and is created 0700 if missing), the copy is named `YYYYMMDD-HHMMSS.db` (UTC), and `--keep N` then removes the oldest files named that way beyond the newest N, the new one always among them; other files there are left alone. Restoring is putting a copy in place of the database while the server is stopped (and deleting the old database's `-wal` and `-shm` files).
 
-`--db` defaults to `RELEVO_DB` or `./relevo.db`; only `serve` creates `./relevo.db` that way, and the other commands refuse to run when neither names a database and there is no `./relevo.db` (so an admin command run before `RELEVO_DB` is set cannot fill a database the server never reads); `--addr` to `RELEVO_ADDR` or `127.0.0.1:7878`; `--team-questions-per-day` to `RELEVO_TEAM_QUESTIONS_PER_DAY` or 5; `--tls` to `RELEVO_TLS` (`true` or `false`), `--tls-name` to `RELEVO_TLS_NAME` (comma-separated), and `--tls-cert` and `--tls-key` to `RELEVO_TLS_CERT` and `RELEVO_TLS_KEY`, so that a systemd drop-in can turn TLS on with `Environment=` lines. `--tls` and `--tls-cert` exclude each other, `--tls-cert` and `--tls-key` go together, and `--tls-name` needs `--tls`; `serve` refuses anything else before it opens the database (`RELEVO_TLS=false` counts as no `--tls`).
+`--db` defaults to `RELEVO_DB` or `./relevo.db`; only `serve` creates `./relevo.db` that way, and the other commands refuse to run when neither names a database and there is no `./relevo.db` (so an admin command run before `RELEVO_DB` is set cannot fill a database the server never reads); `--addr` to `RELEVO_ADDR` or `127.0.0.1:7878`; `--team-questions-per-day` to `RELEVO_TEAM_QUESTIONS_PER_DAY` or 5; `--tls` to `RELEVO_TLS` (`true` or `false`), `--tls-name` to `RELEVO_TLS_NAME` (comma-separated), `--tls-cert` and `--tls-key` to `RELEVO_TLS_CERT` and `RELEVO_TLS_KEY`, and `--dist` (the clients it hands out, docs/update.md) to `RELEVO_DIST` or `dist/` next to the database, so that a systemd drop-in can turn TLS on with `Environment=` lines. `--tls` and `--tls-cert` exclude each other, `--tls-cert` and `--tls-key` go together, and `--tls-name` needs `--tls`; `serve` refuses anything else before it opens the database (`RELEVO_TLS=false` counts as no `--tls`).
 
 `serve` can speak HTTPS itself, with no proxy in front:
 

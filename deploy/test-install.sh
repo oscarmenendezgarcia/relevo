@@ -243,9 +243,113 @@ else
     echo "  (skipped: no python3 to write the database)"
 fi
 
+echo "--dist installs the clients the server hands out, in one step"
+if command -v openssl >/dev/null; then
+    home=$fake/home-dist
+    bin=$home/.local/bin/relevo
+    data=$home/.local/share/relevo
+    mkdir "$home"
+    ver=$("$binary" --version | cut -d ' ' -f 2)
+    # A release's dist, signed with a throwaway key.
+    openssl genpkey -algorithm ed25519 -out "$fake/key.pem" 2>/dev/null
+    rel=$fake/release
+    mkdir "$rel"
+    cp "$binary" "$rel/relevo-$(uname -m)-unknown-linux-gnu"
+    "$here/make-dist.sh" --key "$fake/key.pem" "$rel" >/dev/null
+    tarball=$rel/relevo-dist-$ver.tar.gz
+    [ -f "$tarball" ] || fail "make-dist.sh made no $tarball"
+
+    install_ --dry-run --no-systemd --dist "$tarball" "$binary"
+    [ -z "$(contents)" ] || fail "dry run wrote: $(contents)"
+    expect_in_out "$tarball: the dist of $ver"
+    expect_in_out "installing the dist $ver into $data/dist"
+
+    install_ --no-systemd --dist "$tarball" "$binary" || fail "--dist: $(cat "$fake/out")"
+    [ -L "$data/dist" ] || fail "$data/dist is not a link"
+    for f in manifest.json manifest.sig "relevo-$(uname -m)-unknown-linux-gnu" \
+        "relevo-pi-$ver.tar.gz" "relevo-hermes-$ver.tar.gz"; do
+        cmp -s "$rel/$f" "$data/dist/$f" || fail "$f not in the dist"
+    done
+    [ "$(mode "$(readlink -f "$data/dist")")" = 700 ] || fail "dist mode"
+    first=$(readlink "$data/dist")
+
+    echo "  the same dist again changes nothing"
+    install_ --no-systemd --dist "$tarball" "$binary"
+    expect_in_out "up to date: $data/dist ($ver)"
+    [ "$(readlink "$data/dist")" = "$first" ] || fail "the dist was replaced"
+
+    echo "  another dist takes its place, and the old one goes"
+    rel2=$fake/release2
+    mkdir "$rel2"
+    cp "$binary" "$rel2/relevo-$(uname -m)-unknown-linux-gnu"
+    printf '\0' >>"$rel2/relevo-$(uname -m)-unknown-linux-gnu"
+    "$here/make-dist.sh" --key "$fake/key.pem" "$rel2" >/dev/null
+    install_ --no-systemd --dist "$rel2/relevo-dist-$ver.tar.gz" "$binary"
+    expect_in_out "installing the dist $ver"
+    cmp -s "$rel2/manifest.json" "$data/dist/manifest.json" || fail "the new dist is not in place"
+    [ ! -e "$data/$first" ] || fail "the old dist is still there"
+    [ "$(find "$data" -maxdepth 1 -name '.dist*' | wc -l)" = 1 ] ||
+        fail "left over: $(find "$data" -maxdepth 1 -name '.dist*')"
+
+    echo "  found next to the binary when not given"
+    cp "$binary" "$rel/relevo"
+    install_ --no-systemd "$rel/relevo"
+    expect_in_out "$tarball: the dist of $ver"
+    cmp -s "$rel/manifest.json" "$data/dist/manifest.json" || fail "the dist next to the binary"
+
+    echo "  a broken, tampered or other version's dist changes nothing"
+    now=$(readlink "$data/dist")
+    printf 'junk' >"$fake/junk.tar.gz"
+    if install_ --no-systemd --dist "$fake/junk.tar.gz" "$binary"; then fail "took junk"; fi
+    expect_in_out "is not a .tar.gz"
+    work=$fake/work
+    mkdir "$work"
+    tar -xzf "$tarball" -C "$work"
+    printf 'more' >>"$work/relevo-pi-$ver.tar.gz"
+    tar -czf "$fake/tampered.tar.gz" -C "$work" .
+    if install_ --no-systemd --dist "$fake/tampered.tar.gz" "$binary"; then fail "took a tampered dist"; fi
+    expect_in_out "do not match its manifest"
+    tar -xzf "$tarball" -C "$work"
+    sed -i "s/\"version\": \"$ver\"/\"version\": \"0.0.1\"/" "$work/manifest.json"
+    tar -czf "$fake/older.tar.gz" -C "$work" .
+    if install_ --no-systemd --dist "$fake/older.tar.gz" "$binary"; then fail "took another version's dist"; fi
+    expect_in_out "the dist of 0.0.1"
+    rm "$work/manifest.sig"
+    tar -czf "$fake/unsigned.tar.gz" -C "$work" .
+    if install_ --no-systemd --dist "$fake/unsigned.tar.gz" "$binary"; then fail "took a dist without a signature"; fi
+    expect_in_out "no manifest.json and manifest.sig"
+    [ "$(readlink "$data/dist")" = "$now" ] || fail "a refused dist changed the installed one"
+    if install_ --no-systemd --dist "$fake/missing.tar.gz" "$binary"; then fail "took a missing file"; fi
+
+    echo "  a dist directory made by hand is replaced"
+    rm "$data/dist"
+    rm -rf "${data:?}/$now"
+    mkdir "$data/dist"
+    printf 'by hand' >"$data/dist/manifest.json"
+    install_ --no-systemd --dist "$tarball" "$binary"
+    [ -L "$data/dist" ] || fail "the directory made by hand is still there"
+    [ "$(find "$data" -maxdepth 1 -name '.dist*' | wc -l)" = 1 ] ||
+        fail "left over: $(find "$data" -maxdepth 1 -name '.dist*')"
+
+    echo "  serve finds it"
+    RELEVO_DB=$data/relevo.db "$bin" serve --addr 127.0.0.1:0 >"$fake/serve.log" 2>&1 &
+    serve=$!
+    for _ in $(seq 100); do
+        grep -q "relevo listening" "$fake/serve.log" && break
+        sleep 0.1
+    done
+    kill "$serve"
+    wait "$serve" 2>/dev/null || true
+    grep -q "handing out the clients of version $ver from $data/dist" "$fake/serve.log" ||
+        fail "serve did not find the dist: $(cat "$fake/serve.log")"
+else
+    echo "  (skipped: no openssl to sign a dist)"
+fi
+
 echo "bad arguments are refused"
 if install_ --enable --no-systemd "$binary"; then fail "accepted --enable --no-systemd"; fi
 if install_ "$fake/missing"; then fail "accepted a missing binary"; fi
+if install_ --dist; then fail "accepted --dist without a file"; fi
 printf 'not a program' >"$fake/text"
 chmod +x "$fake/text"
 if install_ --no-systemd "$fake/text"; then fail "accepted a binary that does not run"; fi

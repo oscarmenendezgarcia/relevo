@@ -11,14 +11,17 @@ What the owner needs:
 
 ## 1. Get the binary
 
-**Download a release.** Each release has `relevo-x86_64-unknown-linux-gnu`, `relevo-aarch64-unknown-linux-gnu` and `SHA256SUMS`. `uname -m` says which one you need. With the GitHub CLI (it also works while the repository is private):
+**Download a release.** Each release has `relevo-x86_64-unknown-linux-gnu`, `relevo-aarch64-unknown-linux-gnu`, `relevo-dist-<version>.tar.gz` (the clients the server hands out to the team, so that they update themselves: see [docs/update.md](update.md)) and `SHA256SUMS`. `uname -m` says which binary you need. With the GitHub CLI (it also works while the repository is private):
 
 ```
 gh release download --repo oscarmenendezgarcia/relevo \
-    --pattern "relevo-$(uname -m)-unknown-linux-gnu" --pattern SHA256SUMS
+    --pattern "relevo-$(uname -m)-unknown-linux-gnu" --pattern "relevo-dist-*.tar.gz" \
+    --pattern SHA256SUMS
 sha256sum --check --ignore-missing SHA256SUMS
 chmod +x relevo-$(uname -m)-unknown-linux-gnu
 ```
+
+(The release also has the dist's parts one by one: `manifest.json`, `manifest.sig`, `relevo-pi-<version>.tar.gz` and `relevo-hermes-<version>.tar.gz`. The server needs only `relevo-dist-<version>.tar.gz`.)
 
 Get the deploy files of the same version, for example `git clone --branch v0.3.0 https://github.com/oscarmenendezgarcia/relevo.git` (any `v…` tag), or `gh release download v0.3.0 --repo oscarmenendezgarcia/relevo --archive tar.gz` and unpack it.
 
@@ -42,6 +45,8 @@ It puts the binary in `~/.local/bin/relevo`, creates `~/.local/share/relevo` (th
 
 - `relevo.service`: `relevo serve` on `127.0.0.1:7878`, database `~/.local/share/relevo/relevo.db`, restarted if it fails, at most 128 MB of memory, allowed to write only in its data directory, logging to the journal.
 - `relevo-backup.timer` and `relevo-backup.service`: a backup every day (part 5).
+
+**The clients for the team.** When `relevo-dist-<version>.tar.gz` of the binary's version is next to the binary (as `gh release download` above leaves it), or given with `--dist <file>`, the script also puts it in `~/.local/share/relevo/dist/`: the server then hands it out (`GET /api/dist/…`, to anyone with a token), and every teammate's `relevo`, pi extension and Hermes plugin update themselves from it (see [docs/update.md](update.md)). Before changing anything it checks that the dist is of the binary's version and that its files match its manifest; the clients check the release's signature themselves. It replaces an older dist in one step. Without a dist the server hands out nothing, and logs so at start; it logs a warning when the dist's version is not its own.
 
 `--enable` then runs `systemctl --user daemon-reload` and `systemctl --user enable --now relevo.service relevo-backup.timer`. Without it, the script prints those commands for you to run. Running the script again is safe: it changes only what differs. `--no-systemd` installs the binary and the data directory only, for running the server some other way.
 
@@ -230,6 +235,8 @@ The `-wal` and `-shm` files of the old database must not stay next to the restor
 deploy/install.sh --enable ./relevo-<new>          # from the deploy files of the new version
 ```
 
+With the new version's `relevo-dist-<version>.tar.gz` next to the binary (or `--dist <file>`), the script puts it in place too, and the teammates' clients follow by themselves: each machine checks at most once an hour, when an agent starts (docs/update.md). Clients before 0.4.0 have no updater: those teammates update once by hand (part 7).
+
 Before it changes anything, the script checks that the new binary runs on this machine and accepts the existing database, as it is or once the server migrates it (`relevo check-db`, which only reads it); if not, it stops and says why. Then, when the binary differs from the installed one, it copies the database with `relevo backup` into `~/.local/share/relevo/backups/before-upgrade-<UTC date and time>.db` (the daily backups' `--keep` never removes it: it is not named like them), puts the new binary and units in place, and restarts the server if it was running. It never migrates the database itself.
 
 **The database layout.** The database records the version of its layout (`SCHEMA_VERSION` in `src/db.rs`, kept in SQLite's `user_version`); the release notes say when a version changes it. Only `relevo serve` migrates an older layout it knows, in place, when it starts. Every other command (`invite`, `people`, …) refuses such a database, writing nothing, and says to start the server first; `relevo backup` copies a database of any version. A layout the binary does not know (a newer version's, or one from before 0.1.0) is refused by every command, `serve` included: if the server is started on it anyway, it stops at once, systemd tries 5 times and then leaves it failed, and `journalctl --user -u relevo` shows the reason.
@@ -261,5 +268,7 @@ This part is for each person, on their own machine, with the token and server ad
    - **Claude Code**, and any MCP client: register `relevo mcp` as an MCP server. The commands, and the option that brings notes into a running Claude Code session as they arrive, are in [docs/agents.md](agents.md).
    - **pi**: [adapters/pi/README.md](../adapters/pi/README.md).
    - **Hermes**: [adapters/hermes/README.md](../adapters/hermes/README.md).
+
+4. **Updates come by themselves.** From 0.4.0, your `relevo` updates itself from the server, to the server's version, once the owner has put the release's dist there (part 2): `relevo mcp` checks when it starts, at most once an hour per machine, and the new binary takes effect at the next start. The pi extension and the Hermes plugin register their folder and update the same way. Only clients signed by the release key are installed, never an older version. By hand: `relevo update --check` says what it would do, `relevo update` does it, and `relevo update --adapter pi --path <folder>` (or `hermes`) registers and updates an adapter you installed by hand (not one in a git checkout, such as a clone of this repository: update that with git). `RELEVO_AUTO_UPDATE=0` turns the automatic check off. If `relevo` sits where you cannot write (`/usr/local/bin`, owned by root), it says so and installs nothing: update it there yourself. Clients before 0.4.0 have no updater: update once by hand, as in step 1, then they follow the server.
 
 Each running agent counts as one session of yours; the owner sees them with `relevo sessions`. If your token stops working (revoked, or the server started over after an upgrade), ask the owner for a new one and run `relevo connect` again.

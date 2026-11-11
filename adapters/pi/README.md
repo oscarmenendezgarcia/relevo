@@ -37,7 +37,33 @@ You need pi, Node 22.18 or later (pi's own Node is fine), and a token from your 
 
    That adds the path to `~/.pi/agent/settings.json`; `pi install -l …` adds it to the project's `.pi/settings.json` instead. To try it for one run without installing: `pi -e /path/to/relevo/adapters/pi`.
 
+   A folder in a git checkout (as this one is) is updated with git, not by itself (see Updates below). For an extension that follows the server, install it from the release instead: unpack `relevo-pi-<version>.tar.gz` (a release file, part of the dist the owner puts on the server) into a folder of its own and install that folder:
+
+   ```sh
+   mkdir -p ~/.local/share/relevo/pi
+   tar -xzf relevo-pi-0.4.0.tar.gz -C ~/.local/share/relevo/pi
+   pi install ~/.local/share/relevo/pi
+   ```
+
 3. Start pi in a repository and ask it to check its Relevo inbox.
+
+## Updates
+
+From 0.4.0 the extension updates itself from your Relevo server, as `relevo` does ([docs/update.md](../../docs/update.md)). At `session_start` it runs, in the background,
+
+```sh
+relevo update --auto --adapter pi --path <the extension's own folder>
+```
+
+with the `relevo` that `RELEVO_BIN` names, or else the one on `PATH`; without one it does nothing and says nothing. The session never waits for it, and pi can exit while it runs. `relevo` does the work: it registers the folder in `~/.config/relevo/config.json`, checks at most once an hour per machine, installs only what carries the release's signature and is newer, and swaps the folder in one step; with that, it updates the `relevo` binary and the other adapters registered on the machine. When it installed something, pi says so (`Relevo was updated; it applies at the next start of pi.`, with what was installed): pi has loaded the extension already, so the new one runs from the next start of pi. When it failed (a folder you cannot write, say), pi shows what `relevo` said, as a warning. Otherwise it is silent.
+
+It does not run:
+
+- with `RELEVO_AUTO_UPDATE=0` (or `false`, `no`, `off`); `relevo update` still works by hand;
+- in print (`-p`) and JSON modes, which answer one prompt and exit: the next interactive or RPC session checks;
+- when the extension's folder is in a git checkout (a `.git` in it or above it), such as `adapters/pi` of a clone of this repository: replacing it would throw away what git tracks there, uncommitted work included. Update it with git.
+
+A pi extension from before 0.4.0 has no updater: install 0.4.0 once by hand, as above, and it follows the server after that. The same goes for a `relevo` from before 0.4.0 next to a newer extension: the extension says so once, as a warning, and does not run it again until pi restarts.
 
 ## Sessions and context
 
@@ -54,4 +80,4 @@ npm test                       # node --test against a real relevo server
 npm run e2e                    # real pi runs: uses a model (PI_E2E_MODEL, PI_BIN)
 ```
 
-The tests start `relevo serve` (and `relevo serve --tls`) on free ports in 7990-7999 with throwaway databases. The binary is `RELEVO_BIN` when set, else this repository's build (`$CARGO_TARGET_DIR/release`, then `target/release`, then `target/debug`), never one from elsewhere. `npm test` covers the tools, context detection and the background loop with a stand-in for pi's API (a pi session killed in a process of its own right after a note reached it, and the next session getting that note on start; an inbox answer lost on the way, through a proxy that lets the request reach the server and cuts the connection, handed over on the next answer, once, without waiting, and saying earlier notes may be missing, with two notes in the lost answer and with a note written after the loss; and a thread the agent left alone not handed over again in the same session, included), and over https: the tools, the waiting inbox and the end of the session with a pinned certificate, another certificate or a host it does not name refused, and plain http unchanged (one case, a certificate an office authority signed, uses `openssl` and is skipped without it). `npm run e2e` loads the extension with `-e` only (no other extensions, skills or MCP) and checks that a print run calls `relevo_inbox` and `relevo_send` (answering in the thread, so nothing is left pending), and that an idle RPC session, handed nothing at start, is woken by a note, answers it in its thread, receives it once, and exits when its stdin closes.
+The tests start `relevo serve` (and `relevo serve --tls`) on free ports in 7990-7999 with throwaway databases. The binary is `RELEVO_BIN` when set, else this repository's build (`$CARGO_TARGET_DIR/release`, then `target/release`, then `target/debug`), never one from elsewhere. `npm test` covers the tools, context detection and the background loop with a stand-in for pi's API (a pi session killed in a process of its own right after a note reached it, and the next session getting that note on start; an inbox answer lost on the way, through a proxy that lets the request reach the server and cuts the connection, handed over on the next answer, once, without waiting, and saying earlier notes may be missing, with two notes in the lost answer and with a note written after the loss; and a thread the agent left alone not handed over again in the same session, included), and over https: the tools, the waiting inbox and the end of the session with a pinned certificate, another certificate or a host it does not name refused, and plain http unchanged (one case, a certificate an office authority signed, uses `openssl` and is skipped without it). The automatic update is tested with a stand-in for `relevo` (a shell script that records how it was run and answers as each test says): run in the background for the extension's folder, what it installed or what failed told in pi, and nothing run when it is turned off, in print and JSON modes, without `relevo`, or for a folder in a git checkout. `npm run e2e` loads the extension with `-e` only (no other extensions, skills or MCP, and the automatic update off) and checks that a print run calls `relevo_inbox` and `relevo_send` (answering in the thread, so nothing is left pending), and that an idle RPC session, handed nothing at start, is woken by a note, answers it in its thread, receives it once, and exits when its stdin closes.

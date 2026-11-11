@@ -4,14 +4,18 @@
 #   the binary          ~/.local/bin/relevo
 #   the data directory  ~/.local/share/relevo (0700), with backups/ (0700)
 #   the systemd units   ~/.config/systemd/user/relevo.service, relevo-backup.{service,timer}
+#   the dist            ~/.local/share/relevo/dist: the clients the server hands out
 #
-# Usage: deploy/install.sh [--enable] [--dry-run] [--no-systemd] <relevo-binary>
+# Usage: deploy/install.sh [--enable] [--dry-run] [--no-systemd] [--dist <tarball>] <relevo-binary>
 #
 #   --enable      also run `systemctl --user daemon-reload`, restart the server if it was running
 #                 an older binary or unit, and `systemctl --user enable --now` the server and the
 #                 daily backup timer.
 #   --dry-run     say what would change, change nothing.
 #   --no-systemd  install the binary and the data directory only.
+#   --dist        the release's relevo-dist-<version>.tar.gz, for the clients to update from
+#                 (docs/update.md). Without it, the one of the binary's version next to the
+#                 binary, if there is one.
 #
 # Running it again is safe: what is already in place is left alone. Before replacing anything it
 # checks that the new binary runs here and accepts the existing database, as it is or once
@@ -22,7 +26,7 @@
 set -euo pipefail
 
 usage() {
-    sed -n '8,14s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"
+    sed -n '9,18s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"
 }
 
 die() {
@@ -34,9 +38,15 @@ enable=0
 dry_run=0
 systemd=1
 binary=
+dist=
 while [ $# -gt 0 ]; do
     case "$1" in
         --enable) enable=1 ;;
+        --dist)
+            [ $# -ge 2 ] || die "--dist needs a file"
+            dist=$2
+            shift
+            ;;
         --dry-run) dry_run=1 ;;
         --no-systemd) systemd=0 ;;
         -h | --help)
@@ -70,6 +80,7 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 bin_dir=$HOME/.local/bin
 data_dir=$HOME/.local/share/relevo
 backup_dir=$data_dir/backups
+dist_dir=$data_dir/dist
 db=$data_dir/relevo.db
 unit_dir=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
 units=(relevo.service relevo-backup.service relevo-backup.timer)
@@ -106,6 +117,31 @@ if [ -e "$db" ]; then
 See \"Upgrades\" in docs/install.md."
     fi
     say "$out"
+fi
+
+# The dist, checked before anything changes: unpacked aside, of the binary's version, every file
+# as its manifest says. The clients check its signature; this only catches a wrong or broken file.
+if [ -z "$dist" ]; then
+    beside=$(dirname "$binary")/relevo-dist-${version#relevo }.tar.gz
+    if [ -f "$beside" ]; then dist=$beside; fi
+fi
+if [ -n "$dist" ]; then
+    [ -f "$dist" ] || die "no file at $dist"
+    staged=$(mktemp -d "${TMPDIR:-/tmp}/relevo-dist.XXXXXX")
+    trap 'rm -rf "$staged"' EXIT
+    tar -xzf "$dist" -C "$staged" --no-same-owner 2>/dev/null ||
+        die "nothing changed: $dist is not a .tar.gz"
+    if [ ! -f "$staged/manifest.json" ] || [ ! -f "$staged/manifest.sig" ]; then
+        die "nothing changed: $dist has no manifest.json and manifest.sig: not a relevo dist"
+    fi
+    dist_version=$(sed -n 's/^ *"version": *"\([^"]*\)".*/\1/p' "$staged/manifest.json" | head -n 1)
+    [ "relevo $dist_version" = "$version" ] ||
+        die "nothing changed: $dist is the dist of ${dist_version:-no version}, and the binary is $version: give the dist of the same release"
+    sums=$(sed -n 's/.*"name": *"\([^"/]*\)".*"sha256": *"\([0-9a-f]\{64\}\)".*/\2  \1/p' "$staged/manifest.json")
+    if [ -z "$sums" ] || ! (cd "$staged" && printf '%s\n' "$sums" | sha256sum --check --quiet --strict >/dev/null 2>&1); then
+        die "nothing changed: the files in $dist do not match its manifest"
+    fi
+    say "$dist: the dist of $dist_version"
 fi
 
 changed_binary=1
@@ -145,6 +181,43 @@ if [ "$changed_binary" = 1 ]; then
     # Into place with a rename, so a running server keeps its old file until it restarts.
     run install -m 0755 "$binary" "$bin_dir/.relevo.new"
     run mv -f "$bin_dir/.relevo.new" "$bin_dir/relevo"
+fi
+
+# Into place with one step: `dist` is a link to a directory of its own, and a new link is
+# renamed over it, so the server hands out the old dist or the new one, never half of each.
+if [ -n "$dist" ]; then
+    if [ -f "$dist_dir/manifest.json" ] && cmp -s "$staged/manifest.json" "$dist_dir/manifest.json" &&
+        cmp -s "$staged/manifest.sig" "$dist_dir/manifest.sig"; then
+        say "up to date: $dist_dir ($dist_version)"
+    else
+        say "installing the dist $dist_version into $dist_dir"
+        target=.dist-$dist_version-$(date -u +%Y%m%d-%H%M%S)-$$
+        previous=
+        if [ -L "$dist_dir" ]; then
+            previous=$(readlink "$dist_dir")
+            # Only a directory this script made is ever removed.
+            case $previous in
+                .dist-*/* | */*) previous= ;;
+                .dist-*) ;;
+                *) previous= ;;
+            esac
+        elif [ -e "$dist_dir" ]; then
+            # A directory put there by hand: moved aside first, the one step that is not atomic.
+            previous=.dist-old-$(date -u +%Y%m%d-%H%M%S)-$$
+            run mv "$dist_dir" "$data_dir/$previous"
+        fi
+        run mv "$staged" "$data_dir/$target"
+        run ln -sfn "$target" "$data_dir/.dist.link"
+        run mv -T "$data_dir/.dist.link" "$dist_dir"
+        if [ -n "$previous" ] && [ "$previous" != "$target" ]; then
+            run rm -rf "${data_dir:?}/$previous"
+        fi
+    fi
+elif [ -e "$dist_dir" ]; then
+    say "no dist given: the clients in $dist_dir stay as they are"
+else
+    say "no dist given or next to the binary: this server hands out no clients to update from"
+    say "(the release's relevo-dist-<version>.tar.gz; see docs/update.md)"
 fi
 
 changed_units=0

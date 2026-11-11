@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
-use relevo::{App, Clock, api, backup, client, config, db, mcp, serve, tls};
+use relevo::{App, Clock, api, backup, client, config, db, mcp, serve, tls, update};
 
 /// Relevo: notes that your agent hands to a teammate's agent.
 #[derive(Parser)]
@@ -57,6 +57,10 @@ enum Command {
             requires = "tls_cert"
         )]
         tls_key: Option<PathBuf>,
+        /// The clients to hand out to the team (docs/update.md). [default: dist/ next to the
+        /// database]
+        #[arg(long, value_name = "DIR", env = "RELEVO_DIST")]
+        dist: Option<PathBuf>,
     },
     /// Print the SHA-256 fingerprint of the certificate `serve --tls` uses, for teammates to
     /// compare with what `relevo connect` shows.
@@ -101,6 +105,23 @@ enum Command {
         /// Push new notes as Claude Code channel events (keeps an inbox request waiting).
         #[arg(long)]
         channel: bool,
+    },
+    /// Update this relevo, and the adapters registered on this machine, from the clients the
+    /// server hands out, signed by the release key (docs/update.md).
+    Update {
+        /// Only say what it would do; change nothing.
+        #[arg(long, conflicts_with = "auto")]
+        check: bool,
+        /// As the clients run it by themselves: at most one check an hour, silent unless it
+        /// installed something or failed. RELEVO_AUTO_UPDATE=0 turns it off.
+        #[arg(long)]
+        auto: bool,
+        /// Register this adapter's folder (with --path), and update it too.
+        #[arg(long, value_enum, requires = "path")]
+        adapter: Option<relevo::update::Kind>,
+        /// The folder of --adapter.
+        #[arg(long, value_name = "DIR", requires = "adapter")]
+        path: Option<PathBuf>,
     },
     /// Say whether this relevo can use the database, without changing it: as it is, or once
     /// `serve` migrates it (exit 0), or not (exit 1). deploy/install.sh asks before an upgrade.
@@ -242,10 +263,18 @@ async fn connect(url: &str, token: Option<String>, fingerprint: Option<String>) 
     } else {
         None
     };
+    let path = config::path(config::env)?;
+    // The adapters registered on this machine stay registered with the new server.
+    let adapters = config::saved(&path)
+        .ok()
+        .flatten()
+        .map(|c| c.adapters)
+        .unwrap_or_default();
     let config = config::Config {
         url,
         token: connect_token(token)?.trim().to_string(),
         cert,
+        adapters,
     };
     // Before the token goes out, not after.
     if let Some(warning) = config::plain_http_warning(&config.url) {
@@ -258,7 +287,6 @@ async fn connect(url: &str, token: Option<String>, fingerprint: Option<String>) 
         .map_err(|e| anyhow::anyhow!("checking the token with {}: {e}", config.url))?;
     // The check is a session of its own: end it, or it stays listed until it is forgotten.
     let _ = client.end(std::time::Duration::from_secs(2)).await;
-    let path = config::path(config::env)?;
     config::save(&path, &config)?;
     let team = people["team"].as_array().map(Vec::len).unwrap_or(0);
     let pinned = if config.cert.is_some() {
@@ -271,6 +299,23 @@ async fn connect(url: &str, token: Option<String>, fingerprint: Option<String>) 
         config.url,
         path.display()
     );
+    Ok(())
+}
+
+/// `relevo update`: what it did on stdout, what failed on stderr (and exit 1).
+async fn update_command(req: &update::Request) -> Result<()> {
+    let setup = update::Setup::this_binary()?;
+    let steps = update::command(req, &setup, config::env, db::now_unix()).await?;
+    for step in &steps {
+        if step.failed() {
+            eprintln!("{step}");
+        } else {
+            println!("{step}");
+        }
+    }
+    if steps.iter().any(update::Step::failed) {
+        std::process::exit(1);
+    }
     Ok(())
 }
 
@@ -351,6 +396,19 @@ async fn main() -> Result<()> {
             fingerprint,
         } => return connect(&url, token, fingerprint).await,
         Command::Mcp { channel } => return mcp::run(channel).await,
+        Command::Update {
+            check,
+            auto,
+            adapter,
+            path,
+        } => {
+            let req = update::Request {
+                check,
+                auto,
+                adapter: adapter.zip(path),
+            };
+            return update_command(&req).await;
+        }
         _ => {}
     }
     let db_file = db_path(cli.db, &cli.command)?;
@@ -425,6 +483,7 @@ async fn main() -> Result<()> {
             tls_name,
             tls_cert,
             tls_key,
+            dist,
         } => {
             let tls = server_tls(
                 &db_file,
@@ -433,7 +492,12 @@ async fn main() -> Result<()> {
                 tls_cert.as_deref(),
                 tls_key.as_deref(),
             )?;
-            let app = App::new(conn, Clock::system(), team_questions_per_day);
+            let dist = dist.unwrap_or_else(|| relevo::dist::dir_for(&db_file));
+            match relevo::dist::start_note(&dist, env!("CARGO_PKG_VERSION")) {
+                Ok(note) => tracing::info!("{note}"),
+                Err(warning) => tracing::warn!("{warning}"),
+            }
+            let app = App::with_dist(conn, Clock::system(), team_questions_per_day, Some(dist));
             let listener = tokio::net::TcpListener::bind(addr).await?;
             let scheme = if tls.is_some() { "https" } else { "http" };
             tracing::info!(%addr, db = %db_file, %scheme, "relevo listening");
@@ -513,6 +577,7 @@ async fn main() -> Result<()> {
         }
         Command::Connect { .. }
         | Command::Mcp { .. }
+        | Command::Update { .. }
         | Command::Backup { .. }
         | Command::CheckDb
         | Command::TlsFingerprint => {
@@ -556,7 +621,7 @@ mod tests {
     /// One test, because it changes the process environment.
     #[test]
     fn defaults_and_environment() {
-        const VARS: [&str; 7] = [
+        const VARS: [&str; 8] = [
             "RELEVO_DB",
             "RELEVO_ADDR",
             "RELEVO_TEAM_QUESTIONS_PER_DAY",
@@ -564,6 +629,7 @@ mod tests {
             "RELEVO_TLS_NAME",
             "RELEVO_TLS_CERT",
             "RELEVO_TLS_KEY",
+            "RELEVO_DIST",
         ];
         // SAFETY: no other test in this binary reads or writes the environment.
         unsafe { VARS.iter().for_each(|v| std::env::remove_var(v)) };

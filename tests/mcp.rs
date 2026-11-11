@@ -70,6 +70,9 @@ fn relevo(home: &Path) -> Command {
         .env_remove("RELEVO_TOKEN")
         .env_remove("RELEVO_CERT")
         .env_remove("RELEVO_CONTEXT")
+        .env_remove("XDG_CACHE_HOME")
+        // The automatic update has tests of its own (tests/update.rs).
+        .env("RELEVO_AUTO_UPDATE", "0")
         .kill_on_drop(true);
     cmd
 }
