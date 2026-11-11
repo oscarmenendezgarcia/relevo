@@ -41,6 +41,18 @@ export function inGitCheckout(dir: string): boolean {
   }
 }
 
+/**
+ * The relevo binaries of this process found to have no updater (before 0.4.0, where
+ * `relevo update` is an unknown subcommand): said once, then never run again for it, as
+ * the hourly throttle lives in the updater they lack.
+ */
+const noUpdater = new Set<string>();
+
+/** Whether relevo's exit says it has no `update` subcommand (clap's usage error). */
+export function hasNoUpdater(code: number | null, stderr: string): boolean {
+  return code === 2 && /unrecognized subcommand '?update'?/.test(stderr);
+}
+
 /** What the person is told; `level` as pi's `ctx.ui.notify` takes it. */
 export type Notify = (text: string, level: "info" | "warning") => void;
 
@@ -63,7 +75,7 @@ function collect(stream: NodeJS.ReadableStream | null, max = 4000): () => string
 export function autoUpdate(env: NodeJS.ProcessEnv, folder: string, notify: Notify): boolean {
   if (autoUpdateOff(env) || inGitCheckout(folder)) return false;
   const bin = findRelevo(env);
-  if (!bin) return false;
+  if (!bin || noUpdater.has(bin)) return false;
   let child;
   try {
     child = spawn(bin, ["update", "--auto", "--adapter", "pi", "--path", folder], {
@@ -77,6 +89,14 @@ export function autoUpdate(env: NodeJS.ProcessEnv, folder: string, notify: Notif
   const err = collect(child.stderr);
   child.on("error", () => {}); // Could not run it after all: nothing to say.
   child.on("close", (code) => {
+    if (hasNoUpdater(code, err())) {
+      noUpdater.add(bin);
+      notify(
+        `Your relevo (${bin}) is older than 0.4.0 and cannot update itself nor this extension: update it by hand once, and it follows the server after that.`,
+        "warning",
+      );
+      return;
+    }
     const installed = out();
     if (installed) notify(`Relevo was updated; it applies at the next start of pi.\n${installed}`, "info");
     const failed = err();

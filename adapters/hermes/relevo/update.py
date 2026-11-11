@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import subprocess
 import threading
 from pathlib import Path
@@ -52,6 +53,15 @@ LOADED = plugin_version(FOLDER)
 # The versions in the folder the person was told of (or is being told of right now).
 _told: set = set()
 _notices: set = set()
+# The relevo binaries found to have no updater (before 0.4.0, where `update` is an unknown
+# subcommand): said once, then not run again by this process, as the hourly throttle lives in the
+# updater they lack.
+_no_updater: set = set()
+
+
+def has_no_updater(code: Optional[int], stderr: str) -> bool:
+    """Whether relevo's exit says it has no `update` subcommand (clap's usage error)."""
+    return code == 2 and re.search(r"unrecognized subcommand '?update'?", stderr) is not None
 
 Tell = Callable[[str], Awaitable[Any]]
 
@@ -175,7 +185,7 @@ def start(settings: client.Settings, tell: Tell, folder: Optional[Path] = None) 
     if auto_update_off() or in_git_checkout(folder):
         return False
     relevo = find_relevo()
-    if relevo is None or not _running.acquire(blocking=False):
+    if relevo is None or relevo in _no_updater or not _running.acquire(blocking=False):
         return False
     try:
         proc = subprocess.Popen(
@@ -194,8 +204,13 @@ def start(settings: client.Settings, tell: Tell, folder: Optional[Path] = None) 
             out, err = proc.communicate()
         finally:
             _running.release()
-        _report(proc.returncode, out.decode("utf-8", "replace").strip(),
-                err.decode("utf-8", "replace").strip(), tell, loop, folder)
+        failed = err.decode("utf-8", "replace").strip()
+        if has_no_updater(proc.returncode, failed):
+            _no_updater.add(relevo)
+            logger.warning("[relevo] %s is older than 0.4.0 and cannot update itself nor this plugin: update it "
+                           "by hand once, and it follows the server after that", relevo)
+            return
+        _report(proc.returncode, out.decode("utf-8", "replace").strip(), failed, tell, loop, folder)
 
     # A daemon thread: the gateway may exit while it waits, and the update goes on without it.
     threading.Thread(target=wait, name="relevo-update", daemon=True).start()

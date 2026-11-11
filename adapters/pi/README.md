@@ -63,7 +63,7 @@ It does not run:
 - in print (`-p`) and JSON modes, which answer one prompt and exit: the next interactive or RPC session checks;
 - when the extension's folder is in a git checkout (a `.git` in it or above it), such as `adapters/pi` of a clone of this repository: replacing it would throw away what git tracks there, uncommitted work included. Update it with git.
 
-A pi extension from before 0.4.0 has no updater: install 0.4.0 once by hand, as above, and it follows the server after that.
+A pi extension from before 0.4.0 has no updater: install 0.4.0 once by hand, as above, and it follows the server after that. The same goes for a `relevo` from before 0.4.0 next to a newer extension: the extension says so once, as a warning, and does not run it again until pi restarts.
 
 ## Sessions and context
 

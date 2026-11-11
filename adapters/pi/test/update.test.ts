@@ -108,6 +108,26 @@ test("installed something and failed at something else: both are said", async ()
   assert.deepEqual(ext.levels, ["info", "warning"]);
 });
 
+test("a relevo from before 0.4.0 is said once, plainly, and not run again", async () => {
+  const c = setup();
+  // What relevo 0.3.0 answers: clap's usage error, exit status 2.
+  const clap =
+    "error: unrecognized subcommand 'update'\n\nUsage: relevo [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.";
+  const env = c.env({ STUB_ERR: clap, STUB_EXIT: "2" });
+  const ext = await start(env, c.folder);
+  await until(() => ext.notified.length > 0);
+  assert.equal(ext.notified.length, 1);
+  assert.match(ext.notified[0], /^Your relevo \(.*\) is older than 0\.4\.0 and cannot update itself/);
+  assert.doesNotMatch(ext.notified[0], /Usage:/);
+  assert.deepEqual(ext.levels, ["warning"]);
+  // The next session (a /new, /resume or /fork) runs nothing and says nothing.
+  rmSync(join(c.bin, "..", "args"));
+  const next = await start(env, c.folder);
+  await settle();
+  assert.equal(c.args(), null);
+  assert.deepEqual(next.notified, []);
+});
+
 test("RELEVO_AUTO_UPDATE=0 turns it off", async () => {
   for (const off of ["0", "false", "No", " off "]) {
     const c = setup();

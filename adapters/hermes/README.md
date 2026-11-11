@@ -109,7 +109,7 @@ It does not run:
 - with `RELEVO_AUTO_UPDATE=0` (or `false`, `no`, `off`) in the profile's env or the gateway's; `relevo update` still works by hand;
 - when the plugin's folder is in a git checkout (a `.git` in it or above it, following links), such as `adapters/hermes/relevo` of a clone of this repository: replacing it would throw away what git tracks there, uncommitted work included. Update it with git.
 
-A plugin from before 0.4.0 has no updater: install 0.4.0 once by hand, as in step 2, and it follows the server after that.
+A plugin from before 0.4.0 has no updater: install 0.4.0 once by hand, as in step 2, and it follows the server after that. The same goes for a `relevo` from before 0.4.0 next to a newer plugin: the gateway log says so once, as a warning, and the plugin does not run it again until the gateway restarts.
 
 ## How it behaves
 

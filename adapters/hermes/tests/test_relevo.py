@@ -2330,6 +2330,28 @@ class AutoUpdate(Base):
             await asyncio.sleep(0.2)
         self.assertEqual((self.runs(), home.sent), (1, []))
 
+    async def test_a_relevo_from_before_0_4_0_is_logged_once_and_not_run_again(self):
+        # What relevo 0.3.0 answers: clap's usage error, exit status 2.
+        os.environ["STUB_ERR"] = ("error: unrecognized subcommand 'update'\n\nUsage: relevo [OPTIONS] <COMMAND>\n\n"
+                                  "For more information, try '--help'.")
+        os.environ["STUB_CODE"] = "2"
+        home = _Chat()
+        runner = _Runner({"telegram": ("42", home)})
+        try:
+            with self.assertLogs(self.LOG, "WARNING") as logs:
+                self.assertTrue(await self.connected(runner).connect())
+                await self.finished()
+                await self.until(lambda: logs.output)
+                # A reconnect runs nothing and logs nothing more.
+                self.assertTrue(await self.connected(runner).connect())
+                await asyncio.sleep(0.3)
+            self.assertEqual(len(logs.output), 1, logs.output)
+            self.assertIn("is older than 0.4.0 and cannot update itself", logs.output[0])
+            self.assertNotIn("Usage:", logs.output[0])
+            self.assertEqual((self.runs(), home.sent), (1, []))
+        finally:
+            update_module._no_updater.clear()
+
     async def test_one_update_at_a_time(self):
         os.environ["STUB_SLEEP"] = "1"
         first = self.connected()
