@@ -5,11 +5,11 @@ A Hermes plugin with two parts:
 - **The `relevo` gateway platform.** Relevo becomes one more chat platform for the Hermes gateway. Each Relevo thread is a chat (chat id = thread id, a DM-like chat with the note's author); each new note arrives as a message from its author, and Hermes' reply is written back in that thread. The gateway keeps one waiting inbox request open (`wait=55`), so it answers at once, and backs off (1 s doubling to 60 s) while the server cannot be reached. When it connects, it first ends the profile's fixed session that the gateway left when it last ran (`DELETE /api/session`), so what is still pending for you comes at once, a note a gateway that died had taken and never answered included (see Sessions, below).
 - **The `relevo` toolset**: `relevo_send`, `relevo_inbox` and `relevo_thread`, the same tools as `relevo mcp` (see `docs/agents.md`), usable from any Hermes session.
 
-Files: `relevo/plugin.yaml` (manifest), `relevo/__init__.py` (registration), `relevo/adapter.py` (platform), `relevo/tools.py` (tools), `relevo/client.py` (HTTP calls and rendering, shared by both). Only Python's standard library and `httpx`, which ships with Hermes.
+Files: `relevo/plugin.yaml` (manifest), `relevo/__init__.py` (registration), `relevo/adapter.py` (platform), `relevo/tools.py` (tools), `relevo/client.py` (HTTP calls and rendering, shared by both), `relevo/update.py` (the automatic update). Only Python's standard library and `httpx`, which ships with Hermes.
 
 ## Install (for the owner)
 
-Nothing here installs itself or touches a running Hermes. These steps are yours.
+Nothing here installs itself or restarts a running Hermes. These steps are yours; after them, the plugin keeps itself up to date (see Updates, below).
 
 Use it with a Relevo server 0.3.0 or later: an older one does not say what is pending (`pending`; the plugin no longer reads 0.2.x's `waiting_for_you`), so nothing shows as pending there. Upgrading from 0.2.x: replace the plugin folder (step 2) and restart the gateway when it suits you (step 6).
 
@@ -29,6 +29,16 @@ Use it with a Relevo server 0.3.0 or later: an older one does not say what is pe
    ```
 
    For another profile, copy it into that profile's home (`~/.hermes/profiles/<name>/plugins/relevo`) and run `hermes -p <name> plugins enable relevo`.
+
+   Or install it from the release: unpack `relevo-hermes-<version>.tar.gz` (a release file, part of the dist the owner puts on the server) into the plugin folder instead of copying it:
+
+   ```
+   mkdir -p ~/.hermes/plugins/relevo
+   tar -xzf relevo-hermes-0.4.0.tar.gz -C ~/.hermes/plugins/relevo
+   hermes plugins enable relevo
+   ```
+
+   Either way the plugin then updates itself from your Relevo server (see Updates, below). A plugin folder that is a link into a clone of this repository does not: git updates it.
 
 3. **Configure it** in the profile's `~/.hermes/.env` (or through `hermes config`, which lists these variables from `plugin.yaml`):
 
@@ -74,6 +84,33 @@ Use it with a Relevo server 0.3.0 or later: an older one does not say what is pe
 
 6. **Restart the gateway when it suits you.** The gateway loads plugins and platforms when it starts, so the platform comes up at its next start (`hermes gateway restart`). Restarting interrupts what your assistants are doing at that moment, so when to do it is your call; nothing in this repository restarts it.
 
+## Updates
+
+From 0.4.0 the plugin updates itself from your Relevo server, as `relevo` does ([docs/update.md](../../docs/update.md)). When the gateway platform connects, it runs, in the background,
+
+```
+relevo update --auto --adapter hermes --path <the plugin's own folder>
+```
+
+with the `relevo` that `RELEVO_BIN` names, or else the one on `PATH`; without one it does nothing and says nothing. The gateway never waits for it, and it goes on if the gateway stops meanwhile. It gets the server and token this platform uses (`RELEVO_URL` and `RELEVO_TOKEN` of the profile's env or `config.yaml`, else the file `relevo connect` saved, the one `RELEVO_CONFIG` names if the profile sets it). `relevo` does the work: it registers the folder in that file, checks at most once an hour per machine, installs only what carries the release's signature and is newer, and swaps the folder in one step; with that, it updates the `relevo` binary and the other adapters registered on the machine.
+
+The gateway has the plugin loaded already, so it runs the old one until it is restarted. **It never restarts itself**: restarting interrupts what your assistants are doing, so when to do it is your call. When `relevo` installed something, the plugin tells you once, in a home channel of the profile (the first one that takes the message; Relevo's own is left out, since its chats are your teammates' threads), and logs it:
+
+```
+Relevo was updated on this machine. Restart the Hermes gateway to use it (`hermes gateway restart`) when it suits you: it was not restarted, so the assistants keep working meanwhile.
+
+the Hermes plugin (/home/you/.hermes/plugins/relevo): installed 0.4.0 over 0.3.0; restart the Hermes gateway to use it
+```
+
+With no home channel set (`/sethome` in a chat), the log says so. When the update fails (a folder the gateway cannot write, say), the gateway log has what `relevo` said, as a warning; nothing is sent to a chat. Otherwise it is silent. It runs again at the next connect (a restart, or the platform reconnecting), and `relevo` checks at most once an hour.
+
+It does not run:
+
+- with `RELEVO_AUTO_UPDATE=0` (or `false`, `no`, `off`) in the profile's env or the gateway's; `relevo update` still works by hand;
+- when the plugin's folder is in a git checkout (a `.git` in it or above it, following links), such as `adapters/hermes/relevo` of a clone of this repository: replacing it would throw away what git tracks there, uncommitted work included. Update it with git.
+
+A plugin from before 0.4.0 has no updater: install 0.4.0 once by hand, as in step 2, and it follows the server after that.
+
 ## How it behaves
 
 - **Sessions.** The gateway platform sends one fixed `Relevo-Session` per Hermes profile, derived from the profile's home. When the gateway stops the platform (a stop or a restart), the platform stops its waiting inbox request, then ends that session with `DELETE /api/session`, so the threads it holds show again in your other sessions at once rather than when the claims lapse 15 minutes later; this is best effort: it waits 2 seconds at most, and a server it cannot reach only leaves the claims to lapse. A gateway that dies without stopping the platform (killed, crashed, the machine lost power) cannot end it, so the platform ends it when it connects, before its first inbox request (retried with the back-off while the server cannot be reached). Either way the session starts again like any new one, from what you have handled: a note still pending for you (one nobody answered, closed or marked done, even if another of your sessions read it, or the dead gateway took it as a message and never answered) is handed over at once; one you handled meanwhile is not. When a restart interrupted the relevo chat's turn on such a note (the drain timed out, or the process died mid-turn), Hermes may resume that turn itself; the note handed over again to that chat, in the first batch after the start, then says so and tells the agent to read the thread first and answer `[SILENT]` if it is no longer pending or the chat already answered it or is working on it. It is not dropped, since Hermes may not resume the turn after all. The threads a dead gateway held are released at once, not when their claims lapse 15 minutes later: the fixed id is what lets the new start end the old session. When the gateway connects a new platform adapter before it drops the old one, the session is live in this process, so the new one does not end it and the old one leaves it to the new one; but when the old one has not managed to end an earlier start's session yet (the server could not be reached), the new one ends it, and neither hands over a note the other already did. The agent's tool calls in a turn of the relevo platform act for that same session, so its claim and its reply act for one session. Every other Hermes process (a CLI or TUI window, and the tools in turns of other platforms such as Telegram) is its own running agent, with a random id kept for the life of the process, as `docs/agents.md` asks: the gateway and those agents see each other's claims and step aside, and a `relevo_inbox` there never takes the gateway's notes. A session is general (it sees every note for you that no other session of yours holds) unless `RELEVO_CONTEXT` is set.
@@ -97,4 +134,4 @@ PYTHONDONTWRITEBYTECODE=1 RELEVO_BIN=target/release/relevo \
   ~/.hermes/hermes-agent/venv/bin/python -m unittest discover -s adapters/hermes/tests -v
 ```
 
-The tests install the plugin into a temporary Hermes home (as in step 2), load it through Hermes' own plugin discovery (and, for the test of a gateway killed right after a note reached it, run the platform in a process of its own, `tests/gateway_child.py`, from that same home), start `relevo serve` (and `relevo serve --tls`) on free ports in 7990-7999 with temporary databases, and stop them at the end. Besides the tools, the inbound and outbound messages and the sessions (a gateway killed right after a note reached it ending no session, and its next connect ending it and getting that note at once, included), they cover handing over once: an inbox answer lost on the way, through a proxy that lets the request reach the server and cuts the connection, handed over on the next answer, once, from a request that does not wait, and saying earlier notes may be missing, with two notes in the lost answer and with a note written after the loss; a thread the agent answered `[SILENT]` not handed over again in the same process (nor by a replacement adapter); and a note a relevo chat's `relevo_inbox` fetched reaching its own thread's chat once. Over https they cover the tools and the gateway loop with the certificate saved in the config or named by `RELEVO_CERT`, another certificate refused before anything reaches the server, a host the certificate does not name, a certificate that is not PEM, and plain http unchanged (one case, a certificate an office authority signed, uses `openssl` and is skipped without it). `HOME` and `HERMES_HOME` point at the temporary directory, so no real Hermes home is read or written. `HERMES_SRC` points at the Hermes source if it is not in `~/.hermes/hermes-agent`. Without `RELEVO_BIN` they use this repository's `target/release/relevo`, never a `relevo` on `PATH`, which may be older than the plugin.
+The tests install the plugin into a temporary Hermes home (as in step 2), load it through Hermes' own plugin discovery (and, for the test of a gateway killed right after a note reached it, run the platform in a process of its own, `tests/gateway_child.py`, from that same home), start `relevo serve` (and `relevo serve --tls`) on free ports in 7990-7999 with temporary databases, and stop them at the end. Besides the tools, the inbound and outbound messages and the sessions (a gateway killed right after a note reached it ending no session, and its next connect ending it and getting that note at once, included), they cover handing over once: an inbox answer lost on the way, through a proxy that lets the request reach the server and cuts the connection, handed over on the next answer, once, from a request that does not wait, and saying earlier notes may be missing, with two notes in the lost answer and with a note written after the loss; a thread the agent answered `[SILENT]` not handed over again in the same process (nor by a replacement adapter); and a note a relevo chat's `relevo_inbox` fetched reaching its own thread's chat once. Over https they cover the tools and the gateway loop with the certificate saved in the config or named by `RELEVO_CERT`, another certificate refused before anything reaches the server, a host the certificate does not name, a certificate that is not PEM, and plain http unchanged (one case, a certificate an office authority signed, uses `openssl` and is skipped without it). The automatic update is tested with a stand-in for `relevo` (a shell script that records how it was run and answers as each test says): run in the background for the plugin's folder with the profile's server and token, while the platform keeps working; what it installed told once in a home channel (the next one when the first refuses it, never Relevo's own nor another profile's) and logged; a failure logged and not told; one update at a time; and nothing run when it is turned off, without `relevo`, or for a folder in a git checkout. The home channels are listed by Hermes' own code; one test runs the real binary against a server without a dist, which says nothing. Every other test runs with `RELEVO_AUTO_UPDATE=0`. `HOME` and `HERMES_HOME` point at the temporary directory, so no real Hermes home is read or written. `HERMES_SRC` points at the Hermes source if it is not in `~/.hermes/hermes-agent`. Without `RELEVO_BIN` they use this repository's `target/release/relevo`, never a `relevo` on `PATH`, which may be older than the plugin.
