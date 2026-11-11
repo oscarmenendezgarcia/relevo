@@ -395,6 +395,47 @@ mod tests {
         assert!(!same(b"abc", b"ab"));
     }
 
+    /// Small text in `--faint` (times, counts, labels) is readable: at least 4.5:1 (WCAG AA) on
+    /// every background it sits on, in the dark theme and in the light one.
+    #[test]
+    fn faint_text_has_enough_contrast_in_both_themes() {
+        fn colours(name: &str) -> Vec<[f64; 3]> {
+            STYLE
+                .match_indices(&format!("{name}: #"))
+                .map(|(at, m)| {
+                    let hex = &STYLE[at + m.len()..at + m.len() + 6];
+                    let c = |i: usize| f64::from(u8::from_str_radix(&hex[i..i + 2], 16).unwrap());
+                    [c(0), c(2), c(4)]
+                })
+                .collect()
+        }
+        fn luminance(rgb: [f64; 3]) -> f64 {
+            let f = |c: f64| {
+                let c = c / 255.0;
+                if c <= 0.03928 {
+                    c / 12.92
+                } else {
+                    ((c + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * f(rgb[0]) + 0.7152 * f(rgb[1]) + 0.0722 * f(rgb[2])
+        }
+        let faint = colours("--faint");
+        assert_eq!(faint.len(), 2, "a dark and a light --faint");
+        for background in ["--page", "--bg", "--panel", "--panel2", "--hover"] {
+            let backgrounds = colours(background);
+            assert_eq!(backgrounds.len(), 2, "{background}");
+            for theme in 0..2 {
+                let (a, b) = (luminance(faint[theme]), luminance(backgrounds[theme]));
+                let ratio = (a.max(b) + 0.05) / (a.min(b) + 0.05);
+                assert!(
+                    ratio >= 4.5,
+                    "--faint on {background}, theme {theme}: {ratio:.2}"
+                );
+            }
+        }
+    }
+
     /// The page and its assets are self-contained: no inline script, nothing remote, and note
     /// text never reaches innerHTML (the script does not use it at all).
     #[test]

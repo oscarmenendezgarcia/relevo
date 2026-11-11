@@ -26,7 +26,7 @@ As the mockup (`Relevo · timeline (mockup)`, rev. 3), in English:
 - Dark and light (follows the system), and usable on a phone width (the side bar becomes a row of filters).
 - The favicon is the Relevo mark (`assets/brand/`).
 - When the team's server cannot be reached, a line at the top says so, with the time of the last good refresh; the threads already shown stay. A tab or filter that could not be loaded says so (never "nothing here"), and so does a conversation, with a button to try again.
-- For the keyboard and screen readers: each thread's title is a button (`aria-expanded`) that opens and closes its conversation; the tabs are a tablist (arrow keys, Home, End).
+- For the keyboard and screen readers: each thread's title is a button (`aria-expanded`) that opens and closes its conversation; the tabs are a tablist (arrow keys, Home, End). Small grey text is at least 4.5:1 on its background, in both themes.
 
 ## Not in it
 

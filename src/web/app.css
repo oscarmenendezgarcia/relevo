@@ -9,7 +9,8 @@
   --text: #e7e9ee;
   --body: #cfd3dc;
   --muted: #98a0ac;
-  --faint: #677080;
+  /* At least 4.5:1 on every background it is used on (--bg, --panel, --panel2, --page). */
+  --faint: #7f8896;
   --accent: #7c9cff;
   --hover: #0f1116;
   --tabs: rgba(11, 12, 15, .92);
@@ -32,7 +33,7 @@
     --text: #15161a;
     --body: #2c313b;
     --muted: #5b6472;
-    --faint: #7d8696;
+    --faint: #616a78;
     --accent: #4f6bed;
     --hover: #f7f8fb;
     --tabs: rgba(255, 255, 255, .92);
@@ -177,7 +178,11 @@ button { font: inherit; color: inherit; }
 /* Phone width: the side bar becomes a row of filters */
 @media (max-width: 760px) {
   body { background: var(--bg); }
-  .app { grid-template-columns: 1fr; margin: 0; border: 0; border-radius: 0; min-height: 100vh; }
+  /* The filters on top, the threads in the rest: with few threads, nothing floats mid-screen. */
+  .app {
+    grid-template-columns: 1fr; grid-template-rows: auto 1fr; align-content: start;
+    margin: 0; border: 0; border-radius: 0; min-height: 100vh;
+  }
   .side {
     border-right: 0; border-bottom: 1px solid var(--line); padding: 10px 12px;
     display: flex; gap: 6px; align-items: center; overflow-x: auto; white-space: nowrap;
