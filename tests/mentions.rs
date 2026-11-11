@@ -504,6 +504,8 @@ async fn malformed_mentions_are_bad_requests_before_the_session_counts() {
         "@bob/pagos @bob/front",
         "@bob/Pagos@ deploy",
         "@bob/.x",
+        // A mention of yourself is ignored, but its context is checked like anyone else's.
+        "@ana/.x",
         twenty_one.as_str(),
     ] {
         let (status, v) = agent.send(json!({ "text": text })).await;

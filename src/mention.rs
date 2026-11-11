@@ -21,9 +21,8 @@ pub struct Mention {
 pub fn mentions(text: &str, me: &str) -> Result<Vec<Mention>, String> {
     let mut out: Vec<Mention> = Vec::new();
     for found in scan(text) {
-        if found.name == me {
-            continue;
-        }
+        // The context is checked before the writer is skipped: `@ana/.x` is as malformed from Ana
+        // as `@bob/.x`, and saying so is what tells her the context is wrong.
         if let Some(context) = &found.context
             && !valid_context(context)
         {
@@ -31,6 +30,9 @@ pub fn mentions(text: &str, me: &str) -> Result<Vec<Mention>, String> {
                 "'@{}/{context}': a context must be {CONTEXT_FORMAT}",
                 found.written
             ));
+        }
+        if found.name == me {
+            continue;
         }
         match out.iter().find(|m| m.name == found.name) {
             Some(seen) if seen.context == found.context => {}
@@ -594,6 +596,11 @@ mod tests {
         ] {
             assert!(mentions(bad, "zoe").is_err(), "{bad}");
         }
+        // A mention of yourself is ignored, but its context is checked first: `@zoe/.x` is as
+        // malformed from Zoe as `@ana/.x`.
+        let err = mentions("@zoe/.x", "zoe").unwrap_err();
+        assert!(err.contains("'@zoe/.x': a context must be"), "{err}");
+        assert!(mentions("@zoe/x hi", "zoe").is_ok());
         let twenty: String = (0..20).map(|i| format!("@p{i:02} ")).collect();
         assert_eq!(mentions(&twenty, "zoe").unwrap().len(), 20);
         assert!(mentions(&format!("{twenty} @zoe @p00"), "zoe").is_ok());
