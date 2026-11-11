@@ -343,8 +343,9 @@ fn error(e: Error) -> String {
         }
         if code == "NO_RECIPIENTS" {
             out.push_str(
-                "\nNobody but your person would get this note: the teams it mentions have no \
-                 other active member, or nobody else is on the server. Nothing was sent.",
+                "\nNobody but your person would get this note: the only person it mentions is \
+                 your person, the teams it mentions have no other active member, or nobody else \
+                 is on the server. Nothing was sent.",
             );
         }
         if code == "TEAM_LIMIT" {

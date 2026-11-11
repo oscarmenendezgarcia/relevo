@@ -20,7 +20,7 @@ use crate::db::{
     CONTEXT_FORMAT, RESERVED_HANDLES, context_repo, random_id, rfc3339, valid_context,
 };
 use crate::error::ApiError;
-use crate::mention::{Mention, mentions};
+use crate::mention::{Mention, mentions, mentions_only};
 use crate::session::{Session, SessionOut, end, find, lapse, next_lapse, touch};
 use crate::{App, MAX_WAITS_PER_TOKEN};
 
@@ -1105,10 +1105,18 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<(SendResult, Ve
             mentions: recipients(to, &caller.handle)?,
             people_only: true,
         },
-        (None, Some(text)) => Whom {
-            mentions: mentions(text, &caller.handle).map_err(ApiError::bad_request)?,
-            people_only: false,
-        },
+        (None, Some(text)) => {
+            let mentions = mentions(text, &caller.handle).map_err(ApiError::bad_request)?;
+            // A new thread that mentions only its writer goes nowhere, not to everyone: only a
+            // note with no mention at all is for the global board.
+            if req.thread.is_none() && mentions.is_empty() && mentions_only(text, &caller.handle) {
+                return Err(ApiError::only_you());
+            }
+            Whom {
+                mentions,
+                people_only: false,
+            }
+        }
         (None, None) => Whom {
             mentions: Vec::new(),
             people_only: false,

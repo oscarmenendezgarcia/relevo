@@ -966,8 +966,8 @@ def describe_refusal(exc: RelevoError, me: Optional[str] = None) -> str:
         if isinstance(exc.details.get("valid"), list):
             text += "\n\n" + render_people(exc.details, me)
     elif exc.code == "NO_RECIPIENTS":
-        text += ("\nNobody but your person would get this note: the teams it mentions have no other active "
-                 "member, or nobody else is on the server. Nothing was sent.")
+        text += ("\nNobody but your person would get this note: the only person it mentions is your person, the "
+                 "teams it mentions have no other active member, or nobody else is on the server. Nothing was sent.")
     elif exc.code == "TEAM_LIMIT":
         text += ("\nYour person has opened as many threads to teams and the global board as a day allows. "
                  "Nothing was sent: mention the people the note is for (@handle, from `about` in the inbox), "

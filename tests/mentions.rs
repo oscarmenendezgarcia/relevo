@@ -224,11 +224,11 @@ async fn people_mentioned_open_a_direct_thread_that_names_them_all() {
 async fn a_note_without_mentions_goes_to_the_global_board() {
     let s = server(&["ana", "bob", "carl", "old"], &[("backend", &["bob"])]);
     db::deactivate(&s.app.db(), "old", T0).unwrap();
-    // Mentions in code, emails and URLs are no mentions; nor is yourself.
+    // Mentions in code, emails and URLs are no mentions.
     let v = s
         .ok(
             "ana",
-            json!({ "text": "Who knows `@bob`, pedro@empresa.com or https://x.com/@carl? @ana\n```\n@backend\n```" }),
+            json!({ "text": "Who knows `@bob`, pedro@empresa.com or https://x.com/@carl?\n```\n@backend\n```" }),
         )
         .await;
     assert_eq!(v["kind"], "global");
@@ -364,6 +364,43 @@ async fn nobody_but_you_is_no_recipients() {
     let (_, v) = alone.send("ana", json!({ "text": "@ana hello?" })).await;
     assert_eq!(code(&v), "NO_RECIPIENTS");
     assert_eq!(alone.notes(), 0);
+}
+
+#[tokio::test]
+async fn a_new_note_that_mentions_only_you_goes_nowhere_not_to_the_board() {
+    let s = server(&["ana", "bob", "carl"], &[]);
+    // A mention of yourself is no "no mention": the board takes only a note with no @ at all.
+    for text in [
+        "@ana reminder: rotate the keys",
+        "Reminder for me\n\n@Ana/pagos-api and @ana, rotate the staging keys.",
+    ] {
+        let (status, v) = s.send("ana", json!({ "text": text })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+        assert_eq!(code(&v), "NO_RECIPIENTS", "{text}: {v}");
+        assert!(
+            message(&v).contains("only person this note mentions is you"),
+            "{v}"
+        );
+        assert!(message(&v).contains("no @ at all"), "{v}");
+    }
+    assert_eq!(s.notes(), 0);
+    // Your mention in code is no mention: that note is for the board.
+    let v = s.ok("ana", json!({ "text": "`@ana` is my handle" })).await;
+    assert_eq!(v["kind"], "global");
+    // The refusals used up none of the day's five team and global threads.
+    for i in 0..4 {
+        s.ok("ana", json!({ "text": format!("Board note {i}") }))
+            .await;
+    }
+    // Next to someone else, yourself is still ignored; and so it is in a reply.
+    let v = s.ok("ana", json!({ "text": "@ana @bob keys?" })).await;
+    assert_eq!(v["kind"], "direct");
+    assert_eq!(v["to"]["people"], json!(["bob"]));
+    let r = s
+        .ok("bob", json!({ "thread": id(&v), "text": "@bob done" }))
+        .await;
+    assert_eq!(r["to"]["people"], json!([]));
+    assert_eq!(r["added"], json!([]));
 }
 
 #[tokio::test]

@@ -71,6 +71,17 @@ impl ApiError {
         )
     }
 
+    /// A new thread whose only mentions are its writer: not the global board, which takes only a
+    /// note with no mention at all.
+    pub fn only_you() -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "NO_RECIPIENTS",
+            "the only person this note mentions is you: name who it is for with @handle, or write \
+             no @ at all to post it on the global board",
+        )
+    }
+
     pub fn too_large(status: StatusCode, message: impl Into<String>) -> Self {
         Self::new(status, "TOO_LARGE", message)
     }

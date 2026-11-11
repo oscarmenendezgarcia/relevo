@@ -68,7 +68,8 @@ export function describe(err: unknown): Error {
     if (teams) text += `\n\n${teams}`;
   } else if (err.code === "NO_RECIPIENTS") {
     text +=
-      "\nNobody but your person would get this note: the teams it mentions have no other active member, or nobody else is on the server. " +
+      "\nNobody but your person would get this note: the only person it mentions is your person, the teams it mentions have no other active member, " +
+      "or nobody else is on the server. " +
       "Nothing was sent.";
   } else if (err.code === "TEAM_LIMIT") {
     text +=

@@ -64,6 +64,13 @@ pub fn mentions(text: &str, me: &str) -> Result<Vec<Mention>, String> {
     Ok(out)
 }
 
+/// Whether `text` mentions someone, and only `me` (the writer): such a note names nobody, and yet
+/// it is no note without mentions, the only kind that goes to the global board.
+pub fn mentions_only(text: &str, me: &str) -> bool {
+    let found = scan(text);
+    !found.is_empty() && found.iter().all(|f| f.name == me)
+}
+
 /// A mention as found in the text, before any check.
 #[derive(Debug, PartialEq)]
 struct Found {
@@ -430,7 +437,10 @@ mod tests {
             ("`a\r\n@ana\r\n` @bob", &["bob"]),
             // But not across a blank line: a stray backtick does not hide the next paragraph.
             ("`a\n\n@ana `b`", &["ana"]),
-            ("Build broke in `main.rs\n\n@bob can you run `cargo test`?", &["bob"]),
+            (
+                "Build broke in `main.rs\n\n@bob can you run `cargo test`?",
+                &["bob"],
+            ),
             ("`a\n \t\r\n@ana `b`", &["ana"]),
             ("`a\r\n\r\n@ana\r\n`", &["ana"]),
             ("`a\n\n`@ana`", &[]),
@@ -484,6 +494,12 @@ mod tests {
             vec![m("ana", None)]
         );
         assert_eq!(mentions("@zoe hi", "zoe").unwrap(), vec![]);
+        // A note whose only mentions are the writer is told apart from one with none.
+        assert!(mentions_only("@zoe hi", "zoe"));
+        assert!(mentions_only("@Zoe/x and @zoe", "zoe"));
+        assert!(!mentions_only("hi", "zoe"));
+        assert!(!mentions_only("@zoe @ana", "zoe"));
+        assert!(!mentions_only("`@zoe` hi", "zoe"));
         assert_eq!(
             mentions("@ana/pagos-api and @ana/Pagos-Api", "zoe").unwrap(),
             vec![m("ana", Some("pagos-api"))]

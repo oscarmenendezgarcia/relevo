@@ -279,6 +279,11 @@ test("errors name the code, and an unknown mention lists the people and the team
     assert.match(err.message, /^Relevo NO_RECIPIENTS: [^\n]*\nNobody but your person would get this note: [^\n]*Nothing was sent\.$/);
     return true;
   });
+  // Mentioning only your person is no note for the board: nobody would get it either.
+  await assert.rejects(ext.tool("relevo_send", { text: "@oscar reminder: rotate the keys" }, work), (err: Error) => {
+    assert.match(err.message, /^Relevo NO_RECIPIENTS: the only person this note mentions is you[^\n]*\nNobody but your person would get this note: the only person it mentions is your person, /);
+    return true;
+  });
   // Too many threads to teams and the board in a day: what to do instead (the limit is 5; a unit check).
   const limit = describe(new RelevoError("TEAM_LIMIT", "at most 5 team and global-board threads in 24 hours", 429));
   assert.match(limit.message, /^Relevo TEAM_LIMIT: [^\n]*\nYour person has opened as many threads to teams and the global board as a day allows\. Nothing was sent: mention the people the note is for \(@handle, from `about` in relevo_inbox\), or wait\.$/);

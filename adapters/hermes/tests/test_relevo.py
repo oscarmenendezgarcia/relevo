@@ -1145,8 +1145,13 @@ class Tools(Base):
         try:
             alone = tools.relevo_send({"text": "@solo note to self"})
             self.assertTrue(alone.startswith("Error: Relevo refused it: NO_RECIPIENTS"), alone)
-            self.assertIn("\nNobody but your person would get this note: the teams it mentions have no other active "
-                          "member, or nobody else is on the server. Nothing was sent.", alone)
+            self.assertIn("\nNobody but your person would get this note: the only person it mentions is your person, "
+                          "the teams it mentions have no other active member, or nobody else is on the server. "
+                          "Nothing was sent.", alone)
+            # Mentioning only Oscar is no note for the board.
+            me_only = tools.relevo_send({"text": "@oscar reminder: rotate the keys"})
+            self.assertTrue(me_only.startswith("Error: Relevo refused it: NO_RECIPIENTS: the only person this note "
+                                               "mentions is you"), me_only)
             # Now in two teams, @team is not one: the server says which.
             ambiguous = tools.relevo_send({"text": "@team hello"})
             self.assertTrue(ambiguous.startswith("Error: Relevo refused it: BAD_REQUEST: @team means your team, and "
