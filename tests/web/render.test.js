@@ -4,7 +4,7 @@
 'use strict';
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { parseNote, parseInline, toDom, withoutTitle, relative } = require(
+const { parseNote, parseInline, toDom, withoutTitle, shownTitle, pickKey, relative, absolute } = require(
   path.join(__dirname, '..', '..', 'src', 'web', 'app.js')
 );
 
@@ -148,6 +148,35 @@ check('the title line is not shown twice', () => {
   assert.equal(withoutTitle('# Refunds\nbody', 'Refunds'), 'body');
   assert.equal(withoutTitle('\nRefunds\nbody', 'Refunds'), 'body');
   assert.equal(withoutTitle('Other\nbody', 'Refunds'), 'Other\nbody');
+  // A first line over 80 characters: the server cut the title, the line starts with it.
+  const long = '@oscar Https-callback-failure-in-refunds-service-production-eu-west-1-ProcessRefund-handler';
+  const title = long.slice(0, 80);
+  assert.equal(withoutTitle(long + '\nbody', title), 'body');
+  assert.equal(withoutTitle('', ''), '');
+  assert.equal(withoutTitle('body', ''), 'body');
+});
+
+check('titles: cut ones end in an ellipsis, leading mentions go', () => {
+  const long = 'Https-callback-failure-in-refunds-service-production-eu-west-1-ProcessRefund-handler-x';
+  assert.equal(shownTitle(long.slice(0, 80), long), long.slice(0, 80) + '…');
+  assert.equal(shownTitle('Refunds', '# Refunds\nbody'), 'Refunds');
+  assert.equal(shownTitle('@oscar can you review it?', '@oscar can you review it?'), 'Can you review it?');
+  assert.equal(shownTitle('@product, @ana/pagos: who owns it?', '@product, @ana/pagos: who owns it?'), 'Who owns it?');
+  assert.equal(shownTitle('@ana', '@ana'), '@ana');
+  assert.equal(shownTitle('ana@example.com is down', 'ana@example.com is down'), 'ana@example.com is down');
+});
+
+check('the key: from the address, else what the tab kept', () => {
+  assert.equal(pickKey('#k=abc', 'old'), 'abc');
+  assert.equal(pickKey('', 'old'), 'old');
+  assert.equal(pickKey('#x=1', ''), '');
+  assert.equal(pickKey(undefined, undefined), '');
+});
+
+check('absolute times are in English', () => {
+  const t = absolute(new Date(2026, 10, 11, 15, 31).toISOString());
+  assert.match(t, /^Wednesday,? 11 November 2026/);
+  assert.match(t, /15:31/);
 });
 
 check('relative times', () => {

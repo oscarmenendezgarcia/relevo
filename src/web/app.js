@@ -176,14 +176,38 @@ function renderNote(text, doc, extra) {
   return div;
 }
 
-/// The note without its first line when that line is the thread's title (shown above it).
-function withoutTitle(text, title) {
+/// The first line that is not blank, as the server makes the title of it (docs/protocol.md:
+/// trimmed, without leading `#`).
+function titleLine(text) {
   const lines = String(text).split('\n');
   const first = lines.findIndex((l) => l.trim() !== '');
-  if (first >= 0 && lines[first].trim().replace(/^#+/, '').trim() === title) {
-    return lines.slice(first + 1).join('\n');
-  }
+  return { lines, first, line: first >= 0 ? lines[first].trim().replace(/^#+/, '').trim() : '' };
+}
+
+/// The note without its first line when the thread's title was made of it (shown above it). The
+/// server cuts a title to 80 characters: the line then starts with it.
+function withoutTitle(text, title) {
+  const { lines, first, line } = titleLine(text);
+  if (title && first >= 0 && line.startsWith(title)) return lines.slice(first + 1).join('\n');
   return text;
+}
+
+const LEADING_MENTIONS = /^(?:@[A-Za-z0-9][A-Za-z0-9_-]{1,31}(?:\/[A-Za-z0-9._@/-]*)?[\s,:;]*)+/;
+
+/// The title as shown: without the @mentions it starts with (who it is for is in the line above
+/// it), and ending in '…' when the server cut it.
+function shownTitle(title, text) {
+  const { line } = titleLine(text);
+  const cut = line.length > title.length && line.startsWith(title);
+  let shown = title.replace(LEADING_MENTIONS, '');
+  if (!shown.trim()) shown = title;
+  else if (shown !== title) shown = shown[0].toUpperCase() + shown.slice(1);
+  return shown + (cut ? '…' : '');
+}
+
+/// The key of this tab: from the address (`#k=`) when it has one, else what this tab kept.
+function pickKey(hash, kept) {
+  return new URLSearchParams(String(hash || '').replace(/^#/, '')).get('k') || kept || '';
 }
 
 // ---------- time ----------
@@ -213,17 +237,45 @@ function relative(iso, now) {
 
 function absolute(iso) {
   const d = new Date(iso);
-  return d.toLocaleString(undefined, { dateStyle: 'full', timeStyle: 'short' });
+  // In English, as the rest of the page, whatever the system's language.
+  return d.toLocaleString('en-GB', { dateStyle: 'full', timeStyle: 'short' });
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { parseNote, parseInline, toDom, renderNote, withoutTitle, relative };
+  module.exports = {
+    parseNote,
+    parseInline,
+    toDom,
+    renderNote,
+    withoutTitle,
+    shownTitle,
+    pickKey,
+    relative,
+    absolute,
+  };
 }
 
 // ---------- the page ----------
 
 if (typeof document !== 'undefined') {
-  const KEY = new URLSearchParams(location.hash.slice(1)).get('k') || '';
+  // The key stays in this tab (sessionStorage: it survives a reload) and leaves the address at
+  // once, so it is not kept in the history, restored with the session, synced or shared.
+  const KEY = (() => {
+    let kept = '';
+    try {
+      kept = sessionStorage.getItem('relevo-web-key') || '';
+    } catch (e) {
+      kept = '';
+    }
+    const key = pickKey(location.hash, kept);
+    try {
+      if (key) sessionStorage.setItem('relevo-web-key', key);
+    } catch (e) {
+      // Storage refused: the key lives in this page only, and a reload needs the address again.
+    }
+    if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+    return key;
+  })();
   const REFRESH_MS = 30000;
   const $ = (id) => document.getElementById(id);
   const state = {
@@ -538,7 +590,7 @@ if (typeof document !== 'undefined') {
     head.append(el('b', '', nameOf(t.from)), el('span', 'h', '@' + t.from + ' → ' + target(t)));
     head.append(timeEl(first.created_at));
     content.append(head, el('div', 'via', 'via ' + via(first)));
-    content.append(el('div', 'title', t.title));
+    content.append(el('div', 'title', shownTitle(t.title, first.text)));
     const rest = withoutTitle(first.text, t.title);
     if (rest.trim()) {
       content.append(renderNote(rest + (first.truncated ? '…' : ''), document, 'body clip'));
