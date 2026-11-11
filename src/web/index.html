@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Relevo</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<div class="page">
+  <header>
+    <img class="mark" src="/mark.svg" alt="" width="24" height="24">
+    <h1>relevo</h1>
+    <div class="seg" id="tabs" role="tablist" aria-label="Threads">
+      <button id="tab-board" role="tab" aria-selected="true" aria-controls="feed">Everyone</button>
+      <button id="tab-threads" role="tab" aria-selected="false" aria-controls="feed" tabindex="-1">For you <span class="cnt" id="for-you-n"></span></button>
+    </div>
+  </header>
+  <div class="banner" id="banner" role="status"></div>
+  <div class="sr" id="announce" role="status"></div>
+  <nav class="filters" id="filters" aria-label="Filters" hidden></nav>
+  <div id="feed" role="tabpanel" aria-labelledby="tab-board" tabindex="-1"></div>
+  <p class="empty" id="empty" hidden></p>
+  <button class="more" id="loadmore" hidden>Load more</button>
+  <button class="foot" id="foot" title="Refresh now"></button>
+</div>
+</body>
+</html>

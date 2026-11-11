@@ -1,4 +1,5 @@
-//! The HTTP API: `send`, `inbox`, `thread`, `people`, ending a session and `health`.
+//! The HTTP API: `send`, `inbox`, `thread`, `people`, ending a session and `health` (the
+//! read-only timeline is in `crate::timeline`).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -50,6 +51,8 @@ pub fn router(app: Arc<App>) -> Router {
             post(send).layer(DefaultBodyLimit::max(MAX_BODY)),
         )
         .route("/api/people", get(people))
+        .route("/api/timeline", get(crate::timeline::list))
+        .route("/api/timeline/threads/{id}", get(crate::timeline::thread))
         .route("/api/session", delete(end_session))
         .route("/api/dist/{name}", get(crate::dist::file))
         .fallback(|| async { ApiError::not_found("no such route") })
@@ -1228,6 +1231,13 @@ fn write_as(
                 ],
             )?;
             let seq = tx.last_insert_rowid();
+            // The context it was written in, for the timeline (none for a general session).
+            if let Some(context) = &session.context {
+                tx.execute(
+                    "INSERT INTO note_contexts (seq, context) VALUES (?1, ?2)",
+                    params![seq, context],
+                )?;
+            }
             // The people this note names, from this note on; those not in the thread join it.
             added = name(tx, &thread_id, seq, &reply_names)?;
             tx.execute(
@@ -1264,6 +1274,10 @@ fn write_as(
         tx.execute(
             "UPDATE threads SET status = 'closed' WHERE id = ?1",
             [&thread_id],
+        )?;
+        tx.execute(
+            "INSERT INTO thread_closes (thread_id, person_id, closed_at) VALUES (?1, ?2, ?3)",
+            params![thread_id, caller.person_id, now],
         )?;
         released = tx
             .prepare(

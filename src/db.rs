@@ -199,6 +199,24 @@ CREATE TABLE IF NOT EXISTS thread_teams (
     name      TEXT NOT NULL,
     PRIMARY KEY (thread_id, name)
 );
+-- What the timeline (`relevo web`) shows that nothing else kept. Tables of their own, not
+-- columns, so that layout 7 keeps its version: every layout-7 database gets them when it is
+-- opened, with no migration. The context of the session that wrote a note, when it had one (a
+-- note with no row was written by a general session, or before these tables); who closed a
+-- thread, and when (a thread closed before them has no row).
+CREATE TABLE IF NOT EXISTS note_contexts (
+    seq     INTEGER PRIMARY KEY REFERENCES notes(seq),
+    context TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS thread_closes (
+    thread_id TEXT PRIMARY KEY REFERENCES threads(id),
+    person_id INTEGER NOT NULL REFERENCES people(id),
+    closed_at INTEGER NOT NULL
+);
+-- The timeline reads a person's threads by latest note, newest first, a page at a time, and
+-- whether they wrote in a thread.
+CREATE INDEX IF NOT EXISTS participants_timeline ON participants(person_id, last_seq);
+CREATE INDEX IF NOT EXISTS notes_by_thread_author ON notes(thread_id, author_id);
 ";
 
 /// Names no person nor team may take: 0.3's whole team, which the deprecated `to` still reads

@@ -1,0 +1,132 @@
+/* relevo web: the timeline (docs/web.md, docs/design/web-sketch.html). System fonts only; dark
+   and light follow the system. All text is at least 4.5:1 on its background. */
+:root {
+  color-scheme: dark light;
+  --bg: #0b0c0f; --text: #e7e9ee; --body: #b9bec8; --faint: #7f8896; --line: #1c1f26;
+  --soft: #14161b; --need: #f5c451; --mention: #a9bcff; --focus: #7c9cff;
+  --pill: #f5c451; --pill-text: #1a1405; --pill-dot: rgba(26, 20, 5, .7);
+  --tag: #c9b8ff; --tag-bg: #1f1b2c;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #ffffff; --text: #15161a; --body: #4a5160; --faint: #616a78; --line: #eceef2;
+    --soft: #f5f6f8; --need: #9e6400; --mention: #3b55d9; --focus: #4f6bed;
+    --pill: #fde4a1; --pill-text: #5c3a00; --pill-dot: #b07200;
+    --tag: #5b3fc4; --tag-bg: #f1ecff;
+  }
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 4px; }
+[hidden] { display: none !important; }
+.sr {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.page { max-width: 720px; margin: 0 auto; padding: 28px 20px 64px; }
+
+/* Header: the mark, and Everyone | For you */
+header { display: flex; align-items: center; gap: 10px; margin-bottom: 28px; }
+.mark { width: 24px; height: 24px; display: block; }
+h1 { font-size: 1em; font-weight: 700; margin: 0; }
+.seg { margin-left: auto; display: flex; gap: 2px; background: var(--soft); padding: 3px; border-radius: 9px; }
+.seg button { font-size: 13.5px; color: var(--faint); padding: 5px 12px; border-radius: 7px; }
+.seg button[aria-selected="true"] { background: var(--bg); color: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, .25); }
+.cnt { color: var(--need); font-variant-numeric: tabular-nums; margin-left: 3px; font-weight: 600; }
+.cnt:empty { display: none; }
+/* The line of a failed refresh. Its space is always reserved, so nothing below it moves when a
+   refresh fails and works again; it is the body text's colour, not the amber of the pill: it
+   asks for nothing. */
+.banner { margin: -12px 0 22px; min-height: 1.5em; font-size: 13px; color: var(--text); }
+
+/* For you's filters: text, with counts */
+.filters { display: flex; gap: 4px; flex-wrap: wrap; margin: -12px 0 22px; font-size: 13px; }
+.filters button { color: var(--faint); padding: 4px 10px; border-radius: 7px; }
+.filters button[aria-pressed="true"] { background: var(--soft); color: var(--text); }
+.filters b { font-weight: 500; color: var(--faint); margin-left: 4px; font-variant-numeric: tabular-nums; }
+.filters .sep { width: 1px; background: var(--line); margin: 4px 6px; }
+
+/* Groups */
+h2 { font-size: 12.5px; font-weight: 600; color: var(--faint); margin: 0 0 6px; }
+h2 .n { color: var(--need); font-variant-numeric: tabular-nums; margin-left: 4px; }
+section + section { margin-top: 32px; }
+
+/* A row */
+.row { display: grid; grid-template-columns: 28px 1fr; gap: 12px; padding: 14px 0; border-top: 1px solid var(--line); cursor: pointer; }
+.list > .row:first-child { border-top: 0; }
+.row > div { min-width: 0; overflow-wrap: anywhere; }
+.av {
+  width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center;
+  font-size: 12px; font-weight: 700; color: #0b0c0f; margin-top: 1px;
+}
+.c0 { background: #93c5fd; } .c1 { background: #f9a8d4; } .c2 { background: #86efac; }
+.c3 { background: #c4b5fd; } .c4 { background: #fcd34d; } .c5 { background: #fdba74; }
+.c6 { background: #67e8f9; } .c7 { background: #fca5a5; }
+.meta { display: flex; gap: 7px; flex-wrap: wrap; font-size: 13px; color: var(--faint); align-items: baseline; }
+.meta b { color: var(--text); font-weight: 600; }
+.meta time { margin-left: auto; font-variant-numeric: tabular-nums; white-space: nowrap; }
+h3 { font-size: 1em; margin: 1px 0 0; letter-spacing: -0.005em; }
+h3 button { font-weight: 600; text-align: left; }
+.excerpt, .answer {
+  color: var(--body); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.excerpt { max-width: 65ch; }
+.excerpt p, .answer p { display: inline; margin: 0; }
+.answer { margin-top: 6px; font-size: 14px; }
+.answer b, .convo .who b { color: var(--text); font-weight: 600; }
+.closed .av { opacity: .62; }
+.closed h3, .closed .meta b { color: var(--body); }
+.closed .excerpt, .closed .answer { color: var(--faint); }
+.closed .answer b { color: var(--body); }
+
+/* The three kinds of mark: the status (the only filled shape), tags (where it went), labels */
+.chips { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
+.status {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600;
+  padding: 2px 10px 2px 8px; border-radius: 999px; background: var(--pill); color: var(--pill-text);
+}
+.status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--pill-dot); }
+.tag { font-size: 12px; padding: 1px 7px; border-radius: 4px; background: var(--tag-bg); color: var(--tag); font-family: var(--mono); }
+.tag::before { content: "→ "; font-family: var(--sans); }
+.label { color: var(--faint); font-size: 13px; }
+.label.closed-label {
+  text-transform: uppercase; letter-spacing: .06em; font-size: 10.5px; font-weight: 600;
+  border: 1px solid var(--line); padding: 0 5px; border-radius: 3px;
+}
+
+/* An open conversation */
+.convo { margin-top: 12px; padding-left: 12px; border-left: 2px solid var(--line); display: grid; gap: 12px; cursor: auto; }
+.convo .who { font-size: 13px; color: var(--faint); }
+.convo .md { color: var(--body); margin-top: 2px; }
+.convo .retry { color: var(--text); text-decoration: underline; text-underline-offset: 3px; margin-left: 4px; }
+
+.empty { color: var(--faint); margin: 0; padding: 14px 0; }
+.more, .foot { display: block; margin: 28px auto 0; font-size: 12.5px; color: var(--faint); }
+
+/* Note text, as the safe renderer builds it */
+.md p { margin: 0 0 6px; }
+.md p:last-child { margin-bottom: 0; }
+code { font-family: var(--mono); font-size: 12.5px; background: var(--soft); padding: 1px 4px; border-radius: 4px; }
+.md pre { font-family: var(--mono); font-size: 12.5px; background: var(--soft); border-radius: 6px; padding: 8px 10px; margin: 6px 0; overflow-x: auto; }
+.md pre code { padding: 0; }
+.mention { color: var(--mention); }
+
+/* Motion, minimal: a conversation the person opens fades in; a row new or grown on a refresh
+   gets a tint that fades out. */
+.convo.opening { animation: open 150ms ease-out; }
+@keyframes open { from { opacity: 0; transform: translateY(4px); } }
+.row.fresh { animation: tint 1s ease-out; }
+@keyframes tint {
+  from { background: var(--soft); box-shadow: -12px 0 0 var(--soft), 12px 0 0 var(--soft); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .convo.opening { animation: none; }
+}
+@media (hover: hover) {
+  .seg button:hover, .filters button:hover, .more:hover, .foot:hover { color: var(--text); }
+  .row:hover h3 button { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+}

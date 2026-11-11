@@ -107,6 +107,16 @@ enum Command {
         #[arg(long, value_name = "SHA256")]
         fingerprint: Option<String>,
     },
+    /// Open your timeline in the browser: the board and your threads, read only (it delivers,
+    /// handles and claims nothing). Serves it on 127.0.0.1 until Ctrl-C.
+    Web {
+        /// The local port [default: a free one].
+        #[arg(long)]
+        port: Option<u16>,
+        /// Only print the address; do not open a browser.
+        #[arg(long)]
+        no_open: bool,
+    },
     /// Serve MCP on stdin and stdout, for Claude Code and any MCP client.
     Mcp {
         /// Push new notes as Claude Code channel events (keeps an inbox request waiting).
@@ -430,6 +440,7 @@ async fn main() -> Result<()> {
             fingerprint,
         } => return connect(&url, token, fingerprint).await,
         Command::Mcp { channel } => return mcp::run(channel).await,
+        Command::Web { port, no_open } => return relevo::web::run(port, no_open).await,
         Command::Update {
             check,
             auto,
@@ -658,6 +669,7 @@ async fn main() -> Result<()> {
         }
         Command::Connect { .. }
         | Command::Mcp { .. }
+        | Command::Web { .. }
         | Command::Update { .. }
         | Command::Backup { .. }
         | Command::CheckDb

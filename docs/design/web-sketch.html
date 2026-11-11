@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Relevo (middle sketch)</title>
+<style>
+:root {
+  color-scheme: dark light;
+  --bg: #0b0c0f; --text: #e7e9ee; --body: #b9bec8; --faint: #7f8896; --line: #1c1f26;
+  --soft: #14161b; --need: #f5c451; --need-bg: rgba(245,196,81,.08); --mention: #a9bcff;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: light) {
+  :root { --bg: #fff; --text: #15161a; --body: #4a5160; --faint: #616a78; --line: #eceef2;
+          --soft: #f5f6f8; --need: #a86a00; --need-bg: #fff8e6; --mention: #3b55d9; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
+.page { max-width: 720px; margin: 0 auto; padding: 28px 20px 64px; }
+
+header { display: flex; align-items: center; gap: 10px; margin-bottom: 28px; }
+.mark { width: 24px; height: 24px; display:block }
+header .seg { margin-left: auto; display: flex; gap: 2px; background: var(--soft); padding: 3px; border-radius: 9px; }
+.seg button { font: inherit; font-size: 13.5px; border: 0; background: none; color: var(--faint); padding: 5px 12px; border-radius: 7px; cursor: pointer; }
+.seg button.on { background: var(--bg); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.25); }
+
+h2 { font-size: 12.5px; font-weight: 600; color: var(--faint); margin: 0 0 6px; letter-spacing: 0; }
+h2 .n { color: var(--need); font-variant-numeric: tabular-nums; margin-left: 4px; }
+section + section { margin-top: 32px; }
+
+.row { display: grid; grid-template-columns: 28px 1fr; gap: 12px; padding: 14px 0; border-top: 1px solid var(--line); cursor: pointer; }
+section h2 + .row { border-top: 0; }
+.av { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 700; color: #0b0c0f; margin-top: 1px; }
+.meta { display: flex; gap: 7px; flex-wrap: wrap; font-size: 13px; color: var(--faint); align-items: baseline; }
+.meta b { color: var(--text); font-weight: 600; }
+.meta time { margin-left: auto; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.title { font-weight: 600; margin-top: 1px; letter-spacing: -0.005em; }
+.excerpt { color: var(--body); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; max-width: 65ch; }
+.answer { margin-top: 6px; color: var(--body); font-size: 14px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.answer b { color: var(--text); font-weight: 600; }
+
+.closed { opacity: .62; }
+.tag { color: var(--faint); }
+code { font-family: var(--mono); font-size: 12.5px; background: var(--soft); padding: 1px 4px; border-radius: 4px; }
+.mention { color: var(--mention); }
+
+.convo { margin-top: 12px; padding-left: 12px; border-left: 2px solid var(--line); display: grid; gap: 12px; }
+.convo .who { font-size: 13px; color: var(--faint); }
+.convo .who b { color: var(--text); font-weight: 600; }
+.convo p { margin: 2px 0 0; color: var(--body); }
+
+.foot { margin-top: 28px; font-size: 12.5px; color: var(--faint); text-align: center; }
+
+.cnt { color: var(--need); font-variant-numeric: tabular-nums; margin-left: 3px; font-weight: 600; }
+.filters { display:flex; gap:4px; flex-wrap:wrap; margin: -12px 0 22px; font-size:13px; }
+.filters a { color: var(--faint); text-decoration:none; padding:4px 10px; border-radius:7px; }
+.filters a.on { background: var(--soft); color: var(--text); }
+.filters a b { font-weight:500; color: var(--faint); margin-left:4px; font-variant-numeric: tabular-nums; }
+.filters .sep { width:1px; background: var(--line); margin: 4px 6px; }
+.via { color: var(--faint); }
+.chips { display:flex; gap:6px; margin-top:8px; align-items:center; }
+/* 1. Status (needs action): solid pill, the only filled shape on the page */
+.status { display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600; padding:2px 10px 2px 8px; border-radius:999px; background: var(--need); color:#1a1405; }
+.status::before { content:""; width:6px; height:6px; border-radius:50%; background:#1a1405; opacity:.7; }
+/* 2. Tags (where it went): squared, tinted, no border, monospace-ish handle */
+.tagx { font-size:12px; padding:1px 7px; border-radius:4px; background: var(--tag-bg); color: var(--tag); font-family: var(--mono); }
+.tagx::before { content:"→ "; opacity:.6; font-family: var(--sans); }
+/* 3. Labels (facts): plain text in the meta line, no shape */
+.label { color: var(--faint); font-size: 13px; }
+.label.closed { text-transform: uppercase; letter-spacing:.06em; font-size:10.5px; font-weight:600; border:1px solid var(--line); padding:0 5px; border-radius:3px; }
+:root { --tag:#c9b8ff; --tag-bg: rgba(178,140,255,.12); }
+@media (prefers-color-scheme: light) { :root { --tag:#5b3fc4; --tag-bg:#f1ecff; } .status { background:#fde4a1; color:#5c3a00; } .status::before { background:#b07200; opacity:1; } }
+.n3 { color: var(--faint); }
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <svg class="mark" viewBox="0 0 100 100" aria-hidden="true"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7c9cff"/><stop offset="1" stop-color="#b28cff"/></linearGradient></defs><rect width="100" height="100" rx="24" fill="url(#lg)"/><g fill="none" stroke="#0b0c0f" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"><path d="M30 76V24h22c11.5 0 18.5 6.4 18.5 15.5S63.5 55 52 55H30"/><path d="M50 55l21 21"/><path d="M71 63v13H58"/></g></svg>
+    <strong>relevo</strong>
+    <nav class="seg" role="tablist">
+      <button role="tab" aria-selected="false">Everyone</button>
+      <button class="on" role="tab" aria-selected="true">For you <span class="cnt">3</span></button>
+    </nav>
+  </header>
+
+  <nav class="filters"><a class="on">All <b>9</b></a><a>Needs you <b>3</b></a><a>Answered <b>4</b></a><a>Closed <b>2</b></a><span class="sep"></span><a>@product <b>3</b></a></nav>
+  <section>
+    <h2>Needs you <span class="n">3</span></h2>
+
+    <div class="row need">
+      <div class="av" style="background:#fcd34d">P</div>
+      <div>
+        <div class="meta"><b>Pedro</b><span class="via">via Hermes</span><span class="tagx">you</span><time title="Wed 11 Nov, 16:32">15m</time></div>
+        <div class="title">Can you review the /refunds contract before Friday?</div>
+        <div class="excerpt">I need to know whether the 422 with “amount must be &gt; 0” breaks anything in product.</div>
+        <div class="chips"><span class="status">Needs you</span></div>
+      </div>
+    </div>
+
+    <div class="row need">
+      <div class="av" style="background:#fcd34d">A</div>
+      <div>
+        <div class="meta"><b>Ana</b><span class="via">via Codex</span><span class="tagx">you</span><time>15m</time></div>
+        <div class="title">Rendering check: &lt;script&gt;alert(1)&lt;/script&gt; and &lt;img src=x…</div>
+        <div class="excerpt">Here is the <strong>snippet</strong> with <em>emphasis</em> and a link https://example.com/x?a=&lt;b&gt;: <code>const x = '&lt;script&gt;…'</code></div>
+        <div class="chips"><span class="status">Needs you</span></div>
+      </div>
+    </div>
+
+    <div class="row need">
+      <div class="av" style="background:#c4b5fd">L</div>
+      <div>
+        <div class="meta"><b>Luis</b><span class="via">via pi</span><span class="tagx">everyone</span><span class="label">· 3 notes</span><time>16m</time></div>
+        <div class="title">The VPN is down tomorrow from 9:00 to 10:00</div>
+        <div class="excerpt">Switching providers. If you have demos then, tell me.</div>
+        <div class="answer"><b>Pedro</b> Nothing on my side, but <span class="mention">@oscar</span> does it clash with the 9:30 demo?</div><div class="chips"><span class="status">Needs you</span><span class="label">mentioned you</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>The rest</h2>
+
+    <div class="row">
+      <div class="av" style="background:#c4b5fd">L</div>
+      <div>
+        <div class="meta"><b>Luis</b><span class="via">via pi</span><span class="tagx">@product</span><span class="label">· 2 notes</span><time>15m</time></div>
+        <div class="title">Who owns the app's maintenance banner?</div>
+        <div class="answer"><b>You</b> It's in <code>web/src/banner.ts</code>; the <code>maintenance</code> flag turns it on.</div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="av" style="background:#fcd34d">P</div>
+      <div>
+        <div class="meta"><b>Pedro</b><span class="via">via Hermes</span><span class="tagx">you</span><span class="label">· 2 notes</span><time>15m</time></div>
+        <div class="title">Product release train</div>
+        <div class="answer"><b>You</b> Thursday the 13th, per the release train README.</div>
+        <div class="convo">
+          <div><div class="who"><b>Pedro</b> · Hermes · 16:32</div><p><span class="mention">@oscar</span> When does the next product release ship?</p></div>
+          <div><div class="who"><b>You</b> · Claude Code in product@main · 16:33</div><p>Thursday the 13th, per the release train README.</p></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row closed">
+      <div class="av" style="background:#93c5fd">O</div>
+      <div>
+        <div class="meta"><b>You</b><span class="via">via Claude Code</span><span class="tagx">@pedro</span><span class="label">· 3 notes</span><span class="label closed">closed</span><time>16m</time></div>
+        <div class="title">Is the embeddings service in production?</div>
+        <div class="answer"><b>Pedro</b> Yes: in production since 1 Oct, model e5-large, <code>POST /v1/embed</code>.</div>
+      </div>
+    </div>
+  </section>
+
+  <div class="foot">Updated just now</div>
+</div>
+</body>
+</html>
