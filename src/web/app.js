@@ -783,7 +783,10 @@ if (typeof document !== 'undefined') {
       p.sig = sig;
       return p;
     });
-    // Moves as few nodes as it can: those already in place stay (and keep focus and selection).
+    // Takes out what is gone or redrawn first, so the posts that stay never move (moving a node
+    // detaches it, and it loses focus and selection) unless the order changed.
+    const keep = new Set(nodes);
+    for (const p of [...feed.children]) if (!keep.has(p)) p.remove();
     nodes.forEach((n, i) => {
       const at = feed.children[i];
       if (at !== n) feed.insertBefore(n, at || null);

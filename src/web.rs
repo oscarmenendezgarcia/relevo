@@ -347,7 +347,7 @@ pub async fn run(port: Option<u16>, no_open: bool) -> Result<()> {
     }
     tokio::select! {
         _ = crate::serve::serve(listener, router(web.clone()), None, crate::serve::Limits::default()) => {}
-        _ = tokio::signal::ctrl_c() => {}
+        _ = stop_signal() => {}
     }
     web.drop_launcher();
     Ok(())
@@ -379,6 +379,31 @@ async fn open_browser(file: &FsPath) -> bool {
         },
         Err(_) => false,
     }
+}
+
+/// Resolves when SIGINT, SIGTERM or SIGHUP comes (a closed terminal sends SIGHUP), so the
+/// launcher file holding the key is removed however `relevo web` is stopped.
+#[cfg(unix)]
+async fn stop_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+    let (Ok(mut term), Ok(mut hup)) = (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::hangup()),
+    ) else {
+        let _ = tokio::signal::ctrl_c().await;
+        return;
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
+        _ = hup.recv() => {}
+    }
+}
+
+/// Resolves on Ctrl-C.
+#[cfg(not(unix))]
+async fn stop_signal() {
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 #[cfg(test)]
