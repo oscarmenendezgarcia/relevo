@@ -241,6 +241,31 @@ function absolute(iso) {
   return d.toLocaleString('en-GB', { dateStyle: 'full', timeStyle: 'short' });
 }
 
+/// Every page the person has loaded, asked again: the first page, then on with `before` until past
+/// the oldest thread shown. `shown` threads are shown, `shownCursor` is the cursor of the last
+/// page loaded (null when it was the last page). `ask(before, limit)` answers one page, or null
+/// when the answer is not wanted any more (then so is this). Returns the first answer, every
+/// thread (once) and the cursor of the last page asked.
+async function askShown(ask, shown, shownCursor) {
+  const limit = Math.min(50, Math.max(20, shown));
+  const bound = !shown ? Infinity : shownCursor ? Number(shownCursor) : -Infinity;
+  const ids = new Set();
+  const threads = [];
+  let first = null;
+  let cursor = null;
+  do {
+    const v = await ask(cursor, limit);
+    if (!v) return null;
+    if (!first) first = v;
+    v.threads.forEach((t) => {
+      if (!ids.has(t.id)) threads.push(t);
+      ids.add(t.id);
+    });
+    cursor = v.cursor;
+  } while (cursor && Number(cursor) > bound);
+  return { first, threads, cursor };
+}
+
 if (typeof module === 'object' && module.exports) {
   module.exports = {
     parseNote,
@@ -250,6 +275,7 @@ if (typeof module === 'object' && module.exports) {
     withoutTitle,
     shownTitle,
     pickKey,
+    askShown,
     relative,
     absolute,
   };
@@ -281,15 +307,25 @@ if (typeof document !== 'undefined') {
   const state = {
     tab: 'board',
     filter: { show: 'all' },
+    // The latest answer (for the side bar), and the threads of the view shown.
     data: null,
     threads: [],
     cursor: null,
     names: {},
     open: new Set(),
     convos: new Map(),
+    // Conversations being loaded, and those whose last load failed.
+    convoLoading: new Set(),
+    convoFailed: new Set(),
     lastOk: null,
     lastTry: 0,
-    busy: false,
+    // Each view (tab and filter) the person picks is a new generation: an answer for an older
+    // one is dropped when it comes. `busy` is the generation a load is running for, if any.
+    gen: 0,
+    busy: null,
+    // No answer yet for this view; and whether the last try for it failed.
+    loading: true,
+    failed: false,
   };
 
   function el(tag, cls, text) {
@@ -319,10 +355,27 @@ if (typeof document !== 'undefined') {
     return note.via + (note.context ? ' in ' + note.context : '');
   }
 
-  function timeEl(iso) {
-    const t = el('span', 't', relative(iso, new Date()));
+  /// A time, relative; `tick` moves it on in place.
+  function timeEl(iso, cls) {
+    const t = el('span', cls, relative(iso, new Date()));
+    t.dataset.at = iso;
     t.title = absolute(iso);
     return t;
+  }
+
+  function tick() {
+    const now = new Date();
+    document.querySelectorAll('[data-at]').forEach((t) => {
+      const text = relative(t.dataset.at, now);
+      if (t.textContent !== text) t.textContent = text;
+    });
+  }
+
+  /// A short line for screen readers (the feed itself is not read out again on each refresh).
+  function announce(text) {
+    const box = $('announce');
+    box.textContent = '';
+    if (text) setTimeout(() => (box.textContent = text), 50);
   }
 
   /// Unreachable server, wrong key, refused request: a line at the top; what is shown stays.
@@ -342,6 +395,11 @@ if (typeof document !== 'undefined') {
     if (state.lastOk) text += ' Last updated ' + hhmm(state.lastOk) + '.';
     banner.textContent = text;
     banner.hidden = false;
+  }
+
+  function fine() {
+    state.lastOk = new Date();
+    $('banner').hidden = true;
   }
 
   async function api(path) {
@@ -373,85 +431,106 @@ if (typeof document !== 'undefined') {
     return '/api/timeline?' + q.toString();
   }
 
-  /// The first page again (as many threads as are shown, up to 50); older pages already loaded
-  /// stay below it.
+  function setBusy() {
+    $('refresh').classList.toggle('busy', state.busy !== null);
+    $('loadmore').disabled = state.busy !== null;
+  }
+
+  /// Every page shown, asked again (so a thread far down that was closed or handled is shown so),
+  /// for the view shown; an answer for a view no longer shown is dropped.
   async function refresh() {
-    if (state.busy) return;
-    state.busy = true;
+    const gen = state.gen;
+    if (state.busy === gen) return;
+    state.busy = gen;
     state.lastTry = Date.now();
-    $('refresh').classList.add('busy');
-    const asked = state.tab + JSON.stringify(state.filter);
+    setBusy();
     try {
-      const shown = state.threads.length;
-      const limit = Math.min(50, Math.max(20, shown));
-      const v = await api(query(null, limit));
-      if (asked !== state.tab + JSON.stringify(state.filter)) return;
-      const fresh = v.threads;
-      const ids = new Set(fresh.map((t) => t.id));
-      const oldest = fresh.length ? Number(fresh[fresh.length - 1].cursor) : Infinity;
-      const rest = v.cursor ? state.threads.filter((t) => !ids.has(t.id) && Number(t.cursor) < oldest) : [];
-      // A conversation open whose thread grew is read again.
-      for (const t of fresh) {
-        const before = state.threads.find((o) => o.id === t.id);
-        if (state.open.has(t.id) && before && before.notes !== t.notes) state.convos.delete(t.id);
-      }
-      state.data = v;
-      state.names = Object.assign({}, state.names, v.names);
-      state.threads = fresh.concat(rest);
-      state.cursor = rest.length ? state.cursor : v.cursor;
-      state.lastOk = new Date();
-      $('banner').hidden = true;
+      const ask = async (before, limit) => {
+        const v = await api(query(before, limit));
+        return gen === state.gen ? v : null;
+      };
+      const got = await askShown(ask, state.threads.length, state.cursor);
+      if (!got) return;
+      const before = new Map(state.threads.map((t) => [t.id, t]));
+      const added = state.loading ? 0 : got.threads.filter((t) => !before.has(t.id)).length;
+      state.data = got.first;
+      state.names = Object.assign({}, state.names, got.first.names);
+      state.threads = got.threads;
+      state.cursor = got.cursor;
+      state.loading = false;
+      state.failed = false;
+      fine();
       render();
+      if (added) announce(added === 1 ? '1 new thread' : added + ' new threads');
+      // A conversation open whose thread grew is read again; the copy shown stays until then.
       state.open.forEach((id) => {
-        if (!state.convos.has(id)) loadConvo(id);
+        const t = got.threads.find((x) => x.id === id);
+        const was = before.get(id);
+        const grew = t && was && (t.notes !== was.notes || t.status !== was.status);
+        if (!state.convos.has(id) || grew) loadConvo(id);
       });
     } catch (err) {
+      if (gen !== state.gen) return;
+      state.failed = true;
       problem(err);
+      render();
     } finally {
-      state.busy = false;
-      $('refresh').classList.remove('busy');
+      if (state.busy === gen) state.busy = null;
+      setBusy();
     }
   }
 
   async function loadMore() {
-    const button = $('loadmore');
-    button.disabled = true;
+    const gen = state.gen;
+    if (state.busy !== null || !state.cursor) return;
+    state.busy = gen;
+    setBusy();
     try {
       const v = await api(query(state.cursor, 20));
+      if (gen !== state.gen) return;
       const ids = new Set(state.threads.map((t) => t.id));
       state.threads = state.threads.concat(v.threads.filter((t) => !ids.has(t.id)));
       state.cursor = v.cursor;
       state.names = Object.assign({}, state.names, v.names);
-      state.lastOk = new Date();
-      $('banner').hidden = true;
+      fine();
       render();
     } catch (err) {
-      problem(err);
+      if (gen === state.gen) problem(err);
     } finally {
-      button.disabled = false;
+      if (state.busy === gen) state.busy = null;
+      setBusy();
     }
   }
 
   async function loadConvo(id) {
+    if (state.convoLoading.has(id)) return;
+    state.convoLoading.add(id);
     try {
       const t = await api('/api/timeline/threads/' + encodeURIComponent(id));
       state.names = Object.assign({}, state.names, t.names);
       state.convos.set(id, t);
-      $('banner').hidden = true;
-      const post = document.querySelector('[data-id="' + CSS.escape(id) + '"]');
-      if (post) fillConvo(post.querySelector('.convo'), t);
+      state.convoFailed.delete(id);
+      fine();
     } catch (err) {
+      state.convoFailed.add(id);
       problem(err);
+    } finally {
+      state.convoLoading.delete(id);
     }
+    const box = document.getElementById(convoId(id));
+    if (box && state.open.has(id)) fillConvo(box, id);
   }
 
+  /// Another tab or filter: a new generation, and its first page.
   function select(tab, filter) {
+    state.gen++;
     state.tab = tab;
     if (filter) state.filter = filter;
     state.threads = [];
     state.cursor = null;
     state.open.clear();
-    $('feed').replaceChildren();
+    state.loading = true;
+    state.failed = false;
     render();
     refresh();
   }
@@ -489,18 +568,22 @@ if (typeof document !== 'undefined') {
         select('threads', { show: value })
       )
     );
-    $('show').replaceChildren(...show);
     const teams$ = v.teams.map((t) =>
       filterButton('@' + t, v.counts.teams[t] || 0, inThreads && f.team === t, () =>
         select('threads', { show: 'all', team: t })
       )
     );
-    $('teams').replaceChildren(...(teams$.length ? teams$ : [el('div', 'none', 'No team')]));
     const people = v.people.map((h) =>
       filterButton('@' + h, undefined, inThreads && f.with === h, () =>
         select('threads', { show: 'all', with: h })
       )
     );
+    // Drawn again only when something in it changed, so a focused filter keeps its focus.
+    const sig = JSON.stringify([v.you, v.teams, v.counts, v.people, state.names[v.you], state.tab, f]);
+    if (sig === renderSide.sig) return;
+    renderSide.sig = sig;
+    $('show').replaceChildren(...show);
+    $('teams').replaceChildren(...(teams$.length ? teams$ : [el('div', 'none', 'No team')]));
     $('people').replaceChildren(...(people.length ? people : [el('div', 'none', 'Nobody yet')]));
   }
 
@@ -556,21 +639,35 @@ if (typeof document !== 'undefined') {
     return out;
   }
 
-  function fillConvo(box, t) {
-    if (!box) return;
+  const convoId = (id) => 'convo-' + id;
+
+  /// The conversation of thread `id` in `box`: the copy loaded (kept while a newer one loads),
+  /// else a line saying it loads, or that it could not.
+  function fillConvo(box, id) {
+    const t = state.convos.get(id);
     if (!t) {
-      box.replaceChildren(el('div', 'meta', 'Loading the conversation…'));
+      if (state.convoFailed.has(id) && !state.convoLoading.has(id)) {
+        const retry = el('button', 'retry', 'Try again');
+        retry.onclick = (e) => {
+          // The button is gone once the box is redrawn: the post must not take the click.
+          e.stopPropagation();
+          loadConvo(id);
+          fillConvo(box, id);
+        };
+        box.replaceChildren(el('div', 'meta', "Couldn't load the conversation. "), retry);
+      } else {
+        box.replaceChildren(el('div', 'meta', 'Loading the conversation…'));
+      }
       return;
     }
+    if (box.shown === t) return;
+    box.shown = t;
     box.replaceChildren(
       ...t.notes.map((n) => {
         const row = el('div', 'note');
         const bubble = el('div', 'bubble');
         const meta = el('div', 'meta');
-        meta.append(el('b', '', nameOf(n.author)), ' · ' + via(n) + ' · ');
-        const time = el('span', '', relative(n.created_at, new Date()));
-        time.title = absolute(n.created_at);
-        meta.append(time);
+        meta.append(el('b', '', nameOf(n.author)), ' · ' + via(n) + ' · ', timeEl(n.created_at));
         bubble.append(meta, renderNote(n.text, document));
         row.append(avatar(n.author), bubble);
         return row;
@@ -578,19 +675,27 @@ if (typeof document !== 'undefined') {
     );
   }
 
+  function moreLabel(t, open) {
+    if (open) return 'Hide conversation';
+    return t.notes === 1 ? 'Read the whole note' : 'See conversation · ' + t.notes + ' notes';
+  }
+
   function post(t) {
+    const open = state.open.has(t.id);
     const a = el('article', 'post');
     a.dataset.id = t.id;
-    a.tabIndex = 0;
-    a.setAttribute('aria-expanded', state.open.has(t.id) ? 'true' : 'false');
     const first = t.first_note;
     const content = el('div', 'content');
 
     const head = el('div', 'head');
     head.append(el('b', '', nameOf(t.from)), el('span', 'h', '@' + t.from + ' → ' + target(t)));
-    head.append(timeEl(first.created_at));
+    head.append(timeEl(first.created_at, 't'));
     content.append(head, el('div', 'via', 'via ' + via(first)));
-    content.append(el('div', 'title', shownTitle(t.title, first.text)));
+    // The title is the post's control: a button, for the keyboard and screen readers.
+    const title = el('button', 'title', shownTitle(t.title, first.text));
+    title.setAttribute('aria-expanded', open ? 'true' : 'false');
+    title.setAttribute('aria-controls', convoId(t.id));
+    content.append(title);
     const rest = withoutTitle(first.text, t.title);
     if (rest.trim()) {
       content.append(renderNote(rest + (first.truncated ? '…' : ''), document, 'body clip'));
@@ -601,81 +706,146 @@ if (typeof document !== 'undefined') {
       const n = answer;
       const reply = el('div', 'reply');
       const rh = el('div', 'head');
-      rh.append(el('b', '', nameOf(n.author)), el('span', 'h', 'via ' + via(n)), timeEl(n.created_at));
+      rh.append(el('b', '', nameOf(n.author)), el('span', 'h', 'via ' + via(n)), timeEl(n.created_at, 't'));
       reply.append(rh, renderNote(n.text + (n.truncated ? '…' : ''), document, 'body clip'));
       content.append(reply);
     }
     const chipBox = el('div', 'chips');
     chips(t).forEach(([cls, text]) => chipBox.append(el('span', 'chip ' + cls, text)));
     content.append(chipBox);
-    const open = state.open.has(t.id);
-    if (t.notes > 2 || first.truncated || (answer && answer.truncated)) {
-      const label = t.notes === 1 ? 'Read the whole note' : 'See conversation · ' + t.notes + ' notes';
-      const more = el('div', 'more', open ? 'Hide conversation' : label);
-      content.append(more);
+    // Shown when there is more than the preview; `markCut` adds it too when a preview is cut by
+    // its height.
+    if (open || t.notes > 2 || first.truncated || (answer && answer.truncated)) {
+      content.append(el('div', 'more', moreLabel(t, open)));
     }
-    if (open) {
-      const box = el('div', 'convo');
-      fillConvo(box, state.convos.get(t.id));
-      content.append(box);
-    }
+    const box = el('div', 'convo');
+    box.id = convoId(t.id);
+    box.hidden = !open;
+    if (open) fillConvo(box, t.id);
+    content.append(box);
     a.append(avatar(t.from), content);
-    const toggle = () => {
-      if (state.open.has(t.id)) state.open.delete(t.id);
-      else {
-        state.open.add(t.id);
-        if (!state.convos.has(t.id)) loadConvo(t.id);
-      }
-      a.replaceWith(post(t));
-      markCut($('feed'));
-      const again = document.querySelector('[data-id="' + CSS.escape(t.id) + '"]');
-      if (again) again.focus({ preventScroll: true });
-    };
     a.onclick = (e) => {
       if (e.target.closest('.convo')) return;
-      if (String(window.getSelection())) return;
-      toggle();
-    };
-    a.onkeydown = (e) => {
-      if ((e.key === 'Enter' || e.key === ' ') && e.target === a) {
-        e.preventDefault();
-        toggle();
-      }
+      if (e.target !== title && String(window.getSelection())) return;
+      toggle(t.id);
     };
     return a;
   }
 
-  /// Previews cut by their height fade out at the bottom.
+  function toggle(id) {
+    if (state.open.has(id)) state.open.delete(id);
+    else {
+      state.open.add(id);
+      if (!state.convos.has(id)) loadConvo(id);
+    }
+    render();
+    const again = document.querySelector('[data-id="' + CSS.escape(id) + '"] .title');
+    if (again) again.focus({ preventScroll: true });
+  }
+
+  /// Previews cut by their height fade out at the bottom, and say the post can be opened.
   function markCut(root) {
-    root.querySelectorAll('.clip').forEach((c) => c.classList.toggle('cut', c.scrollHeight > c.clientHeight + 1));
+    root.querySelectorAll('.post').forEach((p) => {
+      let cut = false;
+      p.querySelectorAll('.clip').forEach((c) => {
+        const is = c.scrollHeight > c.clientHeight + 1;
+        c.classList.toggle('cut', is);
+        cut = cut || is;
+      });
+      const content = p.querySelector('.content');
+      if (cut && !content.querySelector('.more')) {
+        const t = state.threads.find((x) => x.id === p.dataset.id);
+        if (t) content.insertBefore(el('div', 'more', moreLabel(t, false)), content.querySelector('.convo'));
+      }
+    });
+  }
+
+  /// What a post shows: drawn again only when it changes, so focus, a text selection and an open
+  /// conversation stay as they are when nothing in that thread changed.
+  function postSig(t) {
+    const notes = [t.first_note, t.last_note, t.last_other_note].filter(Boolean);
+    const handles = [t.from, t.closed_by, ...t.participants, ...notes.map((n) => n.author)];
+    const names = handles.map((h) => h && state.names[h]);
+    return JSON.stringify([t, state.open.has(t.id), you(), names]);
+  }
+
+  function renderFeed() {
+    const feed = $('feed');
+    const focused = document.activeElement;
+    const focusedPost = focused && focused.closest ? focused.closest('.post') : null;
+    const old = new Map();
+    for (const p of feed.children) old.set(p.dataset.id, p);
+    const nodes = state.threads.map((t) => {
+      const sig = postSig(t);
+      const was = old.get(t.id);
+      if (was && was.sig === sig) return was;
+      const p = post(t);
+      p.sig = sig;
+      return p;
+    });
+    // Moves as few nodes as it can: those already in place stay (and keep focus and selection).
+    nodes.forEach((n, i) => {
+      const at = feed.children[i];
+      if (at !== n) feed.insertBefore(n, at || null);
+    });
+    while (feed.children.length > nodes.length) feed.lastElementChild.remove();
+    // The post that had focus, if it was drawn again.
+    if (focusedPost && !focusedPost.isConnected) {
+      const again = feed.querySelector('[data-id="' + CSS.escape(focusedPost.dataset.id) + '"] .title');
+      if (again) again.focus({ preventScroll: true });
+    }
+    markCut(feed);
+  }
+
+  function renderTabs() {
+    for (const [tab, id] of [['board', 'tab-board'], ['threads', 'tab-threads']]) {
+      const on = state.tab === tab;
+      $(id).classList.toggle('on', on);
+      $(id).setAttribute('aria-selected', String(on));
+      $(id).tabIndex = on ? 0 : -1;
+      if (on) $('feed').setAttribute('aria-labelledby', id);
+    }
   }
 
   function render() {
-    $('tab-board').classList.toggle('on', state.tab === 'board');
-    $('tab-threads').classList.toggle('on', state.tab === 'threads');
-    $('tab-board').setAttribute('aria-selected', String(state.tab === 'board'));
-    $('tab-threads').setAttribute('aria-selected', String(state.tab === 'threads'));
+    renderTabs();
     renderSide();
-    const feed = $('feed');
-    feed.replaceChildren(...state.threads.map(post));
-    markCut(feed);
+    renderFeed();
     $('loadmore').hidden = !state.cursor;
     const footer = $('footer');
-    if (!state.data) {
-      footer.hidden = true;
+    let text = '';
+    if (state.loading) {
+      text = state.failed ? "Couldn't load this view. It is tried again every 30 seconds, or with ↻." : 'Loading…';
+    } else if (state.cursor) {
+      text = '';
     } else if (state.tab === 'board') {
-      footer.textContent = state.threads.length
+      text = state.threads.length
         ? 'Notes with no @, for everyone. Team notes and direct notes are seen only by the people in them.'
         : 'Nothing here yet. A note with no @ goes here, for everyone to see.';
-      footer.hidden = !!state.cursor;
     } else {
-      footer.textContent = state.threads.length ? '' : 'No threads here.';
-      footer.hidden = !!state.cursor || !footer.textContent;
+      text = state.threads.length ? '' : 'No threads here.';
     }
+    footer.textContent = text;
+    footer.hidden = !text;
   }
 
   $('tab-board').onclick = () => select('board');
   $('tab-threads').onclick = () => select('threads');
+  // The tabs, as a tablist: the arrow keys (and Home, End) move between them.
+  $('tabs').addEventListener('keydown', (e) => {
+    const tabs = ['tab-board', 'tab-threads'];
+    const at = tabs.indexOf(e.target.id);
+    if (at < 0) return;
+    let to = null;
+    if (e.key === 'ArrowRight') to = (at + 1) % tabs.length;
+    else if (e.key === 'ArrowLeft') to = (at + tabs.length - 1) % tabs.length;
+    else if (e.key === 'Home') to = 0;
+    else if (e.key === 'End') to = tabs.length - 1;
+    if (to === null) return;
+    e.preventDefault();
+    $(tabs[to]).focus();
+    if (to !== at) select(to === 0 ? 'board' : 'threads');
+  });
   $('refresh').onclick = () => refresh();
   $('loadmore').onclick = () => loadMore();
   setInterval(() => {
@@ -684,9 +854,10 @@ if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && Date.now() - state.lastTry > REFRESH_MS) refresh();
   });
-  // Relative times move on even when nothing new comes.
+  // Relative times move on even when nothing new comes, in place.
   setInterval(() => {
-    if (document.visibilityState === 'visible' && !state.busy) render();
+    if (document.visibilityState === 'visible') tick();
   }, 60000);
+  render();
   refresh();
 }

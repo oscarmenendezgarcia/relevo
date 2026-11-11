@@ -4,7 +4,7 @@
 'use strict';
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { parseNote, parseInline, toDom, withoutTitle, shownTitle, pickKey, relative, absolute } = require(
+const { parseNote, parseInline, toDom, withoutTitle, shownTitle, pickKey, askShown, relative, absolute } = require(
   path.join(__dirname, '..', '..', 'src', 'web', 'app.js')
 );
 
@@ -196,4 +196,71 @@ check('parseInline keeps line breaks inside a paragraph', () => {
   assert.deepEqual(parseInline('a\nb'), [{ t: 'text', text: 'a' }, { t: 'br' }, { t: 'text', text: 'b' }]);
 });
 
-console.log('renderer: ' + count + ' checks passed');
+// `check` is synchronous: these run after it, and fail the process when they fail.
+const pending = [];
+function checkAsync(name, f) {
+  pending.push(
+    f().then(
+      () => count++,
+      (e) => {
+        console.error('FAILED: ' + name);
+        throw e;
+      }
+    )
+  );
+}
+
+// Threads with cursors 60 (newest) down to 1, as the server pages them.
+function server(cursors) {
+  const asked = [];
+  const ask = async (before, limit) => {
+    asked.push([before, limit]);
+    const all = cursors.filter((c) => before === null || c < Number(before));
+    const page = all.slice(0, limit);
+    const more = all.length > limit;
+    return {
+      threads: page.map((c) => ({ id: 't' + c, cursor: String(c) })),
+      cursor: more ? String(page[page.length - 1]) : null,
+    };
+  };
+  return { ask, asked };
+}
+const sixty = Array.from({ length: 60 }, (_, i) => 60 - i);
+
+checkAsync('a refresh asks again every page shown, past the first 50', async () => {
+  // Nothing shown: the first page.
+  let s = server(sixty);
+  let got = await askShown(s.ask, 0, null);
+  assert.deepEqual(s.asked, [[null, 20]]);
+  assert.equal(got.threads.length, 20);
+  assert.equal(got.cursor, '41');
+  // 60 shown (Load more until thread 1, cursor null at the end): every page, to the end.
+  s = server(sixty);
+  got = await askShown(s.ask, 60, null);
+  assert.deepEqual(s.asked, [[null, 50], ['11', 50]]);
+  assert.equal(got.threads.length, 60);
+  assert.equal(got.cursor, null);
+  // 55 shown, down to cursor 6: down to it, not further than a page past it.
+  s = server(sixty);
+  got = await askShown(s.ask, 55, '6');
+  assert.deepEqual(s.asked, [[null, 50], ['11', 50]]);
+  assert.equal(got.cursor, null);
+  // 40 shown, down to 21: one page of 40 is enough.
+  s = server(sixty);
+  got = await askShown(s.ask, 40, '21');
+  assert.deepEqual(s.asked, [[null, 40]]);
+  assert.equal(got.cursor, '21');
+  // Thread 55 was closed far down without a note: it is in the answer as it is now.
+  assert.ok(got.threads.some((t) => t.id === 't55'));
+  // An answer no longer wanted stops it.
+  got = await askShown(async () => null, 60, null);
+  assert.equal(got, null);
+});
+
+Promise.all(pending).then(
+  () => console.log('renderer: ' + count + ' checks passed'),
+  (e) => {
+    console.error(e);
+    process.exit(1);
+  }
+);
