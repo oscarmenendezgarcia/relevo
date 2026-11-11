@@ -4,8 +4,12 @@ name: Release
 # GitHub release of that tag (created if missing), with the dist the team's server hands out to
 # the clients (docs/update.md): the pi and Hermes archives, manifest.json, its signature
 # manifest.sig, and all of it in relevo-dist-<version>.tar.gz. The manifest is signed with the
-# Ed25519 key in the repository secret RELEVO_SIGNING_KEY (PEM); the release stops if that key
-# is not the one keys/release-signing-pub.pem holds, which the binaries trust.
+# Ed25519 key RELEVO_SIGNING_KEY (PEM), a secret of the environment release-signing alone, which
+# asks a reviewer to approve each run (docs/update.md, "The signing key"): every client installs
+# what it signs, so no tag signs anything by itself. The release stops if the tag is not the
+# version of Cargo.toml, if its commit is not on main, or if the key is not the one
+# keys/release-signing-pub.pem holds, which the binaries trust. Third-party actions are pinned
+# to a commit, as what they build is signed.
 on:
   push:
     tags: ["v*"]
@@ -30,8 +34,8 @@ jobs:
             runner: ubuntu-22.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: ${{ matrix.target }}
       - run: cargo test --locked --release --target ${{ matrix.target }}
@@ -41,7 +45,7 @@ jobs:
           mkdir dist
           cp target/${{ matrix.target }}/release/relevo dist/relevo-${{ matrix.target }}
           dist/relevo-${{ matrix.target }} --version
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: relevo-${{ matrix.target }}
           path: dist/relevo-${{ matrix.target }}
@@ -50,11 +54,24 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-24.04
+    # Holds RELEVO_SIGNING_KEY, and waits for a reviewer's approval before it starts.
+    environment: release-signing
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v7
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          # Every branch, to check that the tagged commit is on main.
+          fetch-depth: 0
+      - name: The tag is this version, on main
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          [ "$TAG" = "v$version" ] || { echo "the tag $TAG is not v$version, the version of Cargo.toml" >&2; exit 1; }
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main ||
+            { echo "$GITHUB_SHA is not on main: nothing is signed" >&2; exit 1; }
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           path: dist
           merge-multiple: true
@@ -62,7 +79,7 @@ jobs:
         env:
           RELEVO_SIGNING_KEY: ${{ secrets.RELEVO_SIGNING_KEY }}
         run: |
-          [ -n "$RELEVO_SIGNING_KEY" ] || { echo "the secret RELEVO_SIGNING_KEY is not set" >&2; exit 1; }
+          [ -n "$RELEVO_SIGNING_KEY" ] || { echo "the secret RELEVO_SIGNING_KEY is not set in the environment release-signing" >&2; exit 1; }
           key=$(mktemp "$RUNNER_TEMP/signing.XXXXXX")
           trap 'rm -f "$key"' EXIT
           chmod 0600 "$key"

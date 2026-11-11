@@ -13,7 +13,7 @@ Every release builds, besides the server binaries, a **dist**: the `relevo` bina
              { "name": "relevo-hermes-0.4.0.tar.gz", "kind": "hermes", "size": 40960, "sha256": "…" } ] }
 ```
 
-**The manifest is signed.** The release workflow signs `manifest.json` with an Ed25519 key kept as the repository secret `RELEVO_SIGNING_KEY` and publishes the 64-byte signature as `manifest.sig`. The public key is compiled into every `relevo` binary. A client installs nothing whose manifest does not carry a valid signature by that key, and nothing whose bytes do not match the manifest's `sha256` and `size`. So whoever gets into the team's server can change the files there, but cannot make a client install them.
+**The manifest is signed.** The release workflow signs `manifest.json` with an Ed25519 key kept as the secret `RELEVO_SIGNING_KEY` of the GitHub environment `release-signing` (see [The signing key](#the-signing-key)) and publishes the 64-byte signature as `manifest.sig`. The public key is compiled into every `relevo` binary. A client installs nothing whose manifest does not carry a valid signature by that key, and nothing whose bytes do not match the manifest's `sha256` and `size`. So whoever gets into the team's server can change the files there, but cannot make a client install them.
 
 The release also publishes the whole dist as one file, `relevo-dist-<version>.tar.gz`, for the server.
 
@@ -48,6 +48,17 @@ Every file is downloaded and checked, and every place it writes to is checked to
 A client that cannot write where it is installed (a binary in `/usr/local/bin` owned by root, say) says so and installs nothing.
 
 **From 0.3.x.** Clients before 0.4.0 have no updater: each teammate updates once by hand to 0.4.0 (the binary, and the adapters through `relevo update --adapter …`), and after that they follow the server.
+
+## The signing key
+
+Every client installs what the key signs, within the hour and with nobody approving it, so the release workflow never signs a build by itself:
+
+- The signing job runs in the environment `release-signing` and the key is a secret of that environment only, never a repository secret: a workflow that leaves the environment out (a changed `release.yml` in a tagged commit, say) does not get it. In the repository's Settings → Environments, `release-signing` has **required reviewers** (the owner) and a **deployment rule** that allows only tags `v*`; each release waits there until a reviewer approves it, after the binaries are built and tested.
+- A **tag ruleset** for `v*` lets only the owner create, move or delete release tags.
+- Before signing, the workflow checks that the tag is `v` and the version of `Cargo.toml`, and that the tagged commit is on `main`; it refuses a key that is not the one `keys/release-signing-pub.pem` holds.
+- Third-party actions are pinned to a commit (`dtolnay/rust-toolchain`, `actions/*`): what they build is signed. Update a pin on purpose, reading what changed.
+
+The environment, its reviewers and the ruleset are repository settings: the owner sets them once, before the first release that carries the dist.
 
 ## If the key is lost or leaked
 
