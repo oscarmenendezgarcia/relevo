@@ -57,6 +57,10 @@ enum Command {
             requires = "tls_cert"
         )]
         tls_key: Option<PathBuf>,
+        /// The clients to hand out to the team (docs/update.md). [default: dist/ next to the
+        /// database]
+        #[arg(long, value_name = "DIR", env = "RELEVO_DIST")]
+        dist: Option<PathBuf>,
     },
     /// Print the SHA-256 fingerprint of the certificate `serve --tls` uses, for teammates to
     /// compare with what `relevo connect` shows.
@@ -425,6 +429,7 @@ async fn main() -> Result<()> {
             tls_name,
             tls_cert,
             tls_key,
+            dist,
         } => {
             let tls = server_tls(
                 &db_file,
@@ -433,7 +438,12 @@ async fn main() -> Result<()> {
                 tls_cert.as_deref(),
                 tls_key.as_deref(),
             )?;
-            let app = App::new(conn, Clock::system(), team_questions_per_day);
+            let dist = dist.unwrap_or_else(|| relevo::dist::dir_for(&db_file));
+            match relevo::dist::start_note(&dist, env!("CARGO_PKG_VERSION")) {
+                Ok(note) => tracing::info!("{note}"),
+                Err(warning) => tracing::warn!("{warning}"),
+            }
+            let app = App::with_dist(conn, Clock::system(), team_questions_per_day, Some(dist));
             let listener = tokio::net::TcpListener::bind(addr).await?;
             let scheme = if tls.is_some() { "https" } else { "http" };
             tracing::info!(%addr, db = %db_file, %scheme, "relevo listening");
@@ -556,7 +566,7 @@ mod tests {
     /// One test, because it changes the process environment.
     #[test]
     fn defaults_and_environment() {
-        const VARS: [&str; 7] = [
+        const VARS: [&str; 8] = [
             "RELEVO_DB",
             "RELEVO_ADDR",
             "RELEVO_TEAM_QUESTIONS_PER_DAY",
@@ -564,6 +574,7 @@ mod tests {
             "RELEVO_TLS_NAME",
             "RELEVO_TLS_CERT",
             "RELEVO_TLS_KEY",
+            "RELEVO_DIST",
         ];
         // SAFETY: no other test in this binary reads or writes the environment.
         unsafe { VARS.iter().for_each(|v| std::env::remove_var(v)) };

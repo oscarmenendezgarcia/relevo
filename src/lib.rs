@@ -8,6 +8,7 @@ pub mod client;
 pub mod config;
 pub mod context;
 pub mod db;
+pub mod dist;
 pub mod error;
 pub mod mcp;
 pub mod render;
@@ -16,6 +17,7 @@ pub mod session;
 pub mod tls;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use rusqlite::Connection;
@@ -29,6 +31,8 @@ pub struct App {
     db: Mutex<Connection>,
     pub clock: Clock,
     pub team_questions_per_day: u32,
+    /// The clients this server hands out (`crate::dist`), if any.
+    pub dist: Option<PathBuf>,
     /// One channel per person, bumped when something may have become new for one of their
     /// sessions, so that their waiting `inbox` requests look again.
     news: Mutex<HashMap<i64, watch::Sender<()>>>,
@@ -42,10 +46,21 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 impl App {
     pub fn new(conn: Connection, clock: Clock, team_questions_per_day: u32) -> Arc<App> {
+        App::with_dist(conn, clock, team_questions_per_day, None)
+    }
+
+    /// The same, handing out the dist in `dist` (`GET /api/dist/...`).
+    pub fn with_dist(
+        conn: Connection,
+        clock: Clock,
+        team_questions_per_day: u32,
+        dist: Option<PathBuf>,
+    ) -> Arc<App> {
         Arc::new(App {
             db: Mutex::new(conn),
             clock,
             team_questions_per_day,
+            dist,
             news: Mutex::new(HashMap::new()),
             waits: Mutex::new(HashMap::new()),
         })

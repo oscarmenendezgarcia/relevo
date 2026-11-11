@@ -50,6 +50,7 @@ pub fn router(app: Arc<App>) -> Router {
         )
         .route("/api/people", get(people))
         .route("/api/session", delete(end_session))
+        .route("/api/dist/{name}", get(crate::dist::file))
         .fallback(|| async { ApiError::not_found("no such route") })
         .method_not_allowed_fallback(|| async { ApiError::not_found("no such route") })
         .with_state(app)

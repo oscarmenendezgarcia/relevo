@@ -1281,6 +1281,7 @@ dependencies = [
  "rand",
  "rcgen",
  "reqwest",
+ "ring",
  "rmcp",
  "rusqlite",
  "rustls",
