@@ -610,17 +610,22 @@ class RelevoAdapter(BasePlatformAdapter):
         if not text.strip():
             return SendResult(success=False, error="empty note", error_kind="unknown")
         try:
-            try:
-                result = await self.api.asend(self._ensure_http(), {"thread": str(chat_id), "text": text})
-            except client.RelevoError as exc:
-                # The reply named someone Relevo does not know, a team, or @team it cannot place: its
-                # thread still wants it, so it goes once more with those mentions as plain text.
-                plain, wrapped = client.as_plain_text(text, client.refused_mentions(exc, text, self._me))
-                if not wrapped:
-                    raise
-                logger.warning("[relevo] reply to %s refused (%s) for its mentions: sending it again with %d of "
-                               "them as plain text", chat_id, client.describe_error(exc), wrapped)
-                result = await self.api.asend(self._ensure_http(), {"thread": str(chat_id), "text": plain})
+            # The reply named someone Relevo does not know, a team, or @team it cannot place: its thread
+            # still wants it, so it goes again with those mentions as plain text. The server names one
+            # problem at a time (two teams: the first; @team and an unknown name: @team), so this repeats
+            # while each refusal names a mention still there. Each round takes at least one mention out,
+            # so it ends within as many rounds as the reply has mentions.
+            while True:
+                try:
+                    result = await self.api.asend(self._ensure_http(), {"thread": str(chat_id), "text": text})
+                    break
+                except client.RelevoError as exc:
+                    plain, wrapped = client.as_plain_text(text, client.refused_mentions(exc, text, self._me))
+                    if not wrapped:
+                        raise
+                    logger.warning("[relevo] reply to %s refused (%s) for its mentions: sending it again with %d "
+                                   "of them as plain text", chat_id, client.describe_error(exc), wrapped)
+                    text = plain
         except client.RelevoError as exc:
             logger.warning("[relevo] send to %s refused: %s", chat_id, client.describe_error(exc))
             return SendResult(success=False, error=f"{exc.code}: {exc.message}",

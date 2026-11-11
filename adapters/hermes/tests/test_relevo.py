@@ -485,9 +485,10 @@ class Outbound(Base):
         self.assertIn("THREAD_CLOSED", result.error)
         self.assertEqual(result.error_kind, "forbidden")
 
-    async def test_a_reply_whose_mentions_are_refused_goes_once_more_with_them_as_plain_text(self):
+    async def test_a_reply_whose_mentions_are_refused_goes_again_with_them_as_plain_text(self):
         """The agent's reply is the thread's: an @ the server refuses (nobody it knows, a team in a reply)
-        must not lose it. It is sent once more with those mentions without their @, and the log says so."""
+        must not lose it. It is sent again with those mentions without their @, as often as the server
+        names one more, and the log says so."""
         a = self.make_adapter()
         await a.connect()
         opened = self.bob.send(to=["oscar"], text="Who can approve the refunds migration?")
@@ -509,30 +510,45 @@ class Outbound(Base):
             ("@Backend: approved.\n```\n@decorator\n```", "Backend: approved.\n```\n@decorator\n```"),
             # @team (Oscar's one team) in a reply, with a context on a person already in it.
             ("Done, @team. @ana/pagos-api FYI", "Done, team. @ana/pagos-api FYI"),
+            # Two teams: the server names the first, then the second.
+            ("Thanks. @backend and @web both own it.", "Thanks. backend and @web both own it.",
+             "Thanks. backend and web both own it."),
+            # @team, then a name it does not know.
+            ("@team and @zzz should know.", "team and @zzz should know.", "team and zzz should know."),
+            # More than 20, then the 20 it does not know.
+            ("Ask " + " ".join(f"@p{i:02}" for i in range(21)),
+             "Ask " + " ".join(f"@p{i:02}" for i in range(20)) + " p20",
+             "Ask " + " ".join(f"p{i:02}" for i in range(21))),
         ]
-        for text, written in cases:
+        for text, *sent in cases:
             bodies.clear()
             with self.assertLogs(_PKG, level="WARNING") as logs:
                 result = await a.send(chat, text, metadata=FINAL)
             self.assertTrue(result.success, result.error)
-            self.assertEqual(bodies, [text, written])
-            self.assertEqual(self.bob.thread(chat)["notes"][-1]["text"], written)
+            self.assertEqual(bodies, [text, *sent])
+            self.assertEqual(self.bob.thread(chat)["notes"][-1]["text"], sent[-1])
             self.assertTrue(any("for its mentions: sending it again with" in line for line in logs.output), logs.output)
             # Never the note text in the log.
             self.assertFalse(any("approved" in line or "@zoe" in line for line in logs.output), logs.output)
         # Ana, named in the first reply, was added to the thread.
         self.assertIn("ana", self.bob.thread(chat)["participants"])
-        # Once only: still refused after it, the reply fails (and says so), it is not dropped silently.
+        # A refusal that names no mention left ends it: the reply fails (and says so), not dropped silently.
         bodies.clear()
-        many = " ".join(f"@p{i:02}" for i in range(21))
+        refusals = iter([client.RelevoError(400, "UNKNOWN_PERSON", "no active person or team is named zzz",
+                                            {"unknown": ["zzz"]})] * 2)
+
+        async def refused(http, payload):
+            bodies.append(payload["text"])
+            raise next(refusals)
+
+        a.api.asend = refused
         with self.assertLogs(_PKG, level="WARNING") as logs:
-            result = await a.send(chat, f"Ask {many}", metadata=FINAL)
+            result = await a.send(chat, "Ask @zzz", metadata=FINAL)
         self.assertFalse(result.success)
         self.assertIn("UNKNOWN_PERSON", result.error)
-        self.assertEqual(len(bodies), 2)
-        self.assertNotIn("@p20", bodies[1])
-        self.assertIn(" p20", bodies[1])
+        self.assertEqual(bodies, ["Ask @zzz", "Ask zzz"])
         self.assertTrue(any("refused: UNKNOWN_PERSON" in line for line in logs.output), logs.output)
+        a.api.asend = counted
         # Refusals that are not about mentions are not retried.
         self.bob.send(thread=chat, close=True)
         bodies.clear()
