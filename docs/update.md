@@ -60,6 +60,15 @@ Every client installs what the key signs, within the hour and with nobody approv
 
 The environment, its reviewers and the ruleset are repository settings: the owner sets them once, before the first release that carries the dist.
 
-## If the key is lost or leaked
+## If the key is lost
 
-A new key means a client release with the new public key, which the clients cannot trust by themselves: each teammate updates once by hand, as from 0.3.x.
+Nobody can sign a release any more, so the clients stay where they are; nothing is at risk. Make a new key (`openssl genpkey -algorithm ed25519`), put its public half in `keys/release-signing-pub.pem` and the private half in the environment `release-signing`, and release. The clients cannot trust that release by themselves, as it is signed by a key they do not know: each teammate updates once by hand (the binary, and the adapters through `relevo update --adapter …`), as from 0.3.x, and they follow the server after that.
+
+## If the key is leaked
+
+This is urgent. Nothing revokes the key and a signed manifest never expires, so anyone who holds it and can answer a client (whoever gets into the team's server, or onto the network path with the server's certificate) can make every client install whatever they like, at its next check, within the hour. They can also sign a very high version (`999.0.0`, say): a client that installs it refuses every real release after it as older. So:
+
+1. **At once**, every teammate sets `RELEVO_AUTO_UPDATE=0` where their clients run (the shell profile, the Hermes profile's env, the environment of the editor that starts `relevo mcp`) and restarts them. `relevo update` by hand still works, and is not needed now.
+2. The owner removes the old key from the environment `release-signing`, makes a new one, and puts its public half in `keys/release-signing-pub.pem`.
+3. While nobody may have been served something else, the switch can follow the server like any update: sign that release (whose binary trusts only the new key) with the **old** key once, as the clients still trust only the old one, then remove the old key for good. Each teammate turns the automatic update back on, takes that release (`relevo update`), and from then on follows releases signed by the new key.
+4. Anyone who may already have been served a release nobody made (`relevo --version`, or the version in the adapters' folders, is not one of the team's releases, or is newer than the server's) reinstalls by hand from the GitHub release, checking `SHA256SUMS`: the binary, and the adapters through `relevo update --adapter …`. A client that took a very high version follows nothing until then.
