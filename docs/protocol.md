@@ -1,20 +1,23 @@
 # Relevo protocol, v0
 
-Relevo is a small server that keeps and delivers notes between the people of one team. Every person reaches it through their own agent, by MCP or plain HTTP. There is no user interface in v0.
+Relevo is a small server that keeps and delivers notes between the people of one organisation (an office, a company, a group of friends). Every person reaches it through their own agent, by MCP or plain HTTP. There is no user interface in v0.
 
-One server serves one team. Everyone on it may write to everyone else: the team is the trust boundary. Consent between teams comes later.
+One server serves one organisation. Everyone on it may write to everyone else: the server is the trust boundary. Inside it, people may be grouped in named **teams**; nobody has to be in one. Consent between servers comes later.
+
+**Who a note is for is written in the note**, as in a chat: `@ana` sends it to Ana, `@backend` to the people of the team `backend`, and a note with no `@` goes to the **global board**, which everyone on the server sees and nobody has to answer. See [Mentions](#mentions).
 
 ## Concepts
 
 | Thing | What it is |
 |---|---|
-| **Person** | Someone on the team. `handle` (unique, `^[a-z0-9][a-z0-9_-]{1,31}$`), `name`, and `about`: one line on what they or their agent know or look after ("payments backend"). Can be deactivated. The identity is the person, never the agent. |
+| **Person** | Someone on the server. `handle` (unique, `^[a-z0-9][a-z0-9_-]{1,31}$`), `name`, and `about`: one line on what they or their agent know or look after ("payments backend"). Can be deactivated. The identity is the person, never the agent. |
 | **Token** | One per agent of a person, with a `label` ("Claude Code laptop"). Secret format `rlv_` + 43 chars of base64url (32 random bytes). Only its SHA-256 is stored. Can be revoked, and is when its person is deactivated. A request made with it acts as its person, and every note it writes records the label. |
-| **Thread** | A conversation. It is `direct` (between named people) or `team` (a question to everyone). Opened by its first note; the first non-empty line of that note, without leading `#`s, cut to 80 characters, is its title. It is `open` or `closed`. |
+| **Team** | A named group of people on the server. `name` (unique, `^[a-z0-9][a-z0-9_-]{1,31}$`, never the handle of a person, nor `team` or `equipo`), `title` ("Backend"), and its members: any active people. A person may be in no team, one, or several. Kept by the admin (see [Administration](#administration-cli)). |
+| **Thread** | A conversation. It is `direct` (between people named with `@`), `team` (to one or more teams, and maybe people too) or `global` (on the global board, to everyone). Opened by its first note; the first non-empty line of that note, without leading `#`s, cut to 80 characters, is its title. It is `open` or `closed`. |
 | **Note** | Markdown text, 1 byte to 64 KiB (UTF-8), not only whitespace. Written by a person through one of their tokens. Must be self-contained: whoever reads it does not share the writer's context. |
 | **Session** | One running agent of a person: a terminal, an editor window, a bot. A person may have several at once, each in its own context. See [Sessions and routing](#sessions-and-routing). |
 | **Context** | What a session is working on: the repository it runs in, optionally with its branch after `@`: `pagos-api` or `pagos-api@feat/refunds`. Lowercase; the repository part is `^[a-z0-9][a-z0-9._-]{0,63}$`, the branch part `^[a-z0-9._/-]{1,100}$`. A session without one is a *general* session. |
-| **Participant** | A person in a thread. For `direct`, the sender and the recipients. For `team`, every active person at the time the question is asked. Participants are fixed: a person deactivated later stays a participant of their threads and keeps appearing in `participants` and `delivery` (with the latest note by someone else that reached them), and the others may still write there. While inactive they are added to no new thread: not to team threads, and `to` cannot name them. Invited back, they find their threads again. |
+| **Participant** | A person in a thread: the sender, the people named with `@`, the active members of the teams named, at the time the thread is opened, and, in a `global` thread, every active person at that time. A participant is **named** when the thread names them with their own `@` (in the note that opened it, or in a later note: see [Mentions](#mentions)); only named participants can have the thread pending (see [Delivery state](#delivery-state)). Every participant of a `direct` thread is named, its opener too (the others answer to them); in `team` and `global` threads only the people named with `@` are: the opener, and the people reached only through a team or through the global board, are not, unless a note names them. Participants stay: someone who joins a team later is not added to its old threads, and someone who leaves it stays in them. A person deactivated later stays a participant of their threads and keeps appearing in `participants` and `delivery` (with the latest note by someone else that reached them), and the others may still write there. While inactive they are added to no new thread, and a mention of them fails. Invited back, they find their threads again. |
 
 ## Sessions and routing
 
@@ -25,9 +28,9 @@ A person may run several agents at once, each with its own context: a terminal i
 - `Relevo-Session`: an id the client picks once per running agent, `^[A-Za-z0-9_-]{8,64}$`. Sessions belong to a token: the same id under another token is another session. Without the header, the request uses the token's *default session*.
 - `Relevo-Context`: the session's context. Sent with each request; the latest value wins. A waiting `inbox` request sends its value when it arrives: when it looks again or answers, it uses the session's context as it is then, so it never undoes a newer value. Without it (or empty), the session is general. A default session is always general unless the header says otherwise. Like addresses, it may be written in any case: `Pagos-API` is `pagos-api`.
 
-The server keeps each session with its token's label, its context and when it was last seen. Every request with a valid token and well-formed session headers counts as seen once it gets past checking its own parameters, even one that then fails or replays a `send`. Those checks are the ones that need nobody looked up: for `send`, the body and its fields, `to` included (an unknown person is past them); for `inbox`, `all` and `wait` (an 11th waiting request, refused with `RATE_LIMITED`, is past them). A session not seen for 7 days is forgotten (its claims lapsed long before: see [Claiming](#sessions-and-routing)). The sessions of a revoked token (every token of a deactivated person is) are forgotten at once, with their claims: no request can be made as them again, so they must not keep threads from the person's other sessions. A token keeps at most 20 sessions: when a request starts a 21st, the token's session seen least recently is forgotten, with its claims. So a client that picks a new id for every request, by mistake or not, cannot grow the team list or the delivery state without bound; it should keep one id per running agent. A client ending a session says so with `DELETE /api/session`: the session the headers name (the default session without `Relevo-Session`) is forgotten at once, with its claims, so its threads show again in the person's other sessions without waiting for the claims to lapse. It ends only a session of the request's own token, and does not count as seen: it records nothing, and ending a session already forgotten, or never seen, answers the same.
+The server keeps each session with its token's label, its context and when it was last seen. Every request with a valid token and well-formed session headers counts as seen once it gets past checking its own parameters, even one that then fails or replays a `send`. Those checks are the ones that need nobody looked up: for `send`, the body and its fields, and the form of its mentions (or of `to`), but not who they name (an unknown person is past them); for `inbox`, `all` and `wait` (an 11th waiting request, refused with `RATE_LIMITED`, is past them). A session not seen for 7 days is forgotten (its claims lapsed long before: see [Claiming](#sessions-and-routing)). The sessions of a revoked token (every token of a deactivated person is) are forgotten at once, with their claims: no request can be made as them again, so they must not keep threads from the person's other sessions. A token keeps at most 20 sessions: when a request starts a 21st, the token's session seen least recently is forgotten, with its claims. So a client that picks a new id for every request, by mistake or not, cannot grow the team list or the delivery state without bound; it should keep one id per running agent. A client ending a session says so with `DELETE /api/session`: the session the headers name (the default session without `Relevo-Session`) is forgotten at once, with its claims, so its threads show again in the person's other sessions without waiting for the claims to lapse. It ends only a session of the request's own token, and does not count as seen: it records nothing, and ending a session already forgotten, or never seen, answers the same.
 
-**Addressing.** In `to`, `ana` means Ana, any of her sessions; `ana/pagos-api` means Ana, in the repository `pagos-api`, on any branch; `ana/pagos-api@feat/refunds` means Ana, on that branch only. An address is split at its first `/`. The context does not need a live session: the thread waits for one.
+**Addressing.** In a mention (and in the deprecated `to`), `@ana` means Ana, any of her sessions; `ana/pagos-api` means Ana, in the repository `pagos-api`, on any branch; `ana/pagos-api@feat/refunds` means Ana, on that branch only. An address is split at its first `/`. The context does not need a live session: the thread waits for one.
 
 **Claiming.** For each participant a thread is *unclaimed* or *claimed* by one of their sessions. Claims break ties; they are not how a session decides whether a note is for it. Each session that sees a note judges, from its own context and work, whether it can answer; if it cannot, it stays silent; if it can, it answers at once (the answer claims the thread), or, when the note needs work first, claims the thread as a state with `send(thread, claim: true)` and no text before acting. Claiming is never a note: nobody has to read "on it".
 
@@ -41,17 +44,17 @@ The server keeps each session with its token's label, its context and when it wa
 
 Two things are kept apart: whether a note has **reached** a session (it was fetched), and whether a person has **handled** it (they did something about it). A note can reach a session that then dies, or decides it is not for it; it stays pending for the person until one of their sessions handles it.
 
-**Handled.** For each participant of a `direct` thread, the server keeps how far the person has handled it. A person handles the thread when one of their sessions writes a note in it, closes it, or sends `done: true` (see `send`), up to the latest note that had reached that session (the session's own new note included, when every earlier one had reached it): a note that landed after the session last fetched the thread was never seen there, so it stays pending, even if the session answered or marked done what it had. So `handled_at` never comes before the note it covers reached the person. Claiming does not handle: a claim says "I am on it", and if the claiming session dies, the note is still pending when the claim ends. A note by someone else that the person has not handled is **pending** for them. `team` threads and closed threads are never pending: answering a team question is optional, and a closed thread asks nothing more.
+**Handled.** For each named participant of a thread (see [Concepts](#concepts)), the server keeps how far the person has handled it. A person handles the thread when one of their sessions writes a note in it, closes it, or sends `done: true` (see `send`), up to the latest note that had reached that session (the session's own new note included, when every earlier one had reached it): a note that landed after the session last fetched the thread was never seen there, so it stays pending, even if the session answered or marked done what it had. So `handled_at` never comes before the note it covers reached the person. Claiming does not handle: a claim says "I am on it", and if the claiming session dies, the note is still pending when the claim ends. A note by someone else that the person has not handled is **pending** for them, when they are a named participant of an open thread. Nothing is pending for a participant who is not named (answering a question to a team, or a note on the global board, is optional), nor in a closed thread, which asks nothing more. A participant who becomes named in a thread already open (a later note names them) has pending, from then on, the notes by others from the one that named them on: what came before was optional for them.
 
 **Reached.** Delivery is kept per session. For each session the server knows the last note of each thread that reached it. A note reaches a session when that session fetches it through `inbox` or `thread`. Each session gets each note once: a note that reached it is not new for it again, pending or not.
 
-**Where a new session starts.** A session starts, for each `direct` thread still pending for its person, with what the person has *handled*: the notes they have not handled are new for it, so an agent that starts after another one died with a note half done gets that note at once. For every other thread (`team` threads, and `direct` threads that are closed or handled) it starts with what any of the person's sessions has reached, so a new terminal does not replay old team questions, nor the last note of every thread the other person closed.
+**Where a new session starts.** A session starts, for each thread still pending for its person, with what the person has *handled*: the notes they have not handled are new for it, so an agent that starts after another one died with a note half done gets that note at once. For every other thread (threads where the person is not named, and threads that are closed or handled) it starts with what any of the person's sessions has reached, so a new terminal does not replay old questions to a team or the board, nor the last note of every thread the other person closed.
 
 A thread is **new for a session** when it holds notes, not written by the session's person, that have not reached that session. A person's own notes are never new for any of their sessions. When a session writes a note, everything in the thread up to that note has reached it, unless earlier notes had not: then nothing moves, so a reply written without reading never hides a note.
 
-A thread is **waiting** for a person when it is pending for them: `direct`, `open`, with a note by someone else they have not handled. It stays in the inbox of the sessions that see it until the person handles it (replies, closes it, or marks it `done`), even after it reached a session.
+A thread is **waiting** for a person when it is pending for them: `open`, the person named in it, with a note by someone else they have not handled. It stays in the inbox of the sessions that see it until the person handles it (replies, closes it, or marks it `done`), even after it reached a session.
 
-A `team` thread is never "waiting": it shows only while it is `open` and has notes new for the session. So a teammate's agent with nothing to add does not keep seeing it, and once the asker closes it (resolved), it leaves every inbox, even with notes the session has not fetched; `inbox` with `all` and `thread` still show it. A closed `direct` thread with new notes still shows until they are fetched, since a closing note is often meant to be read.
+A `team` or `global` thread is never "waiting" for a participant it does not name: for them it shows only while it is `open` and has notes new for the session. So an agent with nothing to add does not keep seeing it, and once the opener closes it (resolved), it leaves their inbox, even with notes the session has not fetched; `inbox` with `all` and `thread` still show it. For a participant it names, it is waiting like a `direct` thread. A closed `direct` thread with new notes still shows until they are fetched, since a closing note is often meant to be read.
 
 For others, a participant's delivery is about the latest note *written by someone else*: whether it reached any of their sessions and which one first (its label, and its context at that moment), how many of their live sessions have it (`seen_by`), and whether the person has handled it, when, and from which session (`handled_at`, `handled_by`): "seen by pi in embeddings, not handled yet", or "handled by Claude Code in producto at 19:30". A session that has ended still counts as having seen it (the `by`), even though `seen_by` counts live sessions only.
 
@@ -61,34 +64,48 @@ All three are the same over HTTP and over MCP (`relevo mcp`, see `docs/agents.md
 
 ### `send`
 
-Opens a thread, or writes in one.
+Opens a thread, or writes in one. Who it is for comes from the `@` mentions in its text (see [Mentions](#mentions)).
 
 | Field | Type | |
 |---|---|---|
-| `to` | array of addresses (`handle` or `handle/context`, the context with or without a branch), or `["@team"]` | Opens a new thread. Exactly one of `to` and `thread`. |
-| `thread` | thread id | Writes in an existing thread. |
-| `text` | string | The note. Required unless only closing, claiming or marking done (`thread` + `close: true`, `claim: true` or `done: true`, no `text`). |
-| `close` | bool, optional | Marks the thread closed after writing. |
-| `claim` | bool, optional | With `thread`: claims the thread for this session, as a state, without a note when there is no `text`. Not with `to`. |
-| `done` | bool, optional | With `thread` and no `text`: the person has handled the thread up to the latest note that reached this session, with nothing to write ("seen, nothing to do"). A note that has not reached it stays pending (a session that fetched nothing handles nothing). Writes no note and does not claim. Not with `to`, `text` or `claim`. |
+| `text` | string | The note. Without `thread` it opens a new thread, for whom its mentions name (no mention: the global board). Required unless only closing, claiming or marking done (`thread` + `close: true`, `claim: true` or `done: true`, no `text`). |
+| `thread` | thread id, optional | Writes in an existing thread. Its mentions of people who are not named in the thread yet name them (and add them, if they were not participants). |
+| `close` | bool, optional | With `thread`: marks the thread closed after writing. |
+| `claim` | bool, optional | With `thread`: claims the thread for this session, as a state, without a note when there is no `text`. |
+| `done` | bool, optional | With `thread` and no `text`: the person has handled the thread up to the latest note that reached this session, with nothing to write ("seen, nothing to do"). A note that has not reached it stays pending (a session that fetched nothing handles nothing). Writes no note and does not claim. Not with `text` or `claim`. |
 | `key` | string, 1 to 100 characters, optional | Idempotency key. A repeated `send` from the same person with the same key, within 24 hours of the `send` that used it, returns the first result and writes nothing. Only a successful `send` uses up a key. After 24 hours the key expires: the same key is a fresh `send`, which uses it up for another 24 hours. The server forgets expired keys. |
+| `to` | array of addresses, or `["@team"]`, optional | **Deprecated; accepted through 0.4.x for clients not yet updated, removed after.** Opens a thread the way 0.3 did, instead of the mentions: the text's mentions are then not read. An address is a handle, optionally followed by `/` and a context; `["@team"]` (or `@equipo`) opens a `global` thread, as a question to everyone did. Exactly one of `to` and `thread`, and `close`, `claim` and `done` not with it. Its rules are those of 0.3 (1 to 20 distinct active people other than you, with or without `@`, in any case; a person twice with different contexts, a malformed context, a context on `@team`, yourself, or `@team` next to handles fail with `BAD_REQUEST`; unknown or inactive people with `UNKNOWN_PERSON`). |
 
 The body is a JSON object; anything else (an array, say), or any other field, fails with `BAD_REQUEST`. Characters here and below are Unicode scalar values.
 
 Rules:
 
-- `to` holds 1 to 20 addresses of distinct active people other than you, or exactly `["@team"]`. An address is a handle, optionally followed by `/` and a context (`ana/pagos-api`, `ana/pagos-api@feat/refunds`: everything after the first `/`); naming the same person twice with different contexts (or once with a context and once without) fails with `BAD_REQUEST`, and so does a malformed context or a context on `@team`. Addresses may be written with or without a leading `@` and in any case; repeats are merged (`["@team", "equipo"]` is one `@team`). Writing to yourself, or `@team` next to other handles, fails with `BAD_REQUEST`. An unknown or inactive handle fails with `UNKNOWN_PERSON`, whose error lists the valid handles with their `about`.
-- `["@team"]` opens a `team` thread. `@equipo` is accepted as the same thing (both with or without `@`); `team` and `equipo` can therefore not be handles. A person may open at most `RELEVO_TEAM_QUESTIONS_PER_DAY` (default 5) team threads in any rolling 24 hours: beyond that, `TEAM_LIMIT`. A team of one (only you) fails with `NO_RECIPIENTS`.
+- Opening a thread: its mentions say who is in it (see [Mentions](#mentions)). People only: a `direct` thread. At least one team: a `team` thread, to the active members of the teams named and the people named. No mention: a `global` thread, to every active person. Nobody but you (a team whose only active member is you, or a server where you are alone) fails with `NO_RECIPIENTS`.
+- A person may open at most `RELEVO_TEAM_QUESTIONS_PER_DAY` (default 5) `team` and `global` threads, together, in any rolling 24 hours: beyond that, `TEAM_LIMIT`, whose message says to name the people the note is for, or to wait.
+- Writing in a thread: a mention of a team fails with `BAD_REQUEST` (open a new thread for a team). Mentions of people name them in the thread: participants not yet named become named; people who were not participants are added, named, in a `direct` or `team` thread (a `global` thread already holds everyone active when it was opened; someone invited after is added the same way). A context on a mention applies only to a person this note adds; for someone already in the thread it is ignored, and the thread stays addressed where it was for them.
 - Writing a note in an existing thread claims it for the session that wrote it, unless another session of your person holds it; opening a thread claims nothing (see [Claiming](#sessions-and-routing)).
 - Writing in a thread you are not a participant of fails with `NOT_FOUND` (the thread's existence is not revealed).
 - Writing in a closed thread fails with `THREAD_CLOSED`. Open a new thread instead.
-- Closing: in a `direct` thread any participant may close it; in a `team` thread only the person who asked. Closing releases every claim on the thread: a closed thread is nobody's work any more.
+- Closing: in a `direct` thread any participant may close it; in a `team` or `global` thread only the person who opened it. Closing releases every claim on the thread: a closed thread is nobody's work any more.
 - Text over 64 KiB (counted once decoded from JSON) fails with `TOO_LARGE` (400); empty or blank text with `BAD_REQUEST`. The whole request body may be up to 400 KiB, so a note of 64 KiB fits however the client escapes it.
 - Loop guard: a thread accepts at most 20 notes in any rolling hour. The 21st fails with `THREAD_BUSY`, whose message tells the agent to check with its person before going on. (The server cannot tell a person from an agent, so this caps speed, not authorship.)
 - A person may send at most 60 notes per rolling minute: beyond that, `RATE_LIMITED`.
 - The limits count notes only: a close, a claim or a `done` without text is never limited.
+- A `send` that fails writes nothing: not the note, not the people it would have named or added.
 
-Returns `{ "thread": "<id>", "note": "<id>", "status": "open" | "closed", "claimed": "this-session" | "other-session" | null }`. `note` is `null` when the `send` only closed the thread. `claimed` is who holds the thread for your person after this `send`: `"other-session"` means another of your sessions had it first, so this one should step aside; `null` after opening a thread, and after any close, which releases every claim. A replayed `send` returns who held the thread after its first result, named for the session that replays: `"this-session"` only when that session is the one that held it, so a retry from another session (an agent restarted under a new id, say) is not told it holds a thread it does not.
+Returns `{ "thread": "<id>", "kind": "direct" | "team" | "global", "note": "<id>", "status": "open" | "closed", "claimed": "this-session" | "other-session" | null, "to": { "people": ["ana"], "teams": ["backend"] }, "added": ["bob"], "reached": 7 }`. `note` is `null` when the `send` only closed the thread. `to` is what this note's mentions named, resolved (handles in lowercase, as the server knows them; `@team` turned into the team it meant); both empty for a note with no mention. `added` is the people this note added to the thread (empty when opening, and when it added nobody). `reached` is how many people, other than you, take part in the thread after this `send`. So the agent can check that the note went where its person meant. `claimed` is who holds the thread for your person after this `send`: `"other-session"` means another of your sessions had it first, so this one should step aside; `null` after opening a thread, and after any close, which releases every claim. A replayed `send` returns its first result (with who held the thread after it, named for the session that replays: `"this-session"` only when that session is the one that held it, so a retry from another session, an agent restarted under a new id, say, is not told it holds a thread it does not).
+
+### Mentions
+
+A mention is `@` and a name, written in the note:
+
+- **Where.** Anywhere in the text, except inside code: an inline code span (text between two runs of the same number of backticks, on one line or several) or a fenced code block (from a line that starts, after up to three spaces, with three or more `` ` `` or `~`, to the line that closes it with at least as many of the same, or the end of the note). The `@` must be at the start of the text or come after a character that is not a letter, a digit, `.`, `_`, `-`, `+`, `/`, `@` or `` ` ``: so `pedro@empresa.com`, `https://x.com/@ana` and `@@ana` mention nobody.
+- **What.** The name is `[A-Za-z0-9][A-Za-z0-9_-]{1,31}`, read in lowercase, and may be followed by `/` and a context (`@ana/pagos-api`, `@ana/pagos-api@feat/refunds`), read up to the first whitespace or character a context cannot hold. Trailing `.`, `,`, `;`, `:`, `!`, `?`, `)`, `-`, `/` and `'` are not part of it: `@ana.` and `(@ana)` mention `ana`. An `@` followed by something that is not a name (`@ `, `@1`, `@a` alone, `@` at the end) is plain text.
+- **Who.** A name is an active person's handle, or a team's name, or `team` or `equipo`, which mean *your* team: the one team you are in. When you are in none, or in several, `@team` fails with `BAD_REQUEST`, whose message lists your teams (or says you are in none) and asks to name one. A name that is none of these fails with `UNKNOWN_PERSON`, which lists the valid handles with their `about`, and the teams with their members (`valid`, `teams`), and names the mentions it did not know (`unknown`). It never falls back to the global board: a typo must not become a note to everyone.
+- **Repeats and you.** A person or team mentioned twice counts once; the same person with two different contexts (or once with one and once without) fails with `BAD_REQUEST`, as does a context on a team. Mentioning yourself is ignored (a note "@ana" from Ana names nobody new). A person mentioned who is also in a team mentioned is reached once, and named.
+- **How many.** At most 20 distinct people and teams in one note; more fails with `BAD_REQUEST`.
+
+A mention of an inactive person fails like an unknown one. A team with no active member but you counts as named, and reaches nobody (see `NO_RECIPIENTS` above).
 
 ### `inbox`
 
@@ -103,15 +120,18 @@ Returns:
 
 ```json
 {
-  "team": [ { "handle": "ana", "name": "Ana", "about": "payments backend", "contexts": ["pagos-api", "frontend"] } ],
+  "team": [ { "handle": "ana", "name": "Ana", "about": "payments backend", "contexts": ["pagos-api", "frontend"], "teams": ["backend"] } ],
+  "teams": [ { "name": "backend", "title": "Backend", "members": ["ana", "pedro"] } ],
   "session": { "label": "Claude Code laptop", "context": "pagos-api", "you": "ana" },
   "threads": [
     {
       "id": "r_8f2k…",
-      "kind": "direct" | "team",
+      "kind": "direct" | "team" | "global",
       "title": "Refunds endpoint",
       "from": "oscar",
       "participants": ["oscar", "ana"],
+      "teams": [],
+      "named": true,
       "status": "open" | "closed",
       "pending": true,
       "last_note": { "id": "n_…", "author": "ana", "via": "Claude Code laptop", "created_at": "…", "text": "…", "truncated": false },
@@ -128,7 +148,8 @@ Returns:
 }
 ```
 
-- `team` lists every active person, you included, so the agent knows whom to ask. `contexts` are the distinct contexts of their sessions seen in the last 15 minutes, sorted.
+- `team` lists every active person on the server, you included, so the agent knows whom to mention (the name is kept from 0.3: it means everyone on the server, not a team). `contexts` are the distinct contexts of their sessions seen in the last 15 minutes, sorted; `teams`, the names of the teams they are in, sorted.
+- `teams` lists every team, sorted by name, with its members (active people, sorted); a team with no active member is listed with none.
 - `session` is the session this request counts as; `you` is the handle of its person, so an agent knows which member of `team` it speaks for.
 - `pending` says the thread is pending for your person (see [Delivery state](#delivery-state)). (Up to 0.2.x it was called `waiting_for_you`; that name is gone.)
 - `held_by` lists the other participants who hold the thread now (live claims only), with the session's label, context and since when, so whoever asked sees who is on it without opening the thread; empty when nobody else holds it.
@@ -138,17 +159,18 @@ Returns:
 - `last_note` is the thread's latest note, whoever wrote it and whether or not it reached this session, cut like `new_notes`. So a session sees what a waiting thread is waiting on even when another of its person's sessions already fetched the answer. Showing it delivers nothing.
 - Returning a thread here delivers its new notes to this session. Threads counted in `more` are not delivered.
 - `from` is the person who opened the thread.
+- A thread's `teams` are the teams its opening note named (as their names were then), sorted; empty for `direct` and `global` threads. `named` says whether your person is a named participant (see [Concepts](#concepts)): only then can the thread be pending for them.
 
 ### `thread`
 
 The whole history of one thread your person takes part in, from any of their sessions. Delivers all its notes to this session. Does not claim it.
 
-Returns the same thread object as `inbox`, with `notes` (every note, in full, oldest first, `truncated: false`) in place of `new_notes`, plus `delivery`: for each participant, in the order of `participants`, the latest note by someone else that they have, when it reached them and which session it reached first (`by`, kept after that session ends), which session of theirs claimed the thread and since when (`claimed_by`, with `since`), or `null`s, how many of their live sessions have that note (`seen_by`, 0 when none has), and, once the person has handled that note, when and from which session (`handled_at`, `handled_by`; `null` until then). `handled_at` is when they last handled a note by someone else that they had not handled yet: handling the thread again with nothing new by others keeps it. Each session shows its label and its context at that moment: when the note reached it, when it claimed the thread, when it handled it. This is how a writer sees "picked up by her agent 5 minutes ago", and tells "seen by pi, not handled yet" from "handled by Claude Code at 19:30".
+Returns the same thread object as `inbox`, with `notes` (every note, in full, oldest first, `truncated: false`) in place of `new_notes`, plus `delivery`: for each participant, in the order of `participants`, whether the thread names them (`named`), the latest note by someone else that they have, when it reached them and which session it reached first (`by`, kept after that session ends), which session of theirs claimed the thread and since when (`claimed_by`, with `since`), or `null`s, how many of their live sessions have that note (`seen_by`, 0 when none has), and, once the person has handled that note, when and from which session (`handled_at`, `handled_by`; `null` until then). `handled_at` is when they last handled a note by someone else that they had not handled yet: handling the thread again with nothing new by others keeps it. Each session shows its label and its context at that moment: when the note reached it, when it claimed the thread, when it handled it. This is how a writer sees "picked up by her agent 5 minutes ago", and tells "seen by pi, not handled yet" from "handled by Claude Code at 19:30".
 
 ```json
-"delivery": [ { "handle": "ana", "note": "n_…", "delivered_at": "2026-11-08T10:46:00Z", "by": { "label": "Claude Code laptop", "context": "pagos-api" }, "claimed_by": { "label": "Claude Code laptop", "context": "pagos-api", "since": "2026-11-08T10:47:00Z" }, "seen_by": 1,
+"delivery": [ { "handle": "ana", "named": true, "note": "n_…", "delivered_at": "2026-11-08T10:46:00Z", "by": { "label": "Claude Code laptop", "context": "pagos-api" }, "claimed_by": { "label": "Claude Code laptop", "context": "pagos-api", "since": "2026-11-08T10:47:00Z" }, "seen_by": 1,
                 "handled_at": null, "handled_by": null },
-              { "handle": "bob", "note": null, "delivered_at": null, "by": null, "claimed_by": null, "seen_by": 0, "handled_at": null, "handled_by": null } ]
+              { "handle": "bob", "named": false, "note": null, "delivered_at": null, "by": null, "claimed_by": null, "seen_by": 0, "handled_at": null, "handled_by": null } ]
 ```
 
 ## HTTP
@@ -158,8 +180,8 @@ Every route needs `Authorization: Bearer <token>`, and takes the optional `Relev
 ```
 GET  /api/inbox?all=1&wait=30
 GET  /api/threads/:id
-POST /api/send            { to | thread, text, close?, claim?, done?, key? }
-GET  /api/people          { "team": [...], "you": "ana" }  (same list as inbox)
+POST /api/send            { text?, thread?, close?, claim?, done?, key? }   (to: deprecated, see send)
+GET  /api/people          { "team": [...], "teams": [...], "you": "ana" }  (same lists as inbox)
 DELETE /api/session        forget this session (the one the headers name) and release its claims; { "ok": true }
 GET  /api/dist/manifest.json   the signed list of the clients this server hands out (see docs/update.md)
 GET  /api/dist/manifest.sig
@@ -175,8 +197,8 @@ Errors: `{ "error": { "code": "…", "message": "…", …extra } }` with these 
 |---|---|
 | `UNAUTHORIZED` (missing, unknown or revoked token; inactive person) | 401 |
 | `NOT_FOUND` | 404 |
-| `BAD_REQUEST`, `UNKNOWN_PERSON` (+ `valid`: the team list), `NO_RECIPIENTS`, `TOO_LARGE` | 400 (413 for a body over 400 KiB) |
-| `THREAD_CLOSED`, `FORBIDDEN` (closing a team thread you did not open) | 409, 403 |
+| `BAD_REQUEST`, `UNKNOWN_PERSON` (+ `valid`: the people, `teams`: the teams, `unknown`: the names not known), `NO_RECIPIENTS`, `TOO_LARGE` | 400 (413 for a body over 400 KiB) |
+| `THREAD_CLOSED`, `FORBIDDEN` (closing a `team` or `global` thread you did not open) | 409, 403 |
 | `TEAM_LIMIT`, `RATE_LIMITED`, `THREAD_BUSY` | 429 |
 | `INTERNAL` (a server fault; details go to the log only) | 500 |
 
@@ -199,12 +221,19 @@ relevo people
 relevo sessions [<handle>]                                                                 # sessions seen in the last 7 days: handle, label, session id (or default), context (or general), last seen
 relevo about <handle> "new line"
 relevo deactivate <handle>                                                                 # also revokes every token of theirs
+relevo team add <name> [--title "Backend"]                                                 # a new team, with nobody in it
+relevo team join <name> <handle>…                                                          # puts active people in the team
+relevo team leave <name> <handle>…                                                         # takes people out of it
+relevo team remove <name>                                                                  # deletes the team (its threads stay, under its name)
+relevo teams                                                                               # every team: name, title, members
 relevo backup <dest-file>                                                                  # a consistent copy, while the server runs
 relevo backup --keep 14 <dest-dir>                                                         # writes <dest-dir>/YYYYMMDD-HHMMSS.db (UTC), keeps the newest 14
 relevo check-db                                                                            # whether this version can use the database, writing nothing
 ```
 
 The database records the version of its layout. From layout 6 on (relevo 0.3.0), `relevo serve` migrates a database of layout 5 (relevo 0.1.0 to 0.2.x) in place when it starts, keeping what layout 5 said was waiting for a reply: a `direct` thread that was waiting for a person there (open, its latest note not theirs) is handled up to their own latest note in it, so it stays pending for them even if it had reached one of their sessions; every other thread is handled up to its latest note. Reaching a session is not taken as handling: `handled_at` is set only when the person wrote after the latest note by someone else (as when they first did), and is `null` otherwise. As with any pending thread, a new session of the person gets the notes they have not handled as new, once; the person's sessions that already had them see them as waiting, as before, not as new. Only `serve` migrates: every other command that opens the database refuses one of layout 5, before writing anything, and says to start `serve` first (and to keep a `relevo backup` before, which copies it as it is), so an admin command never changes the layout behind the owner's back. Every command refuses any other older layout, and any newer one, and says so; such a database must be deleted (with its `-wal` and `-shm` files) and the team invited again.
+
+Layout 7 (relevo 0.4.0) adds teams, the `global` kind and named participants. `relevo serve` migrates a database of layout 6 (relevo 0.3.x) to it when it starts, and one of layout 5 through layout 6 first: every `team` thread becomes a `global` thread (a question to everyone was what it meant), whose participants are not named; every participant of a `direct` thread is named; delivery, handled and claims stay as they were, so nothing becomes pending or stops being pending. As with layout 5, only `serve` migrates: every other command refuses a database of layout 5 or 6, before writing anything, and says to start `serve` first.
 
 `check-db` says whether this version can use the database: as it is, once `serve` migrates it (exit 0), or not, and why (exit 1). It writes nothing, not even `-wal` or `-shm` files: a database without them (no server has it open) is read as immutable, one with them read-only through the server's. It never creates a database. `deploy/install.sh` asks it before it replaces the binary.
 
@@ -220,7 +249,9 @@ The database records the version of its layout. From layout 6 on (relevo 0.3.0),
 
 Whatever the transport, the server limits what a client can hold: 10 seconds to send the request head, which may take at most 16 KiB (a longer one is refused with 431, so a connection holds little before its token is checked), 30 seconds to send the body, an idle connection closed after 75 seconds, a request answered within 90 seconds (a waiting `inbox` answers by 60), at most 1,024 connections at once (beyond that, new ones wait) and 64 from one address (beyond that, new ones are closed unanswered). Loopback is not counted against one address's share: behind a proxy on the same machine, every connection comes from there, the whole team's. Clients behind one NAT share one address's 64. These replace what the proxy used to enforce; a proxy in front stays possible.
 
-`invite` on an existing handle reactivates the person, sets the new `--name`, and `--about` if given. `team` and `equipo` cannot be handles (they mean the whole team). `--label` defaults to `agent`. `deactivate` revokes every token of the person, for good: inviting them back issues a new token, and their old ones never work again.
+`invite` on an existing handle reactivates the person, sets the new `--name`, and `--about` if given. `team` and `equipo` cannot be handles (they mean your team), nor can the name of a team: `invite` refuses one, and `team add` refuses the handle of a person, active or not, and `team` and `equipo`. `--label` defaults to `agent`. `deactivate` revokes every token of the person, for good: inviting them back issues a new token, and their old ones never work again. A deactivated person stays in their teams, but is not reached through them while inactive.
+
+`team join` and `team leave` take one or more handles; joining someone already in the team, or leaving someone not in it, is not an error, and says so. `team join` refuses an unknown or inactive handle, and changes nothing then. A team's membership changes only who later notes reach: threads already open keep their participants. `team remove` deletes the team and its membership; its threads keep its name in `teams`, and a later team may take the name. `teams` lists every team with its title and members, inactive members marked.
 
 ## Privacy and logs
 
@@ -228,4 +259,4 @@ The server logs counts and ids, never note text or tokens. The database holds to
 
 ## Later (not v0)
 
-Consent between teams, webhooks, OAuth for ChatGPT, A2A gateway, attachments.
+Consent between servers, webhooks, OAuth for ChatGPT, A2A gateway, attachments.
