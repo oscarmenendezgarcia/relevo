@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { RelevoError } from "../src/client.ts";
@@ -56,10 +56,35 @@ test("send opens a thread for whom its text mentions, and says whom it reached",
   assert.equal(thread.new_notes[0].via, "pi laptop");
 });
 
-test("send has no `to`: one given is refused, and nothing is sent", async () => {
+/** pi's own check of a tool call's arguments, from the pi install on this machine (PI_AI_VALIDATION, or
+ * the newest release under ~/.pi/agent/install), only read; `undefined` without one. */
+async function piValidator(): Promise<((tool: any, call: any) => any) | undefined> {
+  let file = process.env.PI_AI_VALIDATION;
+  if (!file) {
+    const releases = join(homedir(), ".pi", "agent", "install", "releases");
+    const versions = existsSync(releases) ? readdirSync(releases).sort((a, b) => a.localeCompare(b, undefined, { numeric: true })) : [];
+    file = versions
+      .map((v) => join(releases, v, "node_modules", "@earendil-works", "pi-ai", "dist", "utils", "validation.js"))
+      .filter((f) => existsSync(f))
+      .pop();
+  }
+  return file ? (await import(file)).validateToolArguments : undefined;
+}
+
+test("send has no `to`: one given reaches the tool, is refused with what to do, and nothing is sent", async (t) => {
   const ext = extension();
   const send = ext.tools.get("relevo_send");
   assert.deepEqual(Object.keys(send.parameters.properties).sort(), ["claim", "close", "done", "text", "thread"]);
+  // pi refuses fields the schema does not allow before the tool runs, saying only "to: unknown field": the
+  // schema allows any, so a call with `to` reaches the tool, which says what to do.
+  assert.equal(send.parameters.additionalProperties, undefined);
+  const validate = await piValidator();
+  if (validate) {
+    const call = (args: any) => ({ type: "toolCall", id: "1", name: "relevo_send", arguments: args });
+    for (const to of ["ana", ["ana"]]) assert.deepEqual(validate(send, call({ to, text: "hi" })), { to, text: "hi" });
+  } else {
+    t.diagnostic("no pi install found: pi's own validation not checked");
+  }
   const count = async () => (await api(server, ana, "GET", "/api/inbox?all=1", undefined, "to-checker")).threads.length;
   const before = await count();
   for (const to of ["ana", ["ana"]]) {
@@ -71,6 +96,11 @@ test("send has no `to`: one given is refused, and nothing is sent", async () => 
       return true;
     });
   }
+  // Any other field the tool does not take: refused with its fields, nothing sent.
+  await assert.rejects(
+    ext.tool("relevo_send", { text: "@ana Is the ledger job on cron?", recipients: ["ana"], cc: "bob" }, work),
+    /^Error: relevo_send has no `recipients`, `cc`: its fields are `text`, `thread`, `close`, `claim` and `done`\. Nothing was sent\.$/,
+  );
   assert.equal(await count(), before);
 });
 

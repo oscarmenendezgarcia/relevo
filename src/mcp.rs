@@ -93,10 +93,12 @@ const END_TIMEOUT: Duration = Duration::from_secs(2);
 /// Pushed threads kept for `inbox`, at most.
 const MAX_PUSHED: usize = 50;
 
-/// `send`'s fields. Unknown ones are refused, so a misnamed field (`message`, `recipients`, the
-/// old `to`) fails with the list of the right ones instead of being dropped.
+/// `send`'s fields. Unknown ones are refused by `send` itself, so a misnamed field (`message`,
+/// `recipients`) fails with the list of the right ones instead of being dropped, and the old `to`
+/// says to write the @ in `text`. Not by serde, nor by the schema (no `additionalProperties:
+/// false`, so a client that checks arguments lets them through): their "unknown field" alone would
+/// leave an agent that gave `to` to send again with no @, onto the global board.
 #[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct SendParams {
     /// To write in an existing thread: its id (`"r_…"`). Without it, `text` opens a new thread,
     /// for whom its @ mentions name (none: the global board).
@@ -129,6 +131,30 @@ pub struct SendParams {
     /// claimed. Not for a note that is not for you: leave that one pending.
     #[serde(default)]
     pub done: Option<bool>,
+    /// Any other field, to refuse.
+    #[serde(flatten)]
+    #[schemars(skip)]
+    pub unknown: Map<String, Value>,
+}
+
+const SEND_FIELDS: &str = "`text`, `thread`, `close`, `claim` and `done`";
+
+/// Why `send` refuses the fields it does not take, if any: `to`, gone, saying what to do instead.
+fn unknown_fields(unknown: &Map<String, Value>) -> Option<String> {
+    if unknown.contains_key("to") {
+        return Some(format!(
+            "send has no `to`: write who the note is for in `text`, with @handle for a person, \
+             @team-name for a team, or no @ at all for the global board. Its fields are \
+             {SEND_FIELDS}. Nothing was sent."
+        ));
+    }
+    (!unknown.is_empty()).then(|| {
+        let names: Vec<String> = unknown.keys().map(|k| format!("`{k}`")).collect();
+        format!(
+            "send has no {}: its fields are {SEND_FIELDS}. Nothing was sent.",
+            names.join(", ")
+        )
+    })
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -405,6 +431,9 @@ impl Relevo {
                        person meant."
     )]
     async fn send(&self, Parameters(p): Parameters<SendParams>) -> Result<String, String> {
+        if let Some(refusal) = unknown_fields(&p.unknown) {
+            return Err(refusal);
+        }
         let client = self.client()?;
         let mut body = Map::new();
         let opened = p.thread.is_none();

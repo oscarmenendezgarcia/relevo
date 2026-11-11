@@ -636,7 +636,8 @@ async fn send_reads_whom_from_the_text_and_names_its_fields() {
     }
     assert!(!about.contains("`to`"), "{about}");
     let schema = &send["inputSchema"];
-    assert_eq!(schema["additionalProperties"], false, "{schema}");
+    // Unknown fields are refused by the tool, which says what to do, not by the schema.
+    assert!(schema["additionalProperties"].is_null(), "{schema}");
     let mut props: Vec<&String> = schema["properties"].as_object().unwrap().keys().collect();
     props.sort();
     assert_eq!(props, ["claim", "close", "done", "text", "thread"]);
@@ -727,10 +728,12 @@ async fn send_reads_whom_from_the_text_and_names_its_fields() {
     );
     assert!(err.contains("- @ana (Ana): ana things\n"), "{err}");
     assert!(err.contains("- @backend (Backend): @bob, @carl\n"), "{err}");
-    // A misnamed field fails, naming the right ones: the old `to` too.
+    // A misnamed field fails, naming the right ones; the old `to` says to write the @ in `text`
+    // (an agent told only "unknown field" would send again with no @, onto the global board).
     for (n, args) in [
         (900, json!({ "to": "bob", "text": "Old?" })),
         (901, json!({ "text": "@bob", "message": "Misnamed?" })),
+        (902, json!({ "to": ["bob"], "text": "Old too?" })),
     ] {
         ana.write(json!({ "jsonrpc": "2.0", "id": n, "method": "tools/call",
             "params": { "name": "send", "arguments": args } }))
@@ -743,11 +746,20 @@ async fn send_reads_whom_from_the_text_and_names_its_fields() {
         };
         assert_eq!(answer["result"]["isError"], true, "{answer}");
         let err = answer["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(
-            err.contains("unknown field")
-                && err.contains("expected one of `thread`, `text`, `close`, `claim`"),
-            "{err}"
-        );
+        if args.get("to").is_some() {
+            assert_eq!(
+                err,
+                "send has no `to`: write who the note is for in `text`, with @handle for a \
+                 person, @team-name for a team, or no @ at all for the global board. Its fields \
+                 are `text`, `thread`, `close`, `claim` and `done`. Nothing was sent.",
+            );
+        } else {
+            assert_eq!(
+                err,
+                "send has no `message`: its fields are `text`, `thread`, `close`, `claim` and \
+                 `done`. Nothing was sent."
+            );
+        }
     }
     // Nothing was sent.
     let inbox = bob.ok("inbox", json!({})).await;

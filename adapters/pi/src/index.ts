@@ -31,9 +31,11 @@ export function systemSection(me?: string): string {
 const NOT_CONFIGURED =
   "Relevo is not configured: run `relevo connect <url> <token>` (it writes ~/.config/relevo/config.json) or set RELEVO_URL and RELEVO_TOKEN.";
 
+const SEND_FIELDS = ["text", "thread", "close", "claim", "done"];
+const FIELDS = "`text`, `thread`, `close`, `claim` and `done`";
 const NO_TO =
   "relevo_send has no `to`: write who the note is for in `text`, with @handle for a person, @team-name for a team, " +
-  "or no @ at all for the global board. Its fields are `text`, `thread`, `close`, `claim` and `done`. Nothing was sent.";
+  `or no @ at all for the global board. Its fields are ${FIELDS}. Nothing was sent.`;
 
 /** How long session_shutdown waits for `DELETE /api/session`. */
 const END_SESSION_TIMEOUT_MS = 2000;
@@ -266,11 +268,15 @@ export function relevoExtension(options: Options = {}) {
               "Not for a note that is not for you: leave that one pending.",
           },
         },
-        additionalProperties: false,
+        // No `additionalProperties: false`: pi would refuse an unknown field before execute runs, with
+        // only "to: unknown field", and an agent that still gives `to` would retry with no @, onto the
+        // global board. execute refuses unknown fields itself, saying what to do.
       } as any,
       async execute(_id: string, params: any, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: any) {
         // `to` is gone (who a note is for is written in it): an agent that still gives it is told, and nothing is sent.
         if (params?.to !== undefined) throw new Error(NO_TO);
+        const unknown = Object.keys(params ?? {}).filter((k) => !SEND_FIELDS.includes(k));
+        if (unknown.length) throw new Error(`relevo_send has no ${unknown.map((k) => `\`${k}\``).join(", ")}: its fields are ${FIELDS}. Nothing was sent.`);
         const res = await call(ctx?.cwd, (c) => c.send(params ?? {}, signal));
         // Written in, closed or marked done: nothing of it is left to hand over.
         forget(res.thread);
