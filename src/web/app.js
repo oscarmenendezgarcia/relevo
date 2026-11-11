@@ -422,9 +422,10 @@ if (typeof document !== 'undefined') {
   }
 
   const you = () => (state.data ? state.data.you : '');
+  // One name for the person, everywhere: the row, the answer and the notes of a conversation all
+  // say `You`. Who wrote it is the `via …` beside it.
   const nameOf = (handle) => (handle === you() ? 'You' : state.names[handle] || handle);
-  const authorOf = (handle) => (handle === you() ? 'Your agent' : state.names[handle] || handle);
-  // For you with All: two groups, Needs you and Earlier.
+  // For you with All: two groups, Needs you and The rest.
   const grouped = () => state.tab === 'threads' && state.show === 'all' && !state.team;
 
   /// A time; `tick` moves it on in place.
@@ -676,7 +677,7 @@ if (typeof document !== 'undefined') {
     full.notes.forEach((n, i) => {
       const note = el('div');
       const who = el('div', 'who');
-      who.append(el('b', '', authorOf(n.author)), ' · ' + n.via + (n.context ? ' in ' + n.context : '') + ' · ', timeEl(n.created_at, noteTime));
+      who.append(el('b', '', nameOf(n.author)), ' · ' + n.via + (n.context ? ' in ' + n.context : '') + ' · ', timeEl(n.created_at, noteTime));
       note.append(who);
       const text = i === 0 ? withoutTitle(n.text, full.title) : n.text;
       if (text.trim()) note.append(renderNote(text, document));
@@ -717,13 +718,13 @@ if (typeof document !== 'undefined') {
       if (answer) {
         const line = md(answer.text + (answer.truncated ? '…' : ''), 'answer');
         const p = line.firstChild || line.appendChild(el('p'));
-        p.prepend(el('b', '', authorOf(answer.author)), ' ');
+        p.prepend(el('b', '', nameOf(answer.author)), ' ');
         content.append(line);
       }
     }
     if (t.pending) {
       const chips = el('div', 'chips');
-      chips.append(el('span', 'status', 'Waiting for you'));
+      chips.append(el('span', 'status', 'Needs you'));
       if (t.kind === 'global') chips.append(el('span', 'label', 'mentioned you'));
       content.append(chips);
     }
@@ -812,7 +813,7 @@ if (typeof document !== 'undefined') {
       const needs = new Set(state.needs.map((t) => t.id));
       groups = [
         ['needs', 'Needs you', state.needs],
-        ['earlier', 'Earlier', state.threads.filter((t) => !needs.has(t.id) && !t.pending)],
+        ['rest', 'The rest', state.threads.filter((t) => !needs.has(t.id) && !t.pending)],
       ].filter(([, , list]) => list.length);
     } else {
       groups = state.threads.length ? [['flat', viewName(), state.threads]] : [];
