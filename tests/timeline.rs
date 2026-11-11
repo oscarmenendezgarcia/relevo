@@ -244,7 +244,7 @@ async fn scene() -> Scene {
 }
 
 #[tokio::test]
-async fn the_board_lists_the_global_threads_and_threads_the_direct_and_team_ones() {
+async fn the_board_lists_the_global_threads_and_threads_what_is_for_the_person() {
     let sc = scene().await;
     let v = sc.s.timeline("ana", "tab=board").await;
     assert_eq!(v["you"], "ana");
@@ -270,13 +270,15 @@ async fn the_board_lists_the_global_threads_and_threads_the_direct_and_team_ones
     assert_eq!(v["names"]["ana"], "ANA");
 
     let v = sc.s.timeline("ana", "tab=threads").await;
-    // Newest first, by latest note; never Bob and Carol's direct thread, nor @front's.
+    // Newest first, by latest note; never Bob and Carol's direct thread, nor @front's. The board
+    // thread is in it too: Bob's reply names Ana.
     assert_eq!(
         ids(&v),
         vec![
             sc.asked.clone(),
             sc.answered_to_her.clone(),
             sc.team_q.clone(),
+            sc.board.clone(),
             sc.closed_team.clone(),
             sc.closed_direct.clone(),
         ]
@@ -300,7 +302,14 @@ async fn the_board_lists_the_global_threads_and_threads_the_direct_and_team_ones
     // The people Ana shares a direct or team thread with, and every name the answer uses.
     assert_eq!(v["people"], json!(["bob", "carol"]));
     assert_eq!(v["names"]["carol"], "CAROL");
-    assert!(v["names"].get("dan").is_none(), "{}", v["names"]);
+    assert_eq!(v["names"]["dan"], "DAN");
+
+    // A board thread that does not name the person is not for them: not Carol's, nor its
+    // opener's.
+    for who in ["carol", "dan"] {
+        let v = sc.s.timeline(who, "tab=threads").await;
+        assert!(!ids(&v).contains(&sc.board), "{who}");
+    }
 }
 
 #[tokio::test]
@@ -308,7 +317,14 @@ async fn show_team_and_with_filter_the_threads_tab() {
     let sc = scene().await;
     let s = &sc.s;
     let v = s.timeline("ana", "tab=threads&show=waiting").await;
-    assert_eq!(ids(&v), vec![sc.asked.clone(), sc.answered_to_her.clone()]);
+    assert_eq!(
+        ids(&v),
+        vec![
+            sc.asked.clone(),
+            sc.answered_to_her.clone(),
+            sc.board.clone()
+        ]
+    );
     // Opened by someone else, and Ana wrote in it.
     let v = s.timeline("ana", "tab=threads&show=answered").await;
     assert_eq!(ids(&v), vec![sc.team_q.clone()]);
@@ -320,7 +336,7 @@ async fn show_team_and_with_filter_the_threads_tab() {
     assert_eq!(v["threads"][0]["closed_by"], "carol");
     assert_eq!(v["threads"][1]["closed_by"], "bob");
     let v = s.timeline("ana", "tab=threads&show=all").await;
-    assert_eq!(ids(&v).len(), 5);
+    assert_eq!(ids(&v).len(), 6);
 
     let v = s.timeline("ana", "tab=threads&team=backend").await;
     assert_eq!(ids(&v), vec![sc.team_q.clone(), sc.closed_team.clone()]);
@@ -332,14 +348,25 @@ async fn show_team_and_with_filter_the_threads_tab() {
         .await;
     assert_eq!(ids(&v), vec![sc.closed_team.clone()]);
 
-    // With Carol: the team threads Carol is in, never Bob and Carol's direct thread.
+    // With Carol: the threads Carol is in (everyone is in a board thread), never Bob and Carol's
+    // direct thread.
     let v = s.timeline("ana", "tab=threads&with=carol").await;
-    assert_eq!(ids(&v), vec![sc.team_q.clone(), sc.closed_team.clone()]);
+    assert_eq!(
+        ids(&v),
+        vec![sc.team_q.clone(), sc.board.clone(), sc.closed_team.clone()]
+    );
     let v = s.timeline("ana", "tab=threads&with=BOB&show=waiting").await;
-    assert_eq!(ids(&v), vec![sc.asked.clone(), sc.answered_to_her.clone()]);
-    // Dan shares no direct or team thread with Ana.
+    assert_eq!(
+        ids(&v),
+        vec![
+            sc.asked.clone(),
+            sc.answered_to_her.clone(),
+            sc.board.clone()
+        ]
+    );
+    // Dan shares no direct or team thread with Ana: only the board thread.
     let v = s.timeline("ana", "tab=threads&with=dan").await;
-    assert_eq!(ids(&v), Vec::<String>::new());
+    assert_eq!(ids(&v), vec![sc.board.clone()]);
     // Nor does the board answer for Bob and Carol.
     let v = s.timeline("carol", "tab=threads&with=bob").await;
     assert!(ids(&v).contains(&sc.bob_carol));
@@ -350,19 +377,19 @@ async fn show_team_and_with_filter_the_threads_tab() {
 async fn counts_count_what_each_tab_show_and_team_would_list() {
     let sc = scene().await;
     let v = sc.s.timeline("ana", "tab=board").await;
-    // `waiting` counts what `show=waiting` lists: not the board thread, pending for Ana too.
+    // The board thread names Ana: it counts in `threads`, and in `waiting`, pending for her.
     assert_eq!(v["threads"][0]["pending"], true);
     assert_eq!(
         v["counts"],
-        json!({ "board": 1, "threads": 5, "waiting": 2, "answered": 1, "closed": 2,
+        json!({ "board": 1, "threads": 6, "waiting": 3, "answered": 1, "closed": 2,
                 "teams": { "backend": 2 } })
     );
     // The same whatever the filters.
     let v =
         sc.s.timeline("ana", "tab=threads&show=closed&with=carol&limit=1")
             .await;
-    assert_eq!(v["counts"]["threads"], 5);
-    assert_eq!(v["counts"]["waiting"], 2);
+    assert_eq!(v["counts"]["threads"], 6);
+    assert_eq!(v["counts"]["waiting"], 3);
 
     // Carol: her team threads, @front included; a team with no thread counts 0.
     let v = sc.s.timeline("carol", "tab=threads").await;
@@ -470,10 +497,10 @@ async fn pages_follow_the_cursor_to_the_end() {
     }
     assert_eq!(seen, all);
     // A page that ends exactly at the last thread says so.
-    let v = s.timeline("ana", "tab=threads&limit=5").await;
-    assert_eq!(ids(&v).len(), 5);
+    let v = s.timeline("ana", "tab=threads&limit=6").await;
+    assert_eq!(ids(&v).len(), 6);
     assert_eq!(v["cursor"], Value::Null);
-    let v = s.timeline("ana", "tab=threads&limit=4").await;
+    let v = s.timeline("ana", "tab=threads&limit=5").await;
     assert!(v["cursor"].is_string());
     // A new note brings a thread back to the top.
     s.reply("bob", &sc.team_q, "late").await;

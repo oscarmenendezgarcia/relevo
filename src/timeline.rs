@@ -27,7 +27,7 @@ const MAX_LIMIT: usize = 50;
 enum Tab {
     /// The `global` threads of the person.
     Board,
-    /// Their `direct` and `team` threads.
+    /// Their `direct` and `team` threads, and the `global` threads that name them.
     Threads,
 }
 
@@ -214,6 +214,10 @@ JOIN people o ON o.id = t.opener_id
 LEFT JOIN thread_closes tc ON tc.thread_id = t.id
 LEFT JOIN people c ON c.id = tc.person_id";
 
+/// What `tab=threads` lists: the person's (`p`) `direct` and `team` threads, and the `global`
+/// threads that name them.
+const FOR_YOU: &str = "(t.kind != 'global' OR p.named_seq IS NOT NULL)";
+
 /// Opened by someone else, and the person (`p`) has written in it.
 const ANSWERED: &str = "t.opener_id != p.person_id
     AND EXISTS (SELECT 1 FROM notes w WHERE w.thread_id = t.id AND w.author_id = p.person_id)";
@@ -242,7 +246,7 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Row> {
 fn page_sql(params: &Params) -> String {
     let tab = match params.tab {
         Tab::Board => "t.kind = 'global'",
-        Tab::Threads => "t.kind != 'global'",
+        Tab::Threads => FOR_YOU,
     };
     let show = match params.show {
         Show::All => "1",
@@ -264,16 +268,17 @@ fn page_sql(params: &Params) -> String {
 
 /// What each tab, `show` value and team of the person's would list, in one pass over the
 /// person's participant rows.
-const COUNTS_SQL: &str = "
-SELECT coalesce(sum(t.kind = 'global'), 0),
-       coalesce(sum(t.kind != 'global'), 0),
-       coalesce(sum(t.kind != 'global' AND p.waiting), 0),
-       coalesce(sum(t.kind != 'global' AND t.opener_id != p.person_id
-                    AND EXISTS (SELECT 1 FROM notes w
-                                WHERE w.thread_id = t.id AND w.author_id = p.person_id)), 0),
-       coalesce(sum(t.kind != 'global' AND t.status = 'closed'), 0)
-FROM participants p JOIN threads t ON t.id = p.thread_id
-WHERE p.person_id = ?1";
+fn counts_sql() -> String {
+    format!(
+        "SELECT coalesce(sum(t.kind = 'global'), 0),
+                coalesce(sum({FOR_YOU}), 0),
+                coalesce(sum({FOR_YOU} AND p.waiting), 0),
+                coalesce(sum({FOR_YOU} AND {ANSWERED}), 0),
+                coalesce(sum({FOR_YOU} AND t.status = 'closed'), 0)
+         FROM participants p JOIN threads t ON t.id = p.thread_id
+         WHERE p.person_id = ?1"
+    )
+}
 
 const TEAM_COUNTS_SQL: &str = "
 SELECT tt.name, count(*) FROM participants p
@@ -518,7 +523,7 @@ pub async fn list(
     let threads = threads_out(&conn, rows)?;
 
     let (board, threads_count, waiting, answered, closed): (i64, i64, i64, i64, i64) = conn
-        .query_row(COUNTS_SQL, [me], |r| {
+        .query_row(&counts_sql(), [me], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
         })?;
     let teams: Vec<String> = conn
@@ -647,7 +652,7 @@ mod tests {
     /// The counts read the person's rows by index, and each thread by its key.
     #[test]
     fn counts_read_only_the_persons_threads() {
-        for sql in [COUNTS_SQL, TEAM_COUNTS_SQL, PEOPLE_SQL] {
+        for sql in [&counts_sql(), TEAM_COUNTS_SQL, PEOPLE_SQL] {
             let plan = plan(sql, 1);
             assert!(plan.iter().any(|s| s.contains("person_id=?")), "{plan:#?}");
             assert!(
