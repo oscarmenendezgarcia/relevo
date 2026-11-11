@@ -34,7 +34,8 @@ try {
   const work = join(server.dir, "Relevo-Demo");
   mkdirSync(work);
   spawnSync("git", ["init", "-q", "-b", "main"], { cwd: work });
-  const env = { ...process.env, RELEVO_URL: server.url, RELEVO_TOKEN: oscar };
+  // No automatic update: it would register this folder in the real config.
+  const env = { ...process.env, RELEVO_URL: server.url, RELEVO_TOKEN: oscar, RELEVO_AUTO_UPDATE: "0" };
   delete env.RELEVO_CONTEXT;
 
   // 1. Print mode.
