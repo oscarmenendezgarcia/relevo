@@ -161,6 +161,9 @@ GET  /api/threads/:id
 POST /api/send            { to | thread, text, close?, claim?, done?, key? }
 GET  /api/people          { "team": [...], "you": "ana" }  (same list as inbox)
 DELETE /api/session        forget this session (the one the headers name) and release its claims; { "ok": true }
+GET  /api/dist/manifest.json   the signed list of the clients this server hands out (see docs/update.md)
+GET  /api/dist/manifest.sig
+GET  /api/dist/<name>          a file the manifest lists
 GET  /health              no token; { "ok": true }
 ```
 
