@@ -191,7 +191,7 @@ What a person reads in `relevo web` (see `docs/web.md`): their threads, newest f
 
 An unknown, repeated or malformed parameter, `show`, `team` or `with` with `tab=board`, or an unknown team or person, fails with `BAD_REQUEST`.
 
-Returns `{ "you": "ana", "teams": ["backend"], "counts": { "board": 3, "threads": 14, "waiting": 2, "answered": 6, "closed": 5, "teams": { "backend": 3 } }, "threads": [ … ], "cursor": "…" | null }`. Threads are ordered by their latest note, newest first; `cursor` is `null` on the last page. `teams` are the teams the person is in now, sorted; `counts` count what each tab, `show` value and team of the person would list (`waiting` counts every tab: a `global` thread that names the person can be pending too). Each thread:
+Returns `{ "you": "ana", "teams": ["backend"], "counts": { "board": 3, "threads": 14, "waiting": 2, "answered": 6, "closed": 5, "teams": { "backend": 3 } }, "people": ["luis", "pedro"], "names": { "ana": "Ana", "pedro": "Pedro" }, "threads": [ … ], "cursor": "…" | null }`. Threads are ordered by their latest note, newest first; `cursor` is `null` on the last page. `teams` are the teams the person is in now, sorted; `counts` count what each tab, `show` value and team of the person would list, whatever filters the request gives (`waiting` counts every tab: a `global` thread that names the person can be pending too). `people` are the people the person shares a `direct` or `team` thread with, sorted (what `with` takes); `names` gives the name of the person, of everyone in `people`, and of everyone the threads name (opener, participants, authors, `closed_by`). (The page needs names, and `GET /api/people` would count as a session seen: see `docs/web.md`.) Each thread:
 
 ```json
 { "id": "r_…", "kind": "direct" | "team" | "global", "title": "…", "from": "oscar", "participants": ["oscar", "ana"], "teams": ["backend"],
@@ -201,9 +201,11 @@ Returns `{ "you": "ana", "teams": ["backend"], "counts": { "board": 3, "threads"
   "handled_by_you": true, "closed_by": "ana" | null, "cursor": "…" }
 ```
 
-`first_note` and `last_note` are cut to 1,000 characters (`truncated`). `context` is the writing session's context then (`null` for a general one). `notes` counts every note. `handled_by_you` says the person has handled the latest note by someone else (as in `delivery`); `closed_by` is who closed the thread. `participants` of a `global` thread is left empty (`[]`): it would list everyone; `notes` and the notes say enough.
+`first_note` and `last_note` are cut to 1,000 characters (`truncated`). `context` is the writing session's context then (`null` for a general one, and for a note written before 0.4.0, which did not keep it). `notes` counts every note. `handled_by_you` says the person has handled the latest note by someone else (as in `delivery`; `false` while nobody else has written); `closed_by` is who closed the thread (`null` while it is open, and for a `direct` thread closed before 0.4.0, which did not keep it; a `team` or `global` thread only its opener closes). `participants` of a `global` thread is left empty (`[]`): it would list everyone; `notes` and the notes say enough.
 
-`GET /api/timeline/threads/:id` returns one such thread with `notes`, every note in full, oldest first (as `thread` does, with `context` on each), in place of `first_note` and `last_note`. A thread the person does not take part in is `NOT_FOUND`. Neither route delivers anything.
+`GET /api/timeline/threads/:id` returns one such thread with `notes`, every note in full, oldest first (as `thread` does, with `context` on each), in place of the count and of `first_note` and `last_note`, and with `names` (as above, for this thread). A thread the person does not take part in is `NOT_FOUND`, as is an id that cannot be decoded. Neither route delivers anything.
+
+Both routes need only the token: the session headers are not read at all (a malformed one is not an error), since no session is involved. They fail with `UNAUTHORIZED` like every route.
 
 ## HTTP
 

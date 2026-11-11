@@ -75,30 +75,34 @@ fn mentions_header(headers: &HeaderMap) -> Result<bool, ApiError> {
     }
 }
 
+/// The person and token behind the request's bearer token: (person id, handle, token id, label).
+fn owner(parts: &Parts, app: &App) -> Result<(i64, String, String, String), ApiError> {
+    let secret = parts
+        .headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().split_once(' '))
+        // Auth schemes are case-insensitive (RFC 9110 section 11.1).
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+        .map(|(_, secret)| secret.trim())
+        .ok_or_else(ApiError::unauthorized)?;
+    app.db()
+        .query_row(
+            "SELECT p.id, p.handle, t.id, t.label
+             FROM tokens t JOIN people p ON p.id = t.person_id
+             WHERE t.hash = ?1 AND t.revoked_at IS NULL AND p.active = 1",
+            [hash_token(secret)],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?
+        .ok_or_else(ApiError::unauthorized)
+}
+
 impl FromRequestParts<Arc<App>> for Caller {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, app: &Arc<App>) -> Result<Self, ApiError> {
-        let secret = parts
-            .headers
-            .get(AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.trim().split_once(' '))
-            // Auth schemes are case-insensitive (RFC 9110 section 11.1).
-            .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
-            .map(|(_, secret)| secret.trim())
-            .ok_or_else(ApiError::unauthorized)?;
-        let (person_id, handle, token_id, label) = app
-            .db()
-            .query_row(
-                "SELECT p.id, p.handle, t.id, t.label
-                 FROM tokens t JOIN people p ON p.id = t.person_id
-                 WHERE t.hash = ?1 AND t.revoked_at IS NULL AND p.active = 1",
-                [hash_token(secret)],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-            .optional()?
-            .ok_or_else(ApiError::unauthorized)?;
+        let (person_id, handle, token_id, label) = owner(parts, app)?;
         // Checked after the token, so that a stranger learns nothing from a 400.
         let (session, context) = session_headers(&parts.headers)?;
         let reads_mentions = mentions_header(&parts.headers)?;
@@ -111,5 +115,21 @@ impl FromRequestParts<Arc<App>> for Caller {
             context,
             reads_mentions,
         })
+    }
+}
+
+/// The person behind a read-only timeline request (`crate::timeline`): the token alone. It is no
+/// session's request, so the session headers are not read at all.
+pub struct Reader {
+    pub person_id: i64,
+    pub handle: String,
+}
+
+impl FromRequestParts<Arc<App>> for Reader {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, app: &Arc<App>) -> Result<Self, ApiError> {
+        let (person_id, handle, _, _) = owner(parts, app)?;
+        Ok(Reader { person_id, handle })
     }
 }

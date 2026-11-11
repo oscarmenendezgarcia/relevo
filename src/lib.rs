@@ -15,6 +15,7 @@ pub mod mention;
 pub mod render;
 pub mod serve;
 pub mod session;
+pub mod timeline;
 pub mod tls;
 pub mod update;
 
