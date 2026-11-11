@@ -505,19 +505,160 @@ async fn only_an_adapters_own_folder_is_ever_replaced() {
         kind: "pi".into(),
         path: other.clone(),
     }];
-    let err = m.update(false).await.unwrap_err().to_string();
-    assert!(err.contains("is not the pi extension"), "{err}");
-    assert!(other.join("package.json").exists());
-    assert_eq!(m.versions().0, "relevo 0.3.0");
+    // Left as it is, and the rest still updated: one broken folder does not hold back the binary.
+    let steps = m.update(false).await.unwrap();
+    assert!(steps[0].installed(), "{steps:?}");
+    assert!(
+        matches!(&steps[1].outcome, Outcome::Kept(why) if why.contains("is not the pi extension")),
+        "{steps:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(other.join("package.json")).unwrap(),
+        r#"{"name":"something-else","version":"0.1.0"}"#
+    );
+    assert_eq!(m.versions().0, "relevo 0.4.0");
 
     // A folder that went away is skipped, not an error.
     m.config.adapters = vec![Adapter {
         kind: "hermes".into(),
         path: m.root().join("gone"),
     }];
-    let steps = m.update(false).await.unwrap();
+    let mut setup = m.setup.clone();
+    setup.version = "0.4.0".into();
+    make_dist(&m.dist(), "0.5.0", &m.key);
+    let steps = update::run(&m.config, &setup, false).await.unwrap();
     assert!(steps[0].installed());
     assert_eq!(steps[1].outcome, Outcome::Kept("no longer there".into()));
+}
+
+/// A clone of the repository with the pi extension in it, at 0.3.0, and something not committed.
+fn clone_with_pi(root: &Path) -> PathBuf {
+    let clone = root.join("src/relevo");
+    std::fs::create_dir_all(clone.join(".git")).unwrap();
+    let pi = clone.join("adapters/pi");
+    adapter_dir(&pi, Kind::Pi, "0.3.0");
+    std::fs::write(pi.join("uncommitted.ts"), "work in progress").unwrap();
+    pi
+}
+
+#[tokio::test]
+async fn a_folder_in_a_git_checkout_is_never_replaced() {
+    let mut m = Machine::new().await;
+    make_dist(&m.dist(), "0.4.0", &m.key);
+    let pi = clone_with_pi(m.root());
+    // Registered before, or by hand: left as it is, the rest updated.
+    m.config.adapters.push(Adapter {
+        kind: "pi".into(),
+        path: pi.clone(),
+    });
+    let steps = m.update(false).await.unwrap();
+    assert!(steps[..3].iter().all(Step::installed), "{steps:?}");
+    assert_eq!(
+        steps[3].outcome,
+        Outcome::Kept("in a git checkout: update it with git".into())
+    );
+    assert_eq!(Kind::Pi.version_in(&pi).unwrap(), "0.3.0");
+    assert!(pi.join("uncommitted.ts").exists());
+
+    // A `.git` file (a worktree) counts as well, and so does one in the folder itself.
+    let worktree = m.root().join("worktree");
+    adapter_dir(&worktree, Kind::Hermes, "0.3.0");
+    std::fs::write(worktree.join(".git"), "gitdir: /elsewhere\n").unwrap();
+    assert!(update::in_git_checkout(&worktree));
+    assert!(!update::in_git_checkout(&m.root().join("hermes/relevo")));
+
+    // `relevo update --adapter` refuses to register it, and replaces nothing.
+    let file = saved_config(&m);
+    let env = env_of(vec![
+        ("RELEVO_CONFIG", file.to_str().unwrap().to_string()),
+        ("HOME", m.root().to_str().unwrap().to_string()),
+    ]);
+    let req = Request {
+        adapter: Some((Kind::Pi, pi.clone())),
+        ..Request::default()
+    };
+    let err = format!(
+        "{:#}",
+        update::command(&req, &m.setup, env, 0).await.unwrap_err()
+    );
+    assert!(
+        err.contains("in a git checkout") && err.contains("not registered"),
+        "{err}"
+    );
+    let saved = relevo::config::saved(&file).unwrap().unwrap();
+    assert!(saved.adapters.is_empty(), "{:?}", saved.adapters);
+    assert_eq!(Kind::Pi.version_in(&pi).unwrap(), "0.3.0");
+    assert!(pi.join("uncommitted.ts").exists());
+}
+
+#[tokio::test]
+async fn a_link_to_a_folder_stays_a_link() {
+    let mut m = Machine::new().await;
+    make_dist(&m.dist(), "0.4.0", &m.key);
+    // Hermes reaches the plugin through a link (~/.hermes/plugins/relevo -> a folder elsewhere).
+    let plugins = m.root().join("plugins");
+    std::fs::create_dir(&plugins).unwrap();
+    let link = plugins.join("relevo");
+    std::os::unix::fs::symlink(m.root().join("hermes/relevo"), &link).unwrap();
+    m.config.adapters = vec![Adapter {
+        kind: "hermes".into(),
+        path: link.clone(),
+    }];
+    let steps = m.update(false).await.unwrap();
+    assert!(steps.iter().all(Step::installed), "{steps:?}");
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(Kind::Hermes.version_in(&link).unwrap(), "0.4.0");
+    m.no_leftovers();
+    let names: Vec<_> = std::fs::read_dir(&plugins).unwrap().collect();
+    assert_eq!(names.len(), 1, "{names:?}");
+
+    // A link into a clone is the clone's: left as it is.
+    let pi = clone_with_pi(m.root());
+    let pi_link = plugins.join("pi");
+    std::os::unix::fs::symlink(&pi, &pi_link).unwrap();
+    m.config.adapters = vec![Adapter {
+        kind: "pi".into(),
+        path: pi_link.clone(),
+    }];
+    let steps = m.update(true).await.unwrap();
+    assert_eq!(
+        steps[1].outcome,
+        Outcome::Kept("in a git checkout: update it with git".into())
+    );
+
+    // Registered by hand through a link, it is the folder that is saved.
+    make_dist(&m.dist(), "0.5.0", &m.key);
+    let file = saved_config(&m);
+    let env = env_of(vec![
+        ("RELEVO_CONFIG", file.to_str().unwrap().to_string()),
+        ("HOME", m.root().to_str().unwrap().to_string()),
+    ]);
+    let req = Request {
+        adapter: Some((Kind::Hermes, link.clone())),
+        ..Request::default()
+    };
+    let steps = update::command(&req, &m.setup, env, 0).await.unwrap();
+    assert!(steps.iter().all(Step::installed), "{steps:?}");
+    let saved = relevo::config::saved(&file).unwrap().unwrap();
+    assert_eq!(
+        saved.adapters,
+        vec![Adapter {
+            kind: "hermes".into(),
+            path: std::fs::canonicalize(m.root().join("hermes/relevo")).unwrap(),
+        }]
+    );
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(Kind::Hermes.version_in(&link).unwrap(), "0.5.0");
 }
 
 #[tokio::test]

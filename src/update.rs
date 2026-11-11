@@ -392,19 +392,33 @@ pub async fn run(config: &Config, setup: &Setup, check: bool) -> Result<Vec<Step
     ));
     let mut seen = vec![];
     for adapter in &config.adapters {
-        if seen.contains(&adapter.path) {
-            continue;
-        }
-        seen.push(adapter.path.clone());
         let Some(kind) = Kind::parse(&adapter.kind) else {
             continue;
         };
+        // The folder itself: a link to it stays a link, and what it points to is updated.
+        let real = fs::canonicalize(&adapter.path);
+        let path = real.as_ref().unwrap_or(&adapter.path).clone();
+        if seen.contains(&path) {
+            continue;
+        }
+        seen.push(path.clone());
         let what = format!("{} ({})", kind.label(), adapter.path.display());
-        if fs::symlink_metadata(&adapter.path).is_err() {
+        if real.is_err() {
             plan.push((what, Ok(Outcome::Kept("no longer there".into()))));
             continue;
         }
-        let have = kind.version_in(&adapter.path)?;
+        if in_git_checkout(&path) {
+            plan.push((what, Ok(Outcome::Kept(IN_GIT.into()))));
+            continue;
+        }
+        // A folder that is no longer that adapter is left as it is; the rest is still updated.
+        let have = match kind.version_in(&path) {
+            Ok(have) => have,
+            Err(e) => {
+                plan.push((what, Ok(Outcome::Kept(format!("{e:#}: left as it is")))));
+                continue;
+            }
+        };
         let file = manifest.files.iter().find(|f| f.kind == kind.name());
         let outcome = match (Version::parse(&have).map(|v| offered.cmp(&v)), file) {
             (Err(e), _) => Ok(Outcome::Kept(format!("{e:#}"))),
@@ -415,7 +429,7 @@ pub async fn run(config: &Config, setup: &Setup, check: bool) -> Result<Vec<Step
                 kind.label()
             ))),
             (Ok(Ordering::Greater), Some(f)) => {
-                Err((have, Job::Adapter(kind, adapter.path.clone(), f.clone())))
+                Err((have, Job::Adapter(kind, path.clone(), f.clone())))
             }
         };
         plan.push((what, outcome));
@@ -501,6 +515,16 @@ pub async fn run(config: &Config, setup: &Setup, check: bool) -> Result<Vec<Step
         steps.push(Step { what, outcome });
     }
     Ok(steps)
+}
+
+const IN_GIT: &str = "in a git checkout: update it with git";
+
+/// Whether `dir` is in a git checkout (a `.git`, folder or file, in it or above it). Such a folder
+/// is updated with git, never replaced: the swap would throw away what git tracks there,
+/// uncommitted work included.
+pub fn in_git_checkout(dir: &Path) -> bool {
+    dir.ancestors()
+        .any(|d| fs::symlink_metadata(d.join(".git")).is_ok())
 }
 
 fn older(offered: &str, have: &str) -> Outcome {
@@ -855,9 +879,13 @@ pub async fn command(
     let mut steps = vec![];
     let adapter = match &req.adapter {
         Some((kind, dir)) => {
-            let dir =
-                std::path::absolute(dir).with_context(|| format!("finding {}", dir.display()))?;
-            // Never register, or replace, anything but that adapter.
+            // The folder itself, so that a link to it is never replaced by a copy.
+            let dir = fs::canonicalize(dir)
+                .with_context(|| format!("finding {}: not registered", dir.display()))?;
+            // Never register, or replace, anything but that adapter, nor a folder git keeps.
+            if in_git_checkout(&dir) {
+                bail!("{} is {IN_GIT}: not registered", dir.display());
+            }
             kind.version_in(&dir).context("not registered")?;
             Some((*kind, dir))
         }
