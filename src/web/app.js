@@ -543,8 +543,10 @@ if (typeof document !== 'undefined') {
     if (rest.trim()) {
       content.append(renderNote(rest + (first.truncated ? '…' : ''), document, 'body clip'));
     }
-    if (t.last_note) {
-      const n = t.last_note;
+    // The answer: the latest note by someone else, never the person's own (docs/web.md).
+    const answer = t.last_other_note;
+    if (answer) {
+      const n = answer;
       const reply = el('div', 'reply');
       const rh = el('div', 'head');
       rh.append(el('b', '', nameOf(n.author)), el('span', 'h', 'via ' + via(n)), timeEl(n.created_at));
@@ -555,7 +557,7 @@ if (typeof document !== 'undefined') {
     chips(t).forEach(([cls, text]) => chipBox.append(el('span', 'chip ' + cls, text)));
     content.append(chipBox);
     const open = state.open.has(t.id);
-    if (t.notes > 2 || first.truncated || (t.last_note && t.last_note.truncated)) {
+    if (t.notes > 2 || first.truncated || (answer && answer.truncated)) {
       const label = t.notes === 1 ? 'Read the whole note' : 'See conversation · ' + t.notes + ' notes';
       const more = el('div', 'more', open ? 'Hide conversation' : label);
       content.append(more);

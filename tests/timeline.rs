@@ -378,6 +378,49 @@ async fn counts_count_what_each_tab_show_and_team_would_list() {
     assert_eq!(v["counts"]["waiting"], 0);
 }
 
+/// `last_other_note` is the latest note by someone else: the answer, even when the person wrote
+/// after it. Null when nobody else wrote, or when it is the first note.
+#[tokio::test]
+async fn last_other_note_is_the_latest_by_someone_else() {
+    let s = server(&["ana", "bob"], &[]);
+    let asked = s.open("ana", "@bob is embeddings in production?").await;
+    s.reply("bob", &asked, "Yes, since October").await;
+    s.reply("ana", &asked, "Thanks, closing it.").await;
+    let alone = s.open("ana", "@bob anyone there?").await;
+    let theirs = s.open("bob", "@ana can you review the contract?").await;
+    s.reply("ana", &theirs, "Done").await;
+    let find = |v: &Value, id: &str| {
+        v["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["id"] == id)
+            .unwrap()
+            .clone()
+    };
+
+    let v = s.timeline("ana", "tab=threads").await;
+    let t = find(&v, &asked);
+    assert_eq!(t["last_note"]["text"], "Thanks, closing it.");
+    assert_eq!(t["last_other_note"]["author"], "bob");
+    assert_eq!(t["last_other_note"]["text"], "Yes, since October");
+    assert_eq!(find(&v, &alone)["last_other_note"], Value::Null);
+    // Bob's note is the first one, already in `first_note`.
+    assert_eq!(find(&v, &theirs)["last_other_note"], Value::Null);
+
+    let v = s.timeline("bob", "tab=threads").await;
+    assert_eq!(
+        find(&v, &asked)["last_other_note"]["text"],
+        "Thanks, closing it."
+    );
+    assert_eq!(find(&v, &theirs)["last_other_note"]["text"], "Done");
+    // One thread in full has every note instead.
+    let (_, t) = s
+        .get("ana", &format!("/api/timeline/threads/{asked}"))
+        .await;
+    assert!(t.get("last_other_note").is_none(), "{t}");
+}
+
 /// What the page shows next to each filter is what clicking it lists, for everyone.
 #[tokio::test]
 async fn every_count_is_the_length_of_its_list() {

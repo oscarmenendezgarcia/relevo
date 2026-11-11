@@ -198,12 +198,13 @@ Returns `{ "you": "ana", "teams": ["backend"], "counts": { "board": 3, "threads"
   "status": "open" | "closed", "named": true, "pending": false, "notes": 3,
   "first_note": { "id": "n_…", "author": "oscar", "via": "Claude Code laptop", "context": "producto@main", "created_at": "…", "text": "…", "truncated": false },
   "last_note":  { … the same, or null when the thread holds one note },
+  "last_other_note": { … the same, or null },
   "handled_by_you": true, "closed_by": "ana" | null, "cursor": "…" }
 ```
 
-`first_note` and `last_note` are cut to 1,000 characters (`truncated`). `context` is the writing session's context then (`null` for a general one, and for a note written before 0.4.0, which did not keep it). `notes` counts every note. `handled_by_you` says the person has handled the latest note by someone else (as in `delivery`; `false` while nobody else has written); `closed_by` is who closed the thread (`null` while it is open, and for a `direct` thread closed before 0.4.0, which did not keep it; a `team` or `global` thread only its opener closes). `participants` of a `global` thread is left empty (`[]`): it would list everyone; `notes` and the notes say enough.
+`last_other_note` is the latest note by someone else than the person (the answer the page shows, even when the person wrote after it), `null` when nobody else has written or that note is the first one. `first_note`, `last_note` and `last_other_note` are cut to 1,000 characters (`truncated`). `context` is the writing session's context then (`null` for a general one, and for a note written before 0.4.0, which did not keep it). `notes` counts every note. `handled_by_you` says the person has handled the latest note by someone else (as in `delivery`; `false` while nobody else has written); `closed_by` is who closed the thread (`null` while it is open, and for a `direct` thread closed before 0.4.0, which did not keep it; a `team` or `global` thread only its opener closes). `participants` of a `global` thread is left empty (`[]`): it would list everyone; `notes` and the notes say enough.
 
-`GET /api/timeline/threads/:id` returns one such thread with `notes`, every note in full, oldest first (as `thread` does, with `context` on each), in place of the count and of `first_note` and `last_note`, and with `names` (as above, for this thread). A thread the person does not take part in is `NOT_FOUND`, as is an id that cannot be decoded. Neither route delivers anything.
+`GET /api/timeline/threads/:id` returns one such thread with `notes`, every note in full, oldest first (as `thread` does, with `context` on each), in place of the count and of `first_note`, `last_note` and `last_other_note`, and with `names` (as above, for this thread). A thread the person does not take part in is `NOT_FOUND`, as is an id that cannot be decoded. Neither route delivers anything.
 
 Both routes need only the token: the session headers are not read at all (a malformed one is not an error), since no session is involved. They fail with `UNAUTHORIZED` like every route.
 

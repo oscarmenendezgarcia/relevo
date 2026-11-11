@@ -18,7 +18,7 @@ use crate::auth::Reader;
 use crate::db::rfc3339;
 use crate::error::ApiError;
 
-/// `first_note` and `last_note` are cut to this many characters.
+/// `first_note`, `last_note` and `last_other_note` are cut to this many characters.
 const TEXT_CHARS: usize = 1000;
 const DEFAULT_LIMIT: usize = 20;
 const MAX_LIMIT: usize = 50;
@@ -126,7 +126,7 @@ fn parse_params(
 
 // ---------- shapes ----------
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct NoteOut {
     id: String,
     author: String,
@@ -164,6 +164,10 @@ pub struct ThreadOut {
     /// In a page: `Some(None)` (null) when the thread holds one note.
     #[serde(skip_serializing_if = "Option::is_none")]
     last_note: Option<Option<NoteOut>>,
+    /// In a page: the latest note by someone else; `Some(None)` (null) when there is none, or it
+    /// is the first note.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_other_note: Option<Option<NoteOut>>,
     handled_by_you: bool,
     closed_by: Option<String>,
     cursor: String,
@@ -186,6 +190,8 @@ struct Row {
     notes: i64,
     handled: bool,
     closed_by: Option<String>,
+    /// The latest note by someone else than the person; 0 when nobody else has written.
+    last_other_seq: i64,
 }
 
 // ---------- queries ----------
@@ -200,7 +206,8 @@ SELECT t.id, t.kind, t.title, o.handle, t.status, p.named_seq IS NOT NULL, p.wai
        (SELECT count(*) FROM notes n WHERE n.thread_id = t.id),
        p.last_other_seq > 0 AND coalesce(p.handled_seq, 0) >= p.last_other_seq,
        CASE WHEN t.status = 'closed'
-            THEN coalesce(c.handle, CASE WHEN t.kind != 'direct' THEN o.handle END) END
+            THEN coalesce(c.handle, CASE WHEN t.kind != 'direct' THEN o.handle END) END,
+       p.last_other_seq
 FROM participants p INDEXED BY participants_timeline
 JOIN threads t ON t.id = p.thread_id
 JOIN people o ON o.id = t.opener_id
@@ -225,6 +232,7 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Row> {
         notes: r.get(9)?,
         handled: r.get(10)?,
         closed_by: r.get(11)?,
+        last_other_seq: r.get(12)?,
     })
 }
 
@@ -374,12 +382,13 @@ fn threads_out(conn: &Connection, rows: Vec<Row>) -> Result<Vec<ThreadOut>, ApiE
     }
     let seqs: Vec<SqlValue> = rows
         .iter()
-        .flat_map(|r| [r.first_seq, r.last_seq])
+        .flat_map(|r| [r.first_seq, r.last_seq, r.last_other_seq])
+        .filter(|&seq| seq > 0)
         .collect::<BTreeSet<i64>>()
         .into_iter()
         .map(SqlValue::Integer)
         .collect();
-    let mut notes: HashMap<i64, NoteOut> =
+    let notes: HashMap<i64, NoteOut> =
         rows_in(conn, &note_sql(true, "WHERE n.seq IN (…)"), &seqs, |r| {
             note(r, true)
         })?
@@ -388,16 +397,17 @@ fn threads_out(conn: &Connection, rows: Vec<Row>) -> Result<Vec<ThreadOut>, ApiE
     Ok(rows
         .into_iter()
         .map(|r| {
-            let last = (r.last_seq != r.first_seq)
-                .then(|| notes.remove(&r.last_seq))
-                .flatten();
-            let first = notes.remove(&r.first_seq);
+            let note = |seq: i64| (seq > 0 && seq != r.first_seq).then(|| notes.get(&seq).cloned());
+            let last = note(r.last_seq).flatten();
+            let other = note(r.last_other_seq).flatten();
+            let first = notes.get(&r.first_seq).cloned();
             ThreadOut {
                 participants: participants.remove(&r.id).unwrap_or_default(),
                 teams: teams.remove(&r.id).unwrap_or_default(),
                 notes: Notes::Count(r.notes),
                 first_note: first,
                 last_note: Some(last),
+                last_other_note: Some(other),
                 ..thread_out(r)
             }
         })
@@ -419,6 +429,7 @@ fn thread_out(r: Row) -> ThreadOut {
         notes: Notes::Count(r.notes),
         first_note: None,
         last_note: None,
+        last_other_note: None,
         handled_by_you: r.handled,
         closed_by: r.closed_by,
         cursor: r.last_seq.to_string(),
@@ -449,7 +460,8 @@ fn handles_of(t: &ThreadOut, into: &mut BTreeSet<String>) {
     into.extend(t.closed_by.iter().cloned());
     into.extend(t.participants.iter().cloned());
     let last = t.last_note.as_ref().and_then(Option::as_ref);
-    for note in t.first_note.iter().chain(last) {
+    let other = t.last_other_note.as_ref().and_then(Option::as_ref);
+    for note in t.first_note.iter().chain(last).chain(other) {
         into.insert(note.author.clone());
     }
     if let Notes::All(notes) = &t.notes {
@@ -583,6 +595,7 @@ pub async fn thread(
     out.notes = Notes::All(notes);
     out.first_note = None;
     out.last_note = None;
+    out.last_other_note = None;
     let mut named = BTreeSet::from([reader.handle.clone()]);
     handles_of(&out, &mut named);
     out.names = Some(names(&conn, named)?);
