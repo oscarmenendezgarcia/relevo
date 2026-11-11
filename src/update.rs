@@ -99,6 +99,19 @@ impl Version {
             .map(|p| p.parse().map_err(|_| bad()))
             .collect::<Result<_>>()?;
         let numbers: [u64; 3] = parts.try_into().map_err(|_| bad())?;
+        // SemVer identifiers: never empty, and a number has no leading zero (so that two
+        // pre-releases that compare equal are the same string).
+        let identifier = |p: &str| {
+            !p.is_empty()
+                && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                && !(p.len() > 1 && p.starts_with('0') && p.chars().all(|c| c.is_ascii_digit()))
+        };
+        if pre
+            .as_deref()
+            .is_some_and(|p| !p.split('.').all(identifier))
+        {
+            return Err(bad());
+        }
         Ok(Version { numbers, pre })
     }
 }
@@ -111,8 +124,30 @@ impl Ord for Version {
                 (None, None) => Ordering::Equal,
                 (None, Some(_)) => Ordering::Greater,
                 (Some(_), None) => Ordering::Less,
-                (Some(a), Some(b)) => a.cmp(b),
+                (Some(a), Some(b)) => pre_cmp(a, b),
             })
+    }
+}
+
+/// Two pre-releases, as SemVer orders them: identifier by identifier, numbers as numbers and
+/// before words, and a shorter list first when all else is equal (`rc.2` < `rc.10` < `rc.10.1`).
+fn pre_cmp(a: &str, b: &str) -> Ordering {
+    let (mut a, mut b) = (a.split('.'), b.split('.'));
+    loop {
+        let order = match (a.next(), b.next()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) => match (x.parse::<u64>(), y.parse::<u64>()) {
+                (Ok(x), Ok(y)) => x.cmp(&y),
+                (Ok(_), Err(_)) => Ordering::Less,
+                (Err(_), Ok(_)) => Ordering::Greater,
+                (Err(_), Err(_)) => x.cmp(y),
+            },
+        };
+        if order != Ordering::Equal {
+            return order;
+        }
     }
 }
 
@@ -894,8 +929,24 @@ mod tests {
         assert!(v("1.0.0") > v("0.99.99"));
         assert!(v("0.4.0") > v("0.4.0-rc.1"));
         assert!(v("0.4.0-rc.2") > v("0.4.0-rc.1"));
+        // Numbers compare as numbers: rc.10 is after rc.9, so rc.9 is never an upgrade over it.
+        assert!(v("0.4.0-rc.10") > v("0.4.0-rc.9"));
+        assert!(v("0.5.0-rc.2") < v("0.5.0-rc.10"));
+        assert!(v("0.4.0-rc.1") < v("0.4.0-rc.1.1"));
+        assert!(v("0.4.0-1") < v("0.4.0-alpha"));
+        assert!(v("0.4.0-alpha") < v("0.4.0-beta"));
         assert_eq!(v("0.4.0"), v(" 0.4.0+build.5 "));
-        for bad in ["", "0.4", "0.4.0.1", "x.y.z", "0.4.0-", "v0.4.0"] {
+        for bad in [
+            "",
+            "0.4",
+            "0.4.0.1",
+            "x.y.z",
+            "0.4.0-",
+            "v0.4.0",
+            "0.4.0-rc..1",
+            "0.4.0-rc.01",
+            "0.4.0-rc_1",
+        ] {
             assert!(Version::parse(bad).is_err(), "{bad}");
         }
     }
