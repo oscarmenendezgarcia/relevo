@@ -50,6 +50,9 @@ for _key, _value in {
 for _key in ("RELEVO_URL", "RELEVO_TOKEN", "RELEVO_CERT", "RELEVO_CONTEXT", "RELEVO_CONFIG", "RELEVO_ALLOWED_USERS",
              "RELEVO_ALLOW_ALL_USERS"):
     os.environ.pop(_key, None)
+# Connecting runs `relevo update --auto` (RELEVO_BIN is the binary under test): only the AutoUpdate
+# tests turn it on, with a stand-in for relevo.
+os.environ["RELEVO_AUTO_UPDATE"] = "0"
 # Install as the README says: copy to <home>/plugins/relevo and enable it.
 shutil.copytree(_PLUGIN, _TMP / ".hermes" / "plugins" / "relevo", ignore=shutil.ignore_patterns("__pycache__"))
 (_TMP / ".hermes" / "config.yaml").write_text("plugins:\n  enabled:\n    - relevo\n")
@@ -71,6 +74,7 @@ assert ENTRY is not None, "the relevo platform did not register"
 _PKG = ENTRY.adapter_factory.__module__
 client = importlib.import_module(_PKG + ".client")
 tools_module = importlib.import_module(_PKG + ".tools")
+update_module = importlib.import_module(_PKG + ".update")
 
 
 class _Tools:
@@ -2053,6 +2057,267 @@ class Tls(Base):
         Person(SERVER, "ana").send(to=["oscar"], text="Plain http still works")
         await self.until(lambda: len(self.events) == 1)
         self.assertIn("Plain http still works", self.events[0].text)
+
+
+_STUB = """#!/bin/sh
+# A stand-in for relevo: records how it was run, then answers as the test says.
+echo run >> "$STUB_DIR/runs"
+printf '%s\\n' "$@" > "$STUB_DIR/args"
+printf 'url=%s\\ntoken=%s\\nconfig=%s\\n' "$RELEVO_URL" "$RELEVO_TOKEN" "$RELEVO_CONFIG" > "$STUB_DIR/env"
+sleep "${STUB_SLEEP:-0}"
+if [ -n "$STUB_OUT" ]; then printf '%s\\n' "$STUB_OUT"; fi
+if [ -n "$STUB_ERR" ]; then printf '%s\\n' "$STUB_ERR" >&2; fi
+exit "${STUB_CODE:-0}"
+"""
+INSTALLED = ("the Hermes plugin (/home/oscar/.hermes/plugins/relevo): installed 0.4.0 over 0.3.0; restart the "
+             "Hermes gateway to use it")
+
+
+class _Chat:
+    """A messaging platform's adapter that records what it is sent (success=False: it refuses)."""
+
+    def __init__(self, success: bool = True):
+        self.success, self.sent = success, []
+
+    async def send(self, chat_id, content, reply_to=None, metadata=None):
+        from gateway.platforms.base import SendResult
+
+        self.sent.append((chat_id, content))
+        return SendResult(success=self.success, error=None if self.success else "chat not found")
+
+
+class _Runner:
+    """The gateway runner's home-channel seam: Hermes' own code lists the home channels; the send is
+    the gateway's _send_home_channel_message without its relay and topic metadata."""
+
+    from gateway.run_notifications import GatewayNotificationsMixin as _Notices
+
+    _home_channel_transports = _Notices._home_channel_transports
+    _served_home_channel_transports = _Notices._served_home_channel_transports
+
+    def __init__(self, homes: dict, profiles: dict | None = None):
+        """homes: {platform name: (chat id, adapter)} of the gateway's own profile; profiles: {profile:
+        homes} of the other profiles it serves."""
+        from gateway.config import GatewayConfig
+
+        self.config, self.adapters = self._profile(homes)
+        self._profile_configs, self._profile_adapters = {}, {}
+        for name, its in (profiles or {}).items():
+            self._profile_configs[name], self._profile_adapters[name] = self._profile(its)
+        assert isinstance(self.config, GatewayConfig)
+
+    @staticmethod
+    def _profile(homes: dict):
+        from gateway.config import GatewayConfig, HomeChannel, Platform
+        from gateway.config import PlatformConfig as Cfg
+
+        platforms, adapters = {}, {}
+        for name, (chat, adapter) in homes.items():
+            p = Platform(name)
+            platforms[p] = Cfg(enabled=True, home_channel=HomeChannel(platform=p, chat_id=chat, name="Home"))
+            adapters[p] = adapter
+        return GatewayConfig(platforms=platforms), adapters
+
+    async def _send_home_channel_message(self, platform, home, transport, message: str, failure_fmt: str) -> bool:
+        result = await transport.adapter.send(str(home.chat_id), message)
+        return bool(getattr(result, "success", False))
+
+
+class AutoUpdate(Base):
+    """At connect, `relevo update --auto --adapter hermes --path <the plugin's folder>`, in the
+    background, with a stand-in for relevo (a shell script that records how it was run)."""
+
+    LOG = update_module.__name__
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.saved = {k: os.environ.get(k) for k in ("RELEVO_AUTO_UPDATE", "RELEVO_BIN", "PATH", "STUB_DIR",
+                                                     "STUB_OUT", "STUB_ERR", "STUB_CODE", "STUB_SLEEP")}
+        self.stub_dir = Path(tempfile.mkdtemp(prefix="stub-", dir=_TMP))
+        stub = self.stub_dir / "relevo"
+        stub.write_text(_STUB)
+        stub.chmod(0o755)
+        for k in ("RELEVO_AUTO_UPDATE", "STUB_OUT", "STUB_ERR", "STUB_CODE", "STUB_SLEEP"):
+            os.environ.pop(k, None)
+        os.environ["RELEVO_BIN"], os.environ["STUB_DIR"] = str(stub), str(self.stub_dir)
+        self.folder = (_TMP / ".hermes" / "plugins" / "relevo").resolve()
+
+    async def asyncTearDown(self) -> None:
+        await self.finished()
+        for k, v in self.saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        await super().asyncTearDown()
+
+    async def finished(self) -> None:
+        """Until no update of this process runs."""
+        await self.until(lambda: not update_module._running.locked(), timeout=20)
+
+    def runs(self) -> int:
+        f = self.stub_dir / "runs"
+        return len(f.read_text().splitlines()) if f.exists() else 0
+
+    def connected(self, runner=None):
+        a = self.make_adapter()
+        a.gateway_runner = runner
+        return a
+
+    async def test_connect_runs_it_in_the_background_for_the_plugin_folder(self):
+        os.environ["STUB_SLEEP"] = "2"
+        a = self.connected()
+        started = time.monotonic()
+        self.assertTrue(await a.connect())
+        self.assertLess(time.monotonic() - started, 1.0)  # connect never waits for it
+        await self.until(lambda: (self.stub_dir / "env").exists())
+        self.assertTrue(update_module._running.locked())
+        args = (self.stub_dir / "args").read_text().splitlines()
+        self.assertEqual(args, ["update", "--auto", "--adapter", "hermes", "--path", str(self.folder)])
+        # The server and token this platform uses, from the profile's env.
+        env = (self.stub_dir / "env").read_text()
+        self.assertIn(f"url={SERVER.url}\n", env)
+        self.assertIn(f"token={SERVER.tokens['oscar']}\n", env)
+        # Meanwhile the platform works: a note comes in.
+        self.bob.send(to=["oscar"], text="Does the update hold the inbox?")
+        await self.until(lambda: len(self.events) == 1)
+        self.assertTrue(update_module._running.locked())
+        await self.finished()
+
+    async def test_relevo_on_path_is_used_when_relevo_bin_is_not_set(self):
+        del os.environ["RELEVO_BIN"]
+        os.environ["PATH"] = f"{self.stub_dir}{os.pathsep}{self.saved['PATH'] or ''}"
+        self.assertTrue(await self.connected().connect())
+        await self.finished()
+        self.assertEqual(self.runs(), 1)
+
+    async def test_what_it_installed_is_told_once_in_a_home_channel_and_logged(self):
+        os.environ["STUB_OUT"] = INSTALLED
+        telegram, discord, relevo, work = _Chat(success=False), _Chat(), _Chat(), _Chat()
+        # Relevo's own home is a teammates' thread, never told; nor is another profile's home.
+        runner = _Runner({"relevo": ("t_1", relevo), "telegram": ("42", telegram), "discord": ("7", discord)},
+                         profiles={"work": {"discord": ("9", work)}})
+        a = self.connected(runner)
+        with self.assertLogs(self.LOG, "INFO") as logs:
+            self.assertTrue(await a.connect())
+            await self.finished()
+            await self.until(lambda: discord.sent)
+            await asyncio.sleep(0.2)
+        # Telegram refused it, so it went to the next home channel, once.
+        self.assertEqual(len(telegram.sent), 1)
+        self.assertEqual(len(discord.sent), 1)
+        self.assertEqual((relevo.sent, work.sent), ([], []))
+        chat, text = discord.sent[0]
+        self.assertEqual(chat, "7")
+        self.assertIn("Restart the Hermes gateway to use it", text)
+        self.assertIn("it was not restarted", text)
+        self.assertIn(INSTALLED, text)
+        said = "\n".join(logs.output)
+        self.assertIn(f"update: {INSTALLED}", said)
+        self.assertIn("told discord:7", said)
+        self.assertNotIn(SERVER.tokens["oscar"], said)
+        # A secondary profile's platform tells that profile's home channel.
+        self.assertEqual(await update_module.tell_home(runner, "work", "x"), "discord:9")
+        self.assertEqual(work.sent, [("9", "x")])
+
+    async def test_with_no_home_channel_it_is_logged(self):
+        os.environ["STUB_OUT"] = INSTALLED
+        a = self.connected(_Runner({}))
+        with self.assertLogs(self.LOG, "WARNING") as logs:
+            self.assertTrue(await a.connect())
+            await self.finished()
+            await self.until(lambda: any("no Hermes home channel" in line for line in logs.output))
+
+    async def test_the_runner_seam_is_hermes_own(self):
+        """The plugin calls the runner's home-channel methods: they must exist with these shapes."""
+        import inspect
+
+        from gateway.run_notifications import GatewayNotificationsMixin as Notices
+
+        self.assertEqual(list(inspect.signature(Notices._send_home_channel_message).parameters),
+                         list(inspect.signature(_Runner._send_home_channel_message).parameters))
+        self.assertTrue(callable(Notices._served_home_channel_transports))
+
+    async def test_a_failure_is_logged_and_not_told(self):
+        os.environ["STUB_ERR"] = "the Hermes plugin (/x): not installed: /x is not writable"
+        os.environ["STUB_CODE"] = "1"
+        home = _Chat()
+        a = self.connected(_Runner({"telegram": ("42", home)}))
+        with self.assertLogs(self.LOG, "WARNING") as logs:
+            self.assertTrue(await a.connect())
+            await self.finished()
+            await self.until(lambda: logs.output)
+        self.assertIn("exited with 1): the Hermes plugin (/x): not installed: /x is not writable", logs.output[0])
+        await asyncio.sleep(0.2)
+        self.assertEqual(home.sent, [])
+
+    async def test_nothing_to_install_says_nothing(self):
+        home = _Chat()
+        a = self.connected(_Runner({"telegram": ("42", home)}))
+        with self.assertNoLogs(self.LOG, "INFO"):
+            self.assertTrue(await a.connect())
+            await self.finished()
+            await asyncio.sleep(0.2)
+        self.assertEqual((self.runs(), home.sent), (1, []))
+
+    async def test_one_update_at_a_time(self):
+        os.environ["STUB_SLEEP"] = "1"
+        first = self.connected()
+        self.assertTrue(await first.connect())
+        await first.disconnect()
+        # A new adapter connecting while it runs (a reconnect, say) starts none.
+        self.assertTrue(await self.connected().connect())
+        await self.finished()
+        self.assertEqual(self.runs(), 1)
+
+    async def test_nothing_runs_when_off_without_relevo_or_in_a_git_checkout(self):
+        checkout = _TMP / "checkout"
+        (checkout / ".git").mkdir(parents=True, exist_ok=True)
+        (checkout / "adapters" / "hermes" / "relevo").mkdir(parents=True, exist_ok=True)
+        cases = {
+            "RELEVO_AUTO_UPDATE=0": {"RELEVO_AUTO_UPDATE": "0"},
+            "RELEVO_AUTO_UPDATE=off": {"RELEVO_AUTO_UPDATE": "off"},
+            "RELEVO_BIN names nothing": {"RELEVO_BIN": str(self.stub_dir / "missing")},
+            "no relevo on PATH": {"RELEVO_BIN": None, "PATH": str(self.stub_dir / "empty")},
+            "a folder in a git checkout": {"FOLDER": checkout / "adapters" / "hermes" / "relevo"},
+        }
+        for name, change in cases.items():
+            with self.subTest(name):
+                env = {k: v for k, v in change.items() if k != "FOLDER"}
+                before = {k: os.environ.get(k) for k in env}
+                folder = update_module.FOLDER
+                try:
+                    for k, v in env.items():
+                        if v is None:
+                            os.environ.pop(k, None)
+                        else:
+                            os.environ[k] = v
+                    update_module.FOLDER = change.get("FOLDER", folder)
+                    a = self.connected()
+                    self.assertTrue(await a.connect())
+                    self.assertFalse(update_module._running.locked())
+                    await asyncio.sleep(0.2)
+                    self.assertEqual(self.runs(), 0)
+                    await a.disconnect()
+                finally:
+                    update_module.FOLDER = folder
+                    for k, v in before.items():
+                        if v is None:
+                            os.environ.pop(k, None)
+                        else:
+                            os.environ[k] = v
+
+    async def test_the_real_relevo_and_a_server_without_a_dist_say_nothing(self):
+        """The arguments as the real binary takes them: a server that hands out nothing is no error."""
+        os.environ["RELEVO_BIN"] = RELEVO_BIN
+        home = _Chat()
+        a = self.connected(_Runner({"telegram": ("42", home)}))
+        with self.assertNoLogs(self.LOG, "INFO"):
+            self.assertTrue(await a.connect())
+            self.assertTrue(update_module._running.locked())
+            await self.finished()
+            await asyncio.sleep(0.2)
+        self.assertEqual(home.sent, [])
 
 
 if __name__ == "__main__":
