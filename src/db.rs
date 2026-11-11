@@ -314,36 +314,82 @@ fn open_with(path: &str, migrate: bool) -> Result<Connection> {
     // One transaction, so a process opening a new file at the same time sees it either empty or
     // with its version set, and one opening an old file sees it either old or migrated.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // Said here, logged once the transaction has committed: a migration that did not happen must
+    // not be announced as if it had.
+    let mut from_5 = false;
+    let mut from_6 = false;
     match layout(&tx, path)? {
         layout if refuses(layout) => bail!(no_migration(path, layout)),
         Layout::Migrates(from) => {
             if from == 5 {
                 tx.execute_batch(MIGRATE_FROM_5)
                     .with_context(|| format!("migrating database {path} from layout 5"))?;
-                tracing::info!(db = path, "migrated the database from layout 5 to 6");
+                from_5 = true;
             }
             tx.execute_batch(MIGRATE_FROM_6)
                 .with_context(|| format!("migrating database {path} from layout 6"))?;
-            let broken: i64 =
-                tx.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
-                    r.get(0)
-                })?;
-            if broken > 0 {
-                bail!("migrating database {path} from layout 6: {broken} broken references");
+            let broken = broken_thread_refs(&tx)?;
+            if !broken.is_empty() {
+                let rows: Vec<String> = broken
+                    .iter()
+                    .map(|(table, rowid, parent)| {
+                        format!("{table} rowid {rowid} refers to {parent}")
+                    })
+                    .collect();
+                bail!(
+                    "migrating database {path} from layout 6: {} broken references: {}",
+                    broken.len(),
+                    rows.join("; ")
+                );
             }
-            tracing::info!(
-                db = path,
-                "migrated the database from layout 6 to {SCHEMA_VERSION}: team threads are \
-                 global ones now"
-            );
+            from_6 = true;
         }
         Layout::New | Layout::Current => {}
     }
     tx.execute_batch(SCHEMA)?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
+    if from_5 {
+        tracing::info!(db = path, "migrated the database from layout 5 to 6");
+    }
+    if from_6 {
+        tracing::info!(
+            db = path,
+            "migrated the database from layout 6 to {SCHEMA_VERSION}: team threads are \
+             global ones now"
+        );
+    }
     conn.pragma_update(None, "foreign_keys", "ON")?;
     Ok(conn)
+}
+
+/// The tables that refer to `threads`: the only references layout 6 to 7 can break, since it makes
+/// the `threads` table again. A broken reference elsewhere was there with 0.3 too, and is no
+/// reason to refuse to start.
+const THREAD_REFERENCES: [&str; 4] = ["participants", "notes", "session_threads", "thread_teams"];
+
+/// The references that no longer hold in those tables, each as (table, rowid, parent).
+fn broken_thread_refs(tx: &Connection) -> Result<Vec<(String, i64, String)>> {
+    let mut out = Vec::new();
+    for table in THREAD_REFERENCES {
+        // `thread_teams` is one of the tables layout 7 brings: in a database of layout 6 it is
+        // not there yet, and has no reference to check.
+        let there: i64 = tx.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [table],
+            |r| r.get(0),
+        )?;
+        if there == 0 {
+            continue;
+        }
+        let mut stmt =
+            tx.prepare_cached("SELECT \"table\", rowid, parent FROM pragma_foreign_key_check(?1)")?;
+        let rows = stmt.query_map([table], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        for row in rows {
+            out.push(row?);
+        }
+    }
+    Ok(out)
 }
 
 /// Why a command other than `serve` refuses a database of layout 5 or 6.
