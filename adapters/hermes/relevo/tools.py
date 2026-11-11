@@ -9,7 +9,7 @@ the tools return. Imported at discovery (``provides_tools``), so it stays light.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Optional
 
 from . import client
 
@@ -43,11 +43,11 @@ def _me_for(api: client.Api) -> str | None:
     return _me.get(key)
 
 
-def _run(name: str, fn) -> str:
+def _run(name: str, fn, api: Optional[client.Api] = None) -> str:
     try:
         return fn()
     except client.RelevoError as exc:
-        return "Error: " + client.describe_refusal(exc)
+        return "Error: " + client.describe_refusal(exc, _me.get(api.settings.identity) if api else None)
     except client.CertError as exc:
         # Nothing was sent: the certificate to trust cannot be used, and no other is tried.
         return f"Error: {exc}."
@@ -56,15 +56,21 @@ def _run(name: str, fn) -> str:
         return f"Error: could not reach the Relevo server ({client.describe_error(exc)})."
 
 
+# relevo_send's fields. Others are refused, so a misnamed one (`message`, `recipients`, the old `to`)
+# fails with the list of the right ones instead of being dropped.
+_SEND_FIELDS = ("text", "thread", "close", "claim", "done")
+
+
 def relevo_send(args: dict, **_: Any) -> str:
+    unknown = sorted(k for k in args if k not in _SEND_FIELDS)
+    if unknown:
+        return (f"Error: relevo_send takes {', '.join(_SEND_FIELDS)}; not {', '.join(unknown)}. Nothing was sent. "
+                "Who a note is for is written in its text: @handle for a person, @team-name for a team, no @ "
+                "for the global board.")
+
     def go() -> str:
         payload: dict[str, Any] = {}
-        to, thread = args.get("to"), args.get("thread")
-        # `to` may be one address; the server takes a list.
-        if isinstance(to, str):
-            to = [to]
-        if to:
-            payload["to"] = list(to)
+        thread = args.get("thread")
         if thread:
             payload["thread"] = str(thread)
         if args.get("text") is not None:
@@ -75,10 +81,14 @@ def relevo_send(args: dict, **_: Any) -> str:
             payload["claim"] = True
         if args.get("done"):
             payload["done"] = True
-            return client.describe_done(_api().send(payload))
-        return client.describe_send(_api().send(payload))
+            return client.describe_done(api.send(payload))
+        return client.describe_send(api.send(payload), opened=not thread)
 
-    return _run("relevo_send", go)
+    try:
+        api = _api()
+    except client.RelevoError as exc:
+        return "Error: " + client.describe_refusal(exc)
+    return _run("relevo_send", go, api)
 
 
 def relevo_inbox(args: dict, **_: Any) -> str:
@@ -106,50 +116,62 @@ def relevo_thread(args: dict, **_: Any) -> str:
 _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
     "relevo_send": (
         relevo_send,
-        "Open a Relevo thread or write in one. Use `to`, one address or a list (handles such as \"ana\", "
-        "\"ana/pagos-api\", \"ana/pagos-api@feat/refunds\", or \"@team\" alone for a question to everyone), "
-        "to open a new thread, or `thread` to write in an existing one. If your person names whom to ask (a teammate, or the "
-        "whole team: `@team`), send it there. Otherwise, before opening one, look at your inbox "
-        "(relevo_inbox: an answer may already be waiting) and use the team's `about` lines to choose "
-        "whom to ask; `@team` only when you do not know who knows. Writing in a thread claims it for "
-        "this session unless another of your person's sessions has it (then step aside); opening one "
-        "claims nothing. Read what you need first; if you can answer or explain from that, just "
-        "answer: the answer claims it. If the note needs work, claim the thread with `thread`, "
-        "`claim: true` and no text just before you start changing files or running something long: a "
-        "state the others see, not a note. Never write a note that only says you are on it. Do not "
-        "claim team questions; answer a team question only from your own work or your person's files. "
-        "The note must be self-contained: the reader does not share your context. Write in the first "
-        "person, as your person would (\"I changed…\"). A new thread starts with a one-line subject "
-        "(its title), no greeting and no \"Re:\". `close: true` closes the thread after writing: only "
-        "when your person asks, or when you asked the question and it is answered. `done: true` with "
-        "`thread` and no text marks the thread handled when it needs nothing (an answer you have now "
-        "read, a thank-you): nothing is written or claimed. A note stays pending for your person until "
-        "they answer, close it or mark it done; if it is not for you, write nothing and leave it "
-        "pending. Says who has the thread.\n\n"
+        "Send a Relevo note: open a thread (no `thread`) or write in one (`thread`). Fields: `text` (the "
+        "note), `thread` (an existing thread's id, \"r_…\"), `close` (true to close the thread), `claim` "
+        "(true, with `thread`, to mark the thread as this session's), `done` (true, with `thread` and no "
+        "text, to mark it handled when it needs nothing: an answer you have now read, a thank-you). Who the "
+        "note is for is written in its text: @handle for a person (@handle/repo or @handle/repo@branch for "
+        "one context), @team-name for a team (@team for your person's own team when they are in exactly "
+        "one), and no @ at all to post on the global board, which everyone on the server sees and nobody "
+        "has to answer: use it for announcements, or when nobody knows who knows and your person agrees. "
+        "Every @ outside code sends the note to that person or team, so write a name without @ when only "
+        "talking about someone, and put code, decorators, npm scopes and emails in backticks. In a reply, "
+        "an @person names them (it becomes pending for them) and adds them if they were not in the thread; "
+        "a team cannot be mentioned in a reply. If your person names whom to ask, send it there. "
+        "Otherwise, before opening one, look at your inbox (relevo_inbox: an answer may already be "
+        "waiting): name the person whose `about` line fits; name a team when it is a team's matter; use "
+        "the board (no @) only when nobody fits. Writing in a thread claims it for this session unless "
+        "another of your person's sessions has it (then step aside); opening one claims nothing. Read what "
+        "you need first; if you can answer or explain from that, just answer: the answer claims it. If the "
+        "note needs work, claim the thread with `thread`, `claim: true` and no text just before you start "
+        "changing files or running something long: a state the others see, not a note. Never write a note "
+        "that only says you are on it. Do not claim a team or global-board thread that does not name your "
+        "person; answer one only from your own work or your person's files. The note must be "
+        "self-contained: the reader does not share your context. Write in the first person, as your "
+        "person would (\"I changed…\"). A new thread starts with a one-line subject (its title), no "
+        "greeting and no \"Re:\". `close: true` closes the thread after writing: only when your person "
+        "asks, or when you asked the question and it is answered. `done: true` with `thread` and no text "
+        "marks the thread handled when it needs nothing (an answer you have now read, a thank-you): nothing "
+        "is written or claimed. A note stays pending for your person until they answer, close it or mark it "
+        "done; if it is not for you, write nothing and leave it pending. The answer says whom the note "
+        "reached (check it is who your person meant) and who has the thread.\n\n"
         + client.TOOL_RULES,
         {
-            "to": {"anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}],
-                   "description": "To open a new thread: who to ask, one address or a list of them "
-                                  "(\"ana\", \"ana/pagos-api\", \"ana/pagos-api@feat/refunds\", or "
-                                  "\"@team\" alone when your person asks the whole team, or you do not "
-                                  "know who knows). Give `to` or `thread`, not both."},
-            "thread": {"type": "string", "description": "Thread id (r_…) to write in. Not with `to`."},
-            "text": {"type": "string", "description": "The note (Markdown). In the first person, as your "
+            "text": {"type": "string", "description": "The note (Markdown). Who it is for is written in it: "
+                                                      "@handle for a person (@handle/repo or "
+                                                      "@handle/repo@branch for one context), @team-name for a "
+                                                      "team (@team for your person's one team), no @ for the "
+                                                      "global board. Every @ outside code sends it there: put "
+                                                      "code, decorators, npm scopes and emails in backticks. "
+                                                      "In the first person, as your "
                                                       "person would write it (\"I changed…\", not \"Ana "
                                                       "changed…\"). Opening a thread, its first line is a "
                                                       "one-line subject (the title), no greeting and no "
                                                       "\"Re:\". Optional only when closing, claiming or "
                                                       "marking done. "
                                                       "Never a note that only says you are on it."},
-            "close": {"type": "boolean", "description": "Close the thread after writing. Only when your "
-                                                        "person asks, or when you asked the question and it "
-                                                        "is answered."},
+            "thread": {"type": "string", "description": "Thread id (r_…) to write in. Without it, `text` opens "
+                                                        "a new thread, for whom its @ mentions name (none: the "
+                                                        "global board)."},
+            "close": {"type": "boolean", "description": "With `thread`: close the thread after writing. Only "
+                                                        "when your person asks, or when you asked the question "
+                                                        "and it is answered."},
             "claim": {"type": "boolean",
-                      "description": "With `thread` (not `to`): marks the thread as this session's, a "
+                      "description": "With `thread`: marks the thread as this session's, a "
                                      "state the others in it see (\"has it since 10:47\"), without "
                                      "writing a note when there is no `text`. Use it just before you "
-                                     "start changing files or running something long. Not for team "
-                                     "questions."},
+                                     "start changing files or running something long. Not for a team or "
+                                     "global-board thread that does not name your person."},
             "done": {"type": "boolean",
                      "description": "With `thread` and no `text` (and no `claim`): your person has handled "
                                     "the thread up to the latest note this session has received, with nothing "
@@ -163,8 +185,9 @@ _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
     "relevo_inbox": (
         relevo_inbox,
         "What is new in Relevo for this session and what is pending for your person, with who you "
-        "speak for (`you`) and the team list (handle, what they look after, live contexts). Look here "
-        "before opening a thread: an answer may already be waiting.\n\n" + client.TOOL_RULES,
+        "speak for (`you`), the people (handle, what they look after, the teams they are in, live "
+        "contexts) and the teams (name, title, members), to mention with @. Look here before opening a "
+        "thread: an answer may already be waiting.\n\n" + client.TOOL_RULES,
         {"all": {"type": "boolean",
                  "description": "Every thread of your person, whichever session it is for."}},
         [],
