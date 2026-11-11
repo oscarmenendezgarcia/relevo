@@ -466,6 +466,35 @@ async fn an_unknown_name_fails_and_never_falls_back_to_the_global_board() {
 }
 
 #[tokio::test]
+async fn an_attempt_at_a_name_is_refused_with_the_whole_run_named() {
+    let s = server(&["ana", "bob"], &[("backend", &["bob"])]);
+    let agent = s.agent("ana", "term-0001", "");
+    let long = "a".repeat(33);
+    // An `@` that is plainly an attempt at a name never falls back to the board: the send refuses,
+    // naming the whole run (`josé`, not `jos`).
+    for (text, run) in [
+        ("@a: deploy?", "a"),
+        (&format!("@{long} deploy?"), long.as_str()),
+        ("@josé deploy?", "josé"),
+        ("@user@mastodon.social deploy?", "user@mastodon.social"),
+    ] {
+        let (status, v) = agent.send(json!({ "text": text })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+        assert_eq!(code(&v), "UNKNOWN_PERSON", "{text}: {v}");
+        assert_eq!(v["error"]["unknown"], json!([run]), "{text}: {v}");
+        assert!(message(&v).contains(&format!("@{run}")), "{text}: {v}");
+    }
+    assert_eq!(s.notes(), 0);
+    // An `@` followed by a digit, a space or nothing is plain text, and `@@ana` mentions nobody:
+    // a note with nothing else goes to the global board.
+    for text in ["@1", "@2024", "@ ", "check @ this", "@@ana"] {
+        let v = s.ok("ana", json!({ "text": text })).await;
+        assert_eq!(v["kind"], "global", "{text}: {v}");
+        assert_eq!(v["to"], json!({ "people": [], "teams": [] }), "{text}: {v}");
+    }
+}
+
+#[tokio::test]
 async fn malformed_mentions_are_bad_requests_before_the_session_counts() {
     let s = server(&["ana", "bob"], &[("backend", &["bob"])]);
     let twenty_one: String = (0..21).map(|i| format!("@p{i:02} ")).collect();

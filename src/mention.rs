@@ -67,16 +67,21 @@ pub fn mentions_only(text: &str, me: &str) -> bool {
 /// A mention as found in the text, before any check.
 #[derive(Debug, PartialEq)]
 struct Found {
-    /// The name, lowercased.
+    /// The name, lowercased; the whole run when it is an attempt that is not one.
     name: String,
     /// As written, for messages.
     written: String,
     /// What follows `/`, lowercased; `None` without one (or when nothing a context can hold
     /// follows it).
     context: Option<String>,
+    /// The run is an attempt at a name that is not one (`@a`, `@josé`, `@user@mastodon.social`):
+    /// it names nobody, and the send is refused with it named rather than reaching everyone.
+    attempt: bool,
 }
 
-/// Every mention outside code, in order, repeats included.
+/// Every mention outside code, in order, repeats included. An `@` that begins an attempt at a
+/// name which is not one comes back as an attempt: who a name is is the database's to say, but a
+/// run that cannot be one was meant as a name, and must not be read as plain text.
 fn scan(text: &str) -> Vec<Found> {
     let chars: Vec<char> = text.chars().collect();
     let code = code_mask(&chars);
@@ -87,46 +92,73 @@ fn scan(text: &str) -> Vec<Found> {
             i += 1;
             continue;
         }
-        let start = i + 1;
-        let mut end = start;
-        while end < chars.len() && !code[end] && is_name_char(chars[end]) {
-            end += 1;
-        }
-        // Trailing `-` is punctuation, not part of the name.
-        let mut name_end = end;
-        while name_end > start && chars[name_end - 1] == '-' {
-            name_end -= 1;
-        }
-        let name: String = chars[start..name_end].iter().collect();
-        if !is_name(&name) {
+        // An `@` followed by a letter (of any script) is an attempt at a name; followed by a
+        // digit, a space or nothing it is plain text (`@1`, `@2024`, `@ `, a trailing `@`).
+        let Some(end) = attempt_end(&chars, &code, i + 1) else {
             i += 1;
             continue;
-        }
-        let mut context = None;
-        let mut next = name_end;
-        if name_end == end && end < chars.len() && chars[end] == '/' && !code[end] {
-            let from = end + 1;
-            let mut to = from;
-            while to < chars.len() && !code[to] && is_context_char(chars[to]) {
-                to += 1;
-            }
-            let mut last = to;
-            while last > from && is_trailing(chars[last - 1]) {
-                last -= 1;
-            }
-            if last > from {
-                context = Some(chars[from..last].iter().collect::<String>().to_lowercase());
-            }
-            next = last.max(end);
-        }
-        out.push(Found {
-            name: name.to_lowercase(),
-            written: name,
-            context,
-        });
-        i = next.max(i + 1);
+        };
+        let run = trim_trailing(&chars, i + 1, end);
+        let written: String = chars[i + 1..run].iter().collect();
+        out.push(address(&chars, i + 1, run).unwrap_or(Found {
+            name: written.to_lowercase(),
+            written,
+            context: None,
+            attempt: true,
+        }));
+        i = end.max(i + 1);
     }
     out
+}
+
+/// Where the run of an attempt at a name ends: `None` when `at` is not a letter, which leaves the
+/// `@` as plain text.
+fn attempt_end(chars: &[char], code: &[bool], at: usize) -> Option<usize> {
+    if at >= chars.len() || code[at] || !chars[at].is_alphabetic() {
+        return None;
+    }
+    let mut end = at;
+    while end < chars.len() && !code[end] && is_attempt_char(chars[end]) {
+        end += 1;
+    }
+    Some(end)
+}
+
+/// The run of an attempt at a name, whole, as a name and its optional context: `None` when it is
+/// not an address at all, which is what makes `@josé` name `josé` and not `jos`.
+fn address(chars: &[char], from: usize, run: usize) -> Option<Found> {
+    let mut at = from;
+    while at < run && is_name_char(chars[at]) {
+        at += 1;
+    }
+    // A trailing `-` is punctuation, not part of the name: `@ana-/x` is no address.
+    while at > from && chars[at - 1] == '-' {
+        at -= 1;
+    }
+    let written: String = chars[from..at].iter().collect();
+    if !is_name(&written) {
+        return None;
+    }
+    let mut context = None;
+    if at < run {
+        if chars[at] != '/' {
+            return None;
+        }
+        let mut to = at + 1;
+        while to < run && is_context_char(chars[to]) {
+            to += 1;
+        }
+        if to != run {
+            return None;
+        }
+        context = Some(chars[at + 1..to].iter().collect::<String>().to_lowercase());
+    }
+    Some(Found {
+        name: written.to_lowercase(),
+        written,
+        context,
+        attempt: false,
+    })
 }
 
 /// A character after which an `@` may start a mention: not a letter or digit (of any script),
@@ -134,6 +166,21 @@ fn scan(text: &str) -> Vec<Found> {
 /// `https://x.com/@ana` and `@@ana` mention nobody.
 fn may_precede(c: char) -> bool {
     !(c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | '/' | '@' | '`'))
+}
+
+/// What an attempt at a name runs over: letters and digits (of any script), `_`, `-`, `.`, `@`
+/// and `/`. So `@user@mastodon.social` is one attempt, refused as a whole.
+fn is_attempt_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '@' | '/')
+}
+
+/// The end of a run, with the punctuation that ends a mention rather than belonging to it off.
+fn trim_trailing(chars: &[char], from: usize, to: usize) -> usize {
+    let mut end = to;
+    while end > from && is_trailing(chars[end - 1]) {
+        end -= 1;
+    }
+    end
 }
 
 fn is_name_char(c: char) -> bool {
@@ -297,10 +344,21 @@ mod tests {
     fn found(text: &str) -> Vec<String> {
         scan(text)
             .into_iter()
+            .filter(|f| !f.attempt)
             .map(|f| match f.context {
                 Some(c) => format!("{}/{c}", f.name),
                 None => f.name,
             })
+            .collect()
+    }
+
+    /// The runs of `text` that are an attempt at a name which is not one: what the send refuses,
+    /// naming each of them.
+    fn attempts(text: &str) -> Vec<String> {
+        scan(text)
+            .into_iter()
+            .filter(|f| f.attempt)
+            .map(|f| f.written)
             .collect()
     }
 
@@ -336,27 +394,53 @@ mod tests {
             ("ß@ana", &[]),
             ("٣@ana", &[]),
             ("1@ana", &[]),
-            // Not a name: plain text.
+            // An `@` followed by a digit, a space or nothing is plain text: no attempt at a name.
             ("@ ana", &[]),
             ("@1", &[]),
-            ("@a", &[]),
-            ("@a b", &[]),
+            ("@12", &[]),
+            ("@2024", &[]),
             ("@", &[]),
             ("x @", &[]),
             ("@-ana", &[]),
             ("@_ana", &[]),
-            ("@ñandu", &[]),
-            ("@é", &[]),
             ("email me: ana@example.org, or @bob", &["bob"]),
             ("npm i @types/node", &["types/node"]),
-            ("@12", &["12"]),
         ];
         for (text, expected) in cases {
             assert_eq!(found(text), *expected, "{text:?}");
         }
-        // A name is 2 to 32 characters.
+        // A name is 2 to 32 characters; longer is an attempt, not a name.
         assert_eq!(found(&format!("@{}", "a".repeat(32))), ["a".repeat(32)]);
-        assert!(found(&format!("@{}", "a".repeat(33))).is_empty());
+    }
+
+    #[test]
+    fn an_attempt_at_a_name_is_named_and_refused() {
+        let cases: &[(&str, &[&str])] = &[
+            // Too short, or not a name: what the sender meant, whole.
+            ("@a", &["a"]),
+            ("@a b", &["a"]),
+            ("Ask @zzz, not @a", &["a"]),
+            // A letter the name cannot hold: the whole run, not the part before it.
+            ("@josé", &["josé"]),
+            ("@josé, hola", &["josé"]),
+            ("@ñandu", &["ñandu"]),
+            ("@é", &["é"]),
+            // A handle from another server, a domain: one attempt, refused as a whole.
+            ("@user@mastodon.social", &["user@mastodon.social"]),
+            ("@ana@x", &["ana@x"]),
+            ("@ana.b", &["ana.b"]),
+            ("@ana-/x", &["ana-/x"]),
+            // What is a name is not an attempt, punctuation and all.
+            ("@ana-", &[]),
+            ("@ana.", &[]),
+            ("@ana/pagos-api", &[]),
+            ("@ana @bob", &[]),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(attempts(text), *expected, "{text:?}");
+        }
+        assert_eq!(attempts(&format!("@{}", "a".repeat(33))), ["a".repeat(33)]);
+        assert!(attempts(&format!("@{}", "a".repeat(32))).is_empty());
     }
 
     #[test]
@@ -375,8 +459,6 @@ mod tests {
             ("@ana'", &["ana"]),
             ("@ana's thing", &["ana"]),
             ("@ana...", &["ana"]),
-            ("@ana.b", &["ana"]),
-            ("@ana@x", &["ana"]),
             ("@ana_", &["ana_"]),
             // A context, read up to what it cannot hold, its trailing punctuation left out.
             ("@ana/pagos-api", &["ana/pagos-api"]),
@@ -394,7 +476,6 @@ mod tests {
             ("@ana/x y", &["ana/x"]),
             ("@ana/ y", &["ana"]),
             ("@ana/.", &["ana"]),
-            ("@ana-/x", &["ana"]),
             ("@ana/x`y`", &["ana/x"]),
             ("@team", &["team"]),
             ("@Equipo", &["equipo"]),
