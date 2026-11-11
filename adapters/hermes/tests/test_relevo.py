@@ -110,7 +110,7 @@ def _free_port() -> int:
 
 class Server:
     """A relevo server on a temporary database, with Oscar (the Hermes owner), Ana and Bob, and two
-    teams: `backend` (Ana and Oscar) and `web` (Bob). Oscar's one team is backend, so his `@team` is it.
+    teams: `backend` (Ana and Oscar) and `web` (Bob). A team is always named: `@team` names nobody.
 
     `tls`: `relevo serve --tls`, its own certificate made for 127.0.0.1 alone; `own`: `--tls-cert` and
     `--tls-key` with a certificate of yours (PEM files). Then `cert` is the server's certificate (PEM)."""
@@ -508,13 +508,16 @@ class Outbound(Base):
              "zoe or backend can, cc @ana; not `@carl`, nor me@example.com."),
             # A team alone in a reply: refused with BAD_REQUEST, which names it.
             ("@Backend: approved.\n```\n@decorator\n```", "Backend: approved.\n```\n@decorator\n```"),
-            # @team (Oscar's one team) in a reply, with a context on a person already in it.
+            # @team, a name it does not know (a team is always named), with a context on a person already
+            # in it.
             ("Done, @team. @ana/pagos-api FYI", "Done, team. @ana/pagos-api FYI"),
             # Two teams: the server names the first, then the second.
             ("Thanks. @backend and @web both own it.", "Thanks. backend and @web both own it.",
              "Thanks. backend and web both own it."),
-            # @team, then a name it does not know.
-            ("@team and @zzz should know.", "team and @zzz should know.", "team and zzz should know."),
+            # @Equipo and a name it does not know: both unknown, in one retry.
+            ("@Equipo and @zzz should know.", "Equipo and zzz should know."),
+            # A person with two contexts, then a name it does not know.
+            ("@zzz: @ana/x or @ana/y?", "@zzz: ana/x or ana/y?", "zzz: ana/x or ana/y?"),
             # More than 20, then the 20 it does not know.
             ("Ask " + " ".join(f"@p{i:02}" for i in range(21)),
              "Ask " + " ".join(f"@p{i:02}" for i in range(20)) + " p20",
@@ -571,7 +574,7 @@ class Outbound(Base):
         for text in ("`a\n\n@ana `b`", "Build broke in `main.rs\n\n@ana can you run `cargo test`?",
                      "`a\n \t\r\n@ana `b`", "`a\r\n\r\n@ana\r\n`"):
             self.assertEqual(found(text), ["@ana"], text)
-        self.assertEqual([n for _, _, n in client.mentions("@Equipo @TEAM @Ana-")], ["team", "team", "ana"])
+        self.assertEqual([n for _, _, n in client.mentions("@Equipo @TEAM @Ana-")], ["equipo", "team", "ana"])
         self.assertEqual(client.as_plain_text("@ana and `@ana` and @ana/x", {"ana"}),
                          ("ana and `@ana` and ana/x", 2))
         # Next to backticks, inline code stays as it was, and nothing else becomes a mention.
@@ -1112,9 +1115,12 @@ class Tools(Base):
         team = tools.relevo_send({"text": "Staging DNS\n@backend and @bob, who knows it?"})
         self.assertTrue(team.startswith("Sent to @bob and @backend (2 people). "), team)
         self.assertEqual((opened(team)["kind"], opened(team)["teams"]), ("team", ["backend"]))
-        # @team is Oscar's one team.
+        # A team is always named: @team is a name it does not know, and the error says to name the team.
         mine = tools.relevo_send({"text": "@team: the deploy freeze starts at 18:00."})
-        self.assertTrue(mine.startswith("Sent to @backend (1 person). "), mine)
+        self.assertTrue(mine.startswith("Error: Relevo refused it: UNKNOWN_PERSON"), mine)
+        self.assertIn("@team is no team: a team is always named; name the team (@backend, @web) or the people "
+                      "(@handle)", mine)
+        self.assertIn("\nNot a person nor a team here: @team. Nothing was sent.", mine)
         board = tools.relevo_send({"text": "Office closed on Friday. Mail me at oscar@example.com."})
         self.assertTrue(board.startswith("Posted on the global board (2 people): everyone on the server sees it, "
                                          "and nobody has to answer. Wrote note"), board)
@@ -1211,10 +1217,6 @@ class Tools(Base):
             me_only = tools.relevo_send({"text": "@oscar reminder: rotate the keys"})
             self.assertTrue(me_only.startswith("Error: Relevo refused it: NO_RECIPIENTS: the only person this note "
                                                "mentions is you"), me_only)
-            # Now in two teams, @team is not one: the server says which.
-            ambiguous = tools.relevo_send({"text": "@team hello"})
-            self.assertTrue(ambiguous.startswith("Error: Relevo refused it: BAD_REQUEST: @team means your team, and "
-                                                 "you are in several: @backend, @solo"), ambiguous)
         finally:
             SERVER.admin("team", "remove", "solo")
         limit = client.describe_refusal(client.RelevoError(429, "TEAM_LIMIT", "at most 5 team and global-board "

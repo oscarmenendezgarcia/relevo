@@ -610,10 +610,10 @@ class RelevoAdapter(BasePlatformAdapter):
         if not text.strip():
             return SendResult(success=False, error="empty note", error_kind="unknown")
         try:
-            # The reply named someone Relevo does not know, a team, or @team it cannot place: its thread
-            # still wants it, so it goes again with those mentions as plain text. The server names one
-            # problem at a time (two teams: the first; @team and an unknown name: @team), so this repeats
-            # while each refusal names a mention still there. Each round takes at least one mention out,
+            # The reply named someone Relevo does not know (@team too: a team is always named) or a team:
+            # its thread still wants it, so it goes again with those mentions as plain text. The server
+            # names one problem at a time (two teams: the first), so this repeats while each refusal
+            # names a mention still there. Each round takes at least one mention out,
             # so it ends within as many rounds as the reply has mentions.
             while True:
                 try:

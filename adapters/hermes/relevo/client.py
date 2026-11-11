@@ -1102,8 +1102,7 @@ def _code_mask(text: str) -> list:
 
 def mentions(text: str) -> list:
     """Every mention of `text` outside code, in order, repeats included, as the server reads them
-    (src/mention.rs): (start, end, name), `end` past the context if one follows, `name` lowercased
-    with `equipo` read as `team`."""
+    (src/mention.rs): (start, end, name), `end` past the context if one follows, `name` lowercased."""
     mask = _code_mask(text)
     out = []
     i = 0
@@ -1130,14 +1129,13 @@ def mentions(text: str) -> list:
             while last > end + 1 and text[last - 1] in ".,;:!?)-/'":
                 last -= 1
             stop = max(last, end) if last > end + 1 else end
-        lower = name.lower()
-        out.append((i, stop, "team" if lower in ("team", "equipo") else lower))
+        out.append((i, stop, name.lower()))
         i = max(stop, i + 1)
     return out
 
 
 def as_plain_text(text: str, names: set) -> tuple[str, int]:
-    """`text` with the `@` of each mention of `names` (lowercased; `team` for @team and @equipo) left out,
+    """`text` with the `@` of each mention of `names` (lowercased) left out,
     so it is plain text and sends the note to nobody. Returns the text and how many it changed.
 
     Only the `@` goes: no backtick is added (one next to a backtick run would merge with it and change
@@ -1156,11 +1154,11 @@ _MAX_MENTIONS = 20
 
 def refused_mentions(exc: RelevoError, text: str, me: Optional[str], *, reply: bool = True) -> set:
     """The mentions of `text` a refused send failed on, when it failed on its mentions: the names
-    UNKNOWN_PERSON did not know (and, in a `reply`, the teams it lists, which a reply cannot mention
-    either: the server says so only once the unknown names are gone), or those a BAD_REQUEST about
-    mentions names (a team in a reply, @team when the person is in no team or several, a context on
-    a team or malformed, a person with two contexts), or, with more than 20 distinct names, those
-    past the 20th. Empty otherwise."""
+    UNKNOWN_PERSON did not know (@team and @equipo among them: a team is always named), and, in a
+    `reply`, the teams it lists, which a reply cannot mention either: the server says so only once
+    the unknown names are gone; or those a BAD_REQUEST about mentions names (a team in a reply, a
+    context on a team or malformed, a person with two contexts); or, with more than 20 distinct
+    names, those past the 20th. Empty otherwise."""
     if exc.code == "UNKNOWN_PERSON":
         names = {n.lower() for n in _names(exc.details.get("unknown"))}
         if reply:
@@ -1172,10 +1170,9 @@ def refused_mentions(exc: RelevoError, text: str, me: Optional[str], *, reply: b
     message = exc.message
     named = re.match(r"^'?@([A-Za-z0-9][A-Za-z0-9_-]*)", message)
     if named and any(why in message for why in (
-            "cannot be mentioned in a reply", "means your team", "takes no context", "a context must be",
+            "cannot be mentioned in a reply", "takes no context", "a context must be",
             "is mentioned twice with different contexts")):
-        name = named.group(1).lower()
-        return {"team" if name in ("team", "equipo") else name}
+        return {named.group(1).lower()}
     if re.match(r"^at most \d+ people and teams can be mentioned", message):
         distinct: list = []
         for _, _, name in mentions(text):
