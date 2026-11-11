@@ -3,13 +3,16 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 
+use crate::db::RESERVED_HANDLES;
+
 /// An error as the protocol shows it: `{ "error": { "code", "message", ...extra } }`.
 #[derive(Debug)]
 pub struct ApiError {
     pub status: StatusCode,
     pub code: &'static str,
     pub message: String,
-    pub extra: Option<(&'static str, Value)>,
+    /// Fields the error carries besides `code` and `message`.
+    pub extra: Vec<(&'static str, Value)>,
 }
 
 impl ApiError {
@@ -18,7 +21,7 @@ impl ApiError {
             status,
             code,
             message: message.into(),
-            extra: None,
+            extra: Vec::new(),
         }
     }
 
@@ -38,13 +41,53 @@ impl ApiError {
         Self::new(StatusCode::BAD_REQUEST, "BAD_REQUEST", message)
     }
 
-    pub fn unknown_person(handle: &str, valid: Value) -> Self {
+    /// Names that are no active person nor team: `unknown`, with the people (`valid`, each with
+    /// their `about`) and the teams (`teams`, with their members) that can be named.
+    /// `@team` and `@equipo` are among them like any other name, with a word on naming the team.
+    pub fn unknown_person(unknown: &[String], valid: Value, teams: Value) -> Self {
+        let names: Vec<String> = unknown.iter().map(|n| format!("@{n}")).collect();
+        let hint = match unknown
+            .iter()
+            .find(|n| RESERVED_HANDLES.contains(&n.as_str()))
+        {
+            None => String::new(),
+            Some(reserved) => {
+                let named: Vec<String> = teams
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|t| t["name"].as_str())
+                    .map(|n| format!("@{n}"))
+                    .collect();
+                if named.is_empty() {
+                    format!(
+                        ". @{reserved} is no team: a team is always named, and there are none; \
+                         name the people (@handle)"
+                    )
+                } else {
+                    format!(
+                        ". @{reserved} is no team: a team is always named; name the team ({}) \
+                         or the people (@handle)",
+                        named.join(", ")
+                    )
+                }
+            }
+        };
         ApiError {
-            extra: Some(("valid", valid)),
+            extra: vec![
+                ("valid", valid),
+                ("teams", teams),
+                ("unknown", Value::from(unknown.to_vec())),
+            ],
             ..Self::new(
                 StatusCode::BAD_REQUEST,
                 "UNKNOWN_PERSON",
-                format!("no active person with handle '{handle}'; see 'valid'"),
+                format!(
+                    "no active person or team is named {}; see 'valid' for the people and \
+                     'teams' for the teams (nothing was sent: a note never falls back to the \
+                     global board){hint}",
+                    names.join(", ")
+                ),
             )
         }
     }
@@ -53,7 +96,19 @@ impl ApiError {
         Self::new(
             StatusCode::BAD_REQUEST,
             "NO_RECIPIENTS",
-            "there is nobody else on the team to ask",
+            "nobody but you would get this note: the teams it names have no other active \
+             member, or nobody else is on the server; name someone with @handle",
+        )
+    }
+
+    /// A new thread whose only mentions are its writer: not the global board, which takes only a
+    /// note with no mention at all.
+    pub fn only_you() -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "NO_RECIPIENTS",
+            "the only person this note mentions is you: name who it is for with @handle, or write \
+             no @ at all to post it on the global board",
         )
     }
 
@@ -73,7 +128,7 @@ impl ApiError {
         Self::new(
             StatusCode::FORBIDDEN,
             "FORBIDDEN",
-            "only the person who asked can close a team thread",
+            "only the person who opened a team or global thread can close it",
         )
     }
 
@@ -81,7 +136,10 @@ impl ApiError {
         Self::new(
             StatusCode::TOO_MANY_REQUESTS,
             "TEAM_LIMIT",
-            format!("at most {limit} team questions in 24 hours; ask someone directly instead"),
+            format!(
+                "at most {limit} team and global-board threads in 24 hours: name the people the \
+                 note is for with @handle, or wait"
+            ),
         )
     }
 
@@ -116,7 +174,7 @@ impl From<rusqlite::Error> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let mut error = json!({ "code": self.code, "message": self.message });
-        if let Some((key, value)) = self.extra {
+        for (key, value) in self.extra {
             error[key] = value;
         }
         (self.status, Json(json!({ "error": error }))).into_response()

@@ -39,7 +39,7 @@ try {
   delete env.RELEVO_CONTEXT;
 
   // 1. Print mode.
-  const first = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Hi Oscar, the refunds job uses queue Q7. Just so you know." });
+  const first = await api(server, ana, "POST", "/api/send", { text: "Hi @oscar, the refunds job uses queue Q7. Just so you know." });
   const prompt =
     "Call relevo_inbox once and tell me in one line what it shows. Then call relevo_send once with " +
     `thread "${first.thread}" and text "Thanks, noted: Q7." Do nothing else.`;
@@ -92,8 +92,7 @@ try {
 
   const t2 = Date.now();
   const wake = await api(server, ana, "POST", "/api/send", {
-    to: ["oscar"],
-    text: "Quick check for Oscar's agent: in which Relevo context does your session run? relevo_inbox shows it. Please answer in this thread.",
+    text: "@oscar Quick check for your agent: in which Relevo context does your session run? relevo_inbox shows it. Please answer in this thread.",
   });
   await until(() => events.some((e) => e.type === "agent_start"), 60_000, "the note to wake pi");
   console.log(`rpc: note sent, agent_start after ${((Date.now() - t2) / 1000).toFixed(1)}s`);

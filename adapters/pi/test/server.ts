@@ -46,6 +46,8 @@ export interface TestServer {
   cert?: string;
   certFile?: string;
   invite(handle: string, about?: string, label?: string): string;
+  /** Runs `relevo team <args…>` on the server's database: `team("add", "backend", "--title", "Backend")`, `team("join", "backend", "ana")`. */
+  team(...args: string[]): void;
   stop(): Promise<void>;
 }
 
@@ -61,7 +63,9 @@ async function healthy(url: string, certFile: string | undefined): Promise<boole
  * `tls`: `relevo serve --tls`, its certificate made for 127.0.0.1 alone; `own`:
  * `--tls-cert` and `--tls-key` with a certificate of yours (PEM files).
  */
-export async function startServer(options: { tls?: boolean; own?: { cert: string; key: string } } = {}): Promise<TestServer> {
+export async function startServer(
+  options: { tls?: boolean; own?: { cert: string; key: string }; env?: Record<string, string> } = {},
+): Promise<TestServer> {
   const bin = relevoBin();
   const dir = mkdtempSync(join(tmpdir(), "relevo-pi-test-"));
   const db = join(dir, "relevo.db");
@@ -75,7 +79,10 @@ export async function startServer(options: { tls?: boolean; own?: { cert: string
   let url = "";
   for (let port = 7990; port <= 7999 && !child; port++) {
     if (!(await portFree(port))) continue;
-    const c = spawn(bin, ["serve", "--addr", `127.0.0.1:${port}`, "--db", db, ...tls], { stdio: "ignore" });
+    const c = spawn(bin, ["serve", "--addr", `127.0.0.1:${port}`, "--db", db, ...tls], {
+      stdio: "ignore",
+      env: { ...process.env, ...options.env },
+    });
     const exited = new Promise<void>((r) => c.once("exit", () => r()));
     url = `${certFile ? "https" : "http"}://127.0.0.1:${port}`;
     for (let i = 0; i < 100 && c.exitCode === null; i++) {
@@ -109,6 +116,9 @@ export async function startServer(options: { tls?: boolean; own?: { cert: string
       const token = out.split("\n").find((l) => l.startsWith("rlv_"));
       if (!token) throw new Error("invite printed no token");
       return token.trim();
+    },
+    team(...args) {
+      execFileSync(bin, ["team", ...args, "--db", db], { stdio: "ignore" });
     },
     async stop() {
       if (proc.exitCode === null) {

@@ -191,6 +191,9 @@ EOF2
     version() {
         python3 -I -c 'import sqlite3, sys; print(sqlite3.connect(sys.argv[1]).execute("PRAGMA user_version").fetchone()[0])' "$1"
     }
+    # The layout this binary writes: read from the source, so a new layout never breaks this test.
+    want=$(sed -n 's/^const SCHEMA_VERSION: i64 = \([0-9][0-9]*\);$/\1/p' "$here/../src/db.rs")
+    [ -n "$want" ] || fail "no SCHEMA_VERSION in src/db.rs"
     before=$(sha256sum <"$db")
     rm -f "$fake/systemctl.log"
 
@@ -224,12 +227,12 @@ EOF2
     RELEVO_DB=$db "$bin" serve --addr 127.0.0.1:0 >"$fake/serve.log" 2>&1 &
     serve=$!
     for _ in $(seq 100); do
-        [ "$(version "$db")" = 6 ] && break
+        [ "$(version "$db")" = "$want" ] && break
         sleep 0.1
     done
     kill "$serve"
     wait "$serve" 2>/dev/null || true
-    [ "$(version "$db")" = 6 ] || fail "serve did not migrate: $(cat "$fake/serve.log")"
+    [ "$(version "$db")" = "$want" ] || fail "serve did not migrate: $(cat "$fake/serve.log")"
     [ "$(RELEVO_DB=$db "$bin" people | cut -f1 | tr '\n' ' ')" = "ana bob carl " ] ||
         fail "people after the migration: $(RELEVO_DB=$db "$bin" people)"
 

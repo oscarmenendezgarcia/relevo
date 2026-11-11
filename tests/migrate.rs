@@ -1,5 +1,6 @@
-//! A database of layout 5, made by relevo 0.2.1 itself (`tests/fixtures/make-layout5.sh`),
-//! migrated in place when this version first opens it, then used through the HTTP router.
+//! Databases of layout 5, made by relevo 0.2.1 itself (`tests/fixtures/make-layout5.sh`), and of
+//! layout 6, made by relevo 0.3.0 (`tests/fixtures/make-layout6.sh`), migrated in place when this
+//! version first opens them, then used through the HTTP router.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,6 +14,8 @@ use tower::ServiceExt;
 
 const LAYOUT5: &str = include_str!("fixtures/layout5.sql");
 const FIXTURE: &str = include_str!("fixtures/layout5-tokens.json");
+const LAYOUT6: &str = include_str!("fixtures/layout6.sql");
+const FIXTURE6: &str = include_str!("fixtures/layout6-tokens.json");
 
 /// A directory of its own, removed when the test ends.
 struct TempDir(PathBuf);
@@ -37,12 +40,21 @@ impl Drop for TempDir {
 
 /// The layout 5 database, as a file, and when its sessions were last seen.
 fn layout5(path: &str) -> i64 {
+    made_by(path, LAYOUT5, 5)
+}
+
+/// The layout 6 database, as a file, and when its sessions were last seen.
+fn layout6(path: &str) -> i64 {
+    made_by(path, LAYOUT6, 6)
+}
+
+fn made_by(path: &str, dump: &str, layout: i64) -> i64 {
     let conn = rusqlite::Connection::open(path).unwrap();
-    conn.execute_batch(LAYOUT5).unwrap();
+    conn.execute_batch(dump).unwrap();
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 5);
+    assert_eq!(version, layout);
     conn.query_row("SELECT max(last_seen) FROM sessions", [], |r| r.get(0))
         .unwrap()
 }
@@ -161,7 +173,7 @@ async fn a_layout_5_database_migrates_and_what_waited_for_a_reply_stays_pending(
         Clock::fixed(seen + 60),
         5,
     );
-    assert_eq!(user_version(&path), 6);
+    assert_eq!(user_version(&path), 7);
     let f = Fixture {
         app,
         v: serde_json::from_str(FIXTURE).unwrap(),
@@ -252,7 +264,27 @@ async fn a_layout_5_database_migrates_and_what_waited_for_a_reply_stays_pending(
     let mut expected = vec![f.thread("replied"), f.thread("blind")];
     expected.sort();
     assert_eq!(pending, expected, "{v}");
-    assert_eq!(ana.thread(&f.thread("team")).await["pending"], false);
+    // Its team question is a question to everyone, on the global board now, naming nobody.
+    let th = ana.thread(&f.thread("team")).await;
+    assert_eq!(th["pending"], false);
+    assert_eq!(th["kind"], "global");
+    assert_eq!(th["named"], false);
+    assert!(
+        th["delivery"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|d| d["named"] == false)
+    );
+    let th = ana.thread(&f.thread("fetched")).await;
+    assert_eq!(th["kind"], "direct");
+    assert!(
+        th["delivery"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|d| d["named"] == true)
+    );
 
     // And it works on: Bob's `done` handles a thread he had read, and a new note by Ana makes
     // it pending again.
@@ -283,7 +315,7 @@ async fn a_layout_5_database_migrates_and_what_waited_for_a_reply_stays_pending(
         )
         .unwrap();
     assert_eq!(pending, 4);
-    assert_eq!(user_version(&path), 6);
+    assert_eq!(user_version(&path), 7);
 }
 
 /// The columns of every table and the definition of every index, as `db::open` leaves them.
@@ -334,20 +366,31 @@ fn layout(path: &str) -> Vec<String> {
 #[test]
 fn a_migrated_database_has_the_layout_of_a_new_one() {
     let dir = TempDir::new();
-    let migrated = dir.db();
-    layout5(&migrated);
-    db::open_migrating(&migrated).unwrap();
     let new = dir.0.join("new.db");
     let new = new.to_str().unwrap();
     db::open(new).unwrap();
-    assert_eq!(layout(&migrated), layout(new));
+    for (name, make) in [("5.db", layout5 as fn(&str) -> i64), ("6.db", layout6)] {
+        let migrated = dir.0.join(name);
+        let migrated = migrated.to_str().unwrap();
+        make(migrated);
+        db::open_migrating(migrated).unwrap();
+        assert_eq!(layout(migrated), layout(new), "{name}");
+        // Every reference holds: the threads table was made again.
+        let conn = rusqlite::Connection::open(migrated).unwrap();
+        let broken: i64 = conn
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(broken, 0, "{name}");
+    }
 }
 
 #[test]
 fn other_layouts_are_refused_and_left_as_they_are() {
     for (version, says) in [
         (4, "older version of relevo"),
-        (7, "newer version of relevo"),
+        (8, "newer version of relevo"),
     ] {
         let dir = TempDir::new();
         let path = dir.db();
@@ -386,36 +429,49 @@ fn files(path: &str) -> Vec<(String, Option<Vec<u8>>)> {
 #[test]
 fn only_serve_migrates_and_checking_writes_nothing() {
     let dir = TempDir::new();
-    let path = dir.db();
-    layout5(&path);
-    // As the server leaves it once stopped: no -wal, no -shm.
-    rusqlite::Connection::open(&path)
-        .unwrap()
-        .pragma_update(None, "journal_mode", "WAL")
-        .unwrap();
-    let before = files(&path);
-    assert_eq!(before[1].1, None);
-    assert_eq!(before[2].1, None);
+    for (version, make, made_by) in [
+        (5, layout5 as fn(&str) -> i64, "relevo 0.1.0 to 0.2.x"),
+        (6, layout6, "relevo 0.3.x"),
+    ] {
+        let path = dir.0.join(format!("{version}.db"));
+        let path = path.to_str().unwrap();
+        make(path);
+        // As the server leaves it once stopped: no -wal, no -shm.
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .pragma_update(None, "journal_mode", "WAL")
+            .unwrap();
+        let before = files(path);
+        assert_eq!(before[1].1, None);
+        assert_eq!(before[2].1, None);
 
-    // Checking says serve migrates it, and changes nothing, leaving no -wal or -shm behind.
-    assert_eq!(db::check(&path).unwrap(), db::Layout::Migrates);
-    assert_eq!(files(&path), before);
-    // An admin command refuses it, says what to do, and changes nothing.
-    let err = format!("{:#}", db::open(&path).unwrap_err());
-    for says in ["only `relevo serve`", "relevo backup", "start the server"] {
-        assert!(err.contains(says), "{says}: {err}");
+        // Checking says serve migrates it, and changes nothing, leaving no -wal or -shm behind.
+        let layout = db::check(path).unwrap();
+        assert_eq!(layout, db::Layout::Migrates(version));
+        assert_eq!(layout.made_by(), made_by);
+        assert_eq!(files(path), before);
+        // An admin command refuses it, says what to do, and changes nothing.
+        let err = format!("{:#}", db::open(path).unwrap_err());
+        for says in [
+            "only `relevo serve`",
+            "relevo backup",
+            "start the server",
+            made_by,
+        ] {
+            assert!(err.contains(says), "{says}: {err}");
+        }
+        assert_eq!(user_version(path), version);
+        assert_eq!(files(path)[0], before[0]);
+
+        // The server migrates it; then everything opens it, and checking says so, also while it
+        // is open (read-only, through its -wal and -shm).
+        let conn = db::open_migrating(path).unwrap();
+        assert_eq!(user_version(path), 7);
+        assert_eq!(db::check(path).unwrap(), db::Layout::Current);
+        db::open(path).unwrap();
+        drop(conn);
+        assert_eq!(db::check(path).unwrap(), db::Layout::Current);
     }
-    assert_eq!(user_version(&path), 5);
-    assert_eq!(files(&path)[0], before[0]);
-
-    // The server migrates it; then everything opens it, and checking says so, also while it is
-    // open (read-only, through its -wal and -shm).
-    let conn = db::open_migrating(&path).unwrap();
-    assert_eq!(user_version(&path), 6);
-    assert_eq!(db::check(&path).unwrap(), db::Layout::Current);
-    db::open(&path).unwrap();
-    drop(conn);
-    assert_eq!(db::check(&path).unwrap(), db::Layout::Current);
 
     // A new file: empty. No file: an error, and none is made.
     let empty = dir.0.join("empty.db");
@@ -425,4 +481,141 @@ fn only_serve_migrates_and_checking_writes_nothing() {
     let missing = missing.to_str().unwrap();
     assert!(format!("{:#}", db::check(missing).unwrap_err()).contains("no database"));
     assert!(!std::path::Path::new(missing).exists());
+}
+
+/// What `api::refresh` keeps on each participant row, and on each session's: none of it may
+/// change when layout 6 becomes 7.
+fn flags(path: &str) -> Vec<String> {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let mut out: Vec<String> = conn
+        .prepare(
+            "SELECT thread_id || ' ' || person_id || ': ' || coalesce(delivered_seq, '-') || ' '
+                    || last_seq || ' ' || last_other_seq || ' ' || has_new || waiting || inbox
+                    || resolved || fresh || ' ' || coalesce(handled_seq, '-') || ' '
+                    || coalesce(handled_at, '-') || ' ' || coalesce(claimed_by, '-')
+             FROM participants ORDER BY thread_id, person_id",
+        )
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let sessions: Vec<String> = conn
+        .prepare(
+            "SELECT session_id || ' ' || thread_id || ': ' || delivered_seq || ' ' || has_new
+                    || waiting || person_inbox || resolved || ' ' || coalesce(claimed_by, '-')
+             FROM session_threads ORDER BY session_id, thread_id",
+        )
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    out.extend(sessions);
+    out
+}
+
+#[tokio::test]
+async fn a_layout_6_database_migrates_its_team_questions_to_the_global_board() {
+    let dir = TempDir::new();
+    let path = dir.db();
+    let seen = layout6(&path);
+    let before = flags(&path);
+    let app = App::new(
+        db::open_migrating(&path).unwrap(),
+        Clock::fixed(seen + 60),
+        5,
+    );
+    assert_eq!(user_version(&path), 7);
+    // Delivery, handled and claims stay as they were, and so does what is pending.
+    assert_eq!(flags(&path), before);
+    let f = Fixture {
+        app,
+        v: serde_json::from_str(FIXTURE6).unwrap(),
+    };
+    let ana = f.agent("ana", "ana-cc-0001", "pagos-api");
+    let bob = f.agent("bob", "bob-term-01", "pagos-api");
+    let carl = f.agent("carl", "carl-hermes1", "");
+
+    // Team questions were questions to everyone: global threads now, naming nobody, so answering
+    // them stays optional; direct threads name everyone in them.
+    for name in ["team", "unread_team", "resolved"] {
+        let th = ana.thread(&f.thread(name)).await;
+        assert_eq!(th["kind"], "global", "{name}");
+        assert_eq!(th["teams"], json!([]), "{name}");
+        assert_eq!(th["named"], false, "{name}");
+        assert_eq!(th["pending"], false, "{name}");
+        assert_eq!(th["participants"].as_array().unwrap().len(), 3, "{name}");
+        assert!(
+            th["delivery"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|d| d["named"] == false),
+            "{th}"
+        );
+    }
+    for name in ["fetched", "replied", "done", "claimed", "unread"] {
+        let th = bob.thread(&f.thread(name)).await;
+        assert_eq!(th["kind"], "direct", "{name}");
+        assert_eq!(th["named"], true, "{name}");
+    }
+
+    // Bob's inbox, as before: what waited for him still does; the question to everyone that
+    // reached him asks nothing of him, and the one Ana closed is resolved.
+    let v = bob.inbox().await;
+    let mut pending: Vec<&str> = v["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["pending"] == true)
+        .map(|t| t["id"].as_str().unwrap())
+        .collect();
+    pending.sort();
+    let mut expected = vec![f.thread("fetched"), f.thread("claimed"), f.thread("unread")];
+    expected.sort();
+    assert_eq!(pending, expected, "{v}");
+    assert!(listed(&v, &f.thread("unread_team")).is_none(), "{v}");
+    assert!(listed(&v, &f.thread("resolved")).is_none(), "{v}");
+    assert!(listed(&v, &f.thread("done")).is_none(), "{v}");
+    assert_eq!(v["teams"], json!([]));
+    assert_eq!(v["team"][0]["teams"], json!([]));
+
+    // A key used before the migration replays its first result, told as the thread is now.
+    let replay = ana
+        .send(json!({ "to": ["bob"], "text": "Fetched, not answered", "key": "k-fetched" }))
+        .await;
+    assert_eq!(replay["thread"], f.thread("fetched"));
+    assert_eq!(replay["kind"], "direct");
+    assert_eq!(replay["reached"], 1);
+    assert_eq!(replay["added"], json!([]));
+
+    // Only Ana, who asked, closes her question to everyone.
+    let (status, v) = carl
+        .call(
+            "POST",
+            "/api/send",
+            Some(json!({ "thread": f.thread("team"), "close": true })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
+    ana.send(json!({ "thread": f.thread("team"), "close": true }))
+        .await;
+
+    // And the new layout works on it: a team, and a note to it.
+    {
+        let conn = f.app.db();
+        db::add_team(&conn, "billing", Some("Billing"), seen).unwrap();
+        db::join_team(&conn, "billing", &["carl".to_string()]).unwrap();
+    }
+    let sent = ana
+        .send(json!({ "text": "@billing Is the invoice run late?" }))
+        .await;
+    assert_eq!(sent["kind"], "team");
+    assert_eq!(sent["to"], json!({ "people": [], "teams": ["billing"] }));
+    assert_eq!(sent["reached"], 1);
+    let v = carl.inbox().await;
+    let th = listed(&v, sent["thread"].as_str().unwrap()).unwrap();
+    assert_eq!(th["teams"], json!(["billing"]));
+    assert_eq!(th["pending"], false);
 }

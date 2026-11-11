@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS tokens (
 );
 CREATE TABLE IF NOT EXISTS threads (
     id         TEXT PRIMARY KEY,
-    kind       TEXT NOT NULL CHECK (kind IN ('direct', 'team')),
+    kind       TEXT NOT NULL CHECK (kind IN ('direct', 'team', 'global')),
     title      TEXT NOT NULL,
     opener_id  INTEGER NOT NULL REFERENCES people(id),
     status     TEXT NOT NULL CHECK (status IN ('open', 'closed')),
@@ -60,13 +60,19 @@ CREATE INDEX IF NOT EXISTS threads_by_opener ON threads(opener_id, kind, created
 -- `delivered_at`, `_label` and `_context` say when the latest one by someone else first did, and
 -- which session (its label and context then). `last_seq` is the thread's latest note, `last_other_seq` the
 -- latest one not theirs; `has_new` (no session of theirs has that one),
--- `waiting` (pending: open, direct, with a note not theirs after `handled_seq`), `inbox` (`has_new`
--- or `waiting`), `resolved` (a closed `team` thread: it shows only with `all`) and `fresh` (pending,
+-- `waiting` (pending: open, the person named, with a note not theirs after `handled_seq` and from
+-- the one that named them on), `inbox` (`has_new` or `waiting`), `resolved` (a closed `team` or
+-- `global` thread that does not name them: it shows only with `all`) and `fresh` (pending,
 -- with a note past `handled_seq` that reached one of their sessions: a new session of theirs gets
 -- its own row, starting at `handled_seq`) are kept by `api::refresh` after every change to the
 -- thread. `handled_seq` is how far the person has handled the thread (by writing in it, closing it
 -- or `done`); `handled_at`, `_label` and `_context` say when they last handled a note by someone
--- else, and from which session (its label and context then).
+-- else, and from which session (its label and context then). `named_seq` says the thread names
+-- the person with their own `@`: 0 when it did from the start (every participant of a `direct`
+-- thread, and the people named in the note that opened a `team` or `global` one), the note that
+-- named them when a later one did, `NULL` while it does not (reached through a team or the global
+-- board, or the opener of either): only then can it be pending for them, and only the notes by
+-- others from that one on.
 CREATE TABLE IF NOT EXISTS participants (
     thread_id         TEXT NOT NULL REFERENCES threads(id),
     person_id         INTEGER NOT NULL REFERENCES people(id),
@@ -89,6 +95,7 @@ CREATE TABLE IF NOT EXISTS participants (
     handled_label     TEXT,
     handled_context   TEXT,
     fresh             INTEGER NOT NULL DEFAULT 0,
+    named_seq         INTEGER,
     PRIMARY KEY (thread_id, person_id)
 );
 -- What a session has of a thread, once it differs from its person's: a session without a row has
@@ -158,7 +165,8 @@ CREATE INDEX IF NOT EXISTS notes_by_author ON notes(author_id, created_at);
 -- Idempotency keys: the first result of a send, per person and key. A key lives 24 hours from
 -- `created_at`; `send` deletes expired ones, so the table holds about a day of keyed sends.
 -- `claimed_by` is the session that held the thread for the person after that send: a replay names
--- it for the session that asks.
+-- it for the session that asks. `result` holds the rest of the first result (`kind`, `to`, `added`,
+-- `reached`) as JSON; `NULL` for a key used before layout 7.
 CREATE TABLE IF NOT EXISTS send_keys (
     person_id  INTEGER NOT NULL REFERENCES people(id),
     key        TEXT NOT NULL,
@@ -167,12 +175,34 @@ CREATE TABLE IF NOT EXISTS send_keys (
     status     TEXT NOT NULL,
     claimed_by INTEGER,
     created_at INTEGER NOT NULL,
+    result     TEXT,
     PRIMARY KEY (person_id, key)
 );
 CREATE INDEX IF NOT EXISTS send_keys_by_time ON send_keys(created_at);
+-- Teams: named groups of people, kept by the admin. A name is never a person's handle.
+CREATE TABLE IF NOT EXISTS teams (
+    id         INTEGER PRIMARY KEY,
+    name       TEXT NOT NULL UNIQUE,
+    title      TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS team_members (
+    team_id   INTEGER NOT NULL REFERENCES teams(id),
+    person_id INTEGER NOT NULL REFERENCES people(id),
+    PRIMARY KEY (team_id, person_id)
+);
+CREATE INDEX IF NOT EXISTS team_members_by_person ON team_members(person_id);
+-- The teams the note that opened a `team` thread named, by their names then: a team removed
+-- later keeps its name here.
+CREATE TABLE IF NOT EXISTS thread_teams (
+    thread_id TEXT NOT NULL REFERENCES threads(id),
+    name      TEXT NOT NULL,
+    PRIMARY KEY (thread_id, name)
+);
 ";
 
-/// Handles that mean "the whole team" in `to`, so no person may take them.
+/// Names no person nor team may take: 0.3's whole team, which the deprecated `to` still reads
+/// as "everyone". In a note's text they name nobody (a team is always named).
 pub const RESERVED_HANDLES: [&str; 2] = ["team", "equipo"];
 
 /// A session not seen for this long is forgotten, and so are its claims.
@@ -182,10 +212,10 @@ pub const SESSION_LIFETIME_SECS: i64 = 7 * 24 * 3600;
 pub const CLAIM_LAPSE_SECS: i64 = 15 * 60;
 
 /// The layout of `SCHEMA`, kept in SQLite's `user_version`. A database of layout 5 (relevo 0.1.0
-/// to 0.2.x) is migrated in place (`MIGRATE_FROM_5`), by `relevo serve` only; any other layout is
-/// refused, never half-updated (`CREATE TABLE IF NOT EXISTS` would skip the old tables and fail
-/// on their missing columns).
-const SCHEMA_VERSION: i64 = 6;
+/// to 0.2.x) or 6 (relevo 0.3.x) is migrated in place (`MIGRATE_FROM_5`, then `MIGRATE_FROM_6`),
+/// by `relevo serve` only; any other layout is refused, never half-updated (`CREATE TABLE IF NOT
+/// EXISTS` would skip the old tables and fail on their missing columns).
+const SCHEMA_VERSION: i64 = 7;
 
 /// Layout 5 to 6: the handled state of each participant, from what layout 5 recorded as handling.
 /// A thread that was `waiting` there (open, direct, its latest note not theirs) waited for their
@@ -227,14 +257,42 @@ UPDATE session_threads AS s SET waiting = p.waiting, person_inbox = p.inbox
 FROM participants p WHERE p.thread_id = s.thread_id AND p.person_id = s.person_id;
 ";
 
-/// Opens (or creates) the database and applies the schema. A database of layout 5 is refused:
-/// only `relevo serve` migrates it (`open_migrating`), so that an admin command never changes the
-/// layout behind the owner's back, before a backup. `":memory:"` works for tests.
+/// Layout 6 to 7: teams, the `global` kind and named participants. A `team` thread of layout 6
+/// was a question to everyone: it becomes a `global` thread, which names none of its participants
+/// (its `kind` is checked, so the table is made again, as SQLite says to change a constraint).
+/// Every participant of a `direct` thread is named from the start. Delivery, handled and claims
+/// stay as they were, and so do the flags `api::refresh` keeps: pending was already for `direct`
+/// threads only, and a closed `global` thread that names nobody is resolved as a closed `team`
+/// thread was. The new columns go last, as in `SCHEMA`; the new tables come from `SCHEMA`.
+/// Runs with foreign keys off (see `open_with`).
+const MIGRATE_FROM_6: &str = "
+ALTER TABLE participants ADD COLUMN named_seq INTEGER;
+UPDATE participants SET named_seq = 0
+WHERE thread_id IN (SELECT id FROM threads WHERE kind = 'direct');
+ALTER TABLE send_keys ADD COLUMN result TEXT;
+CREATE TABLE threads_7 (
+    id         TEXT PRIMARY KEY,
+    kind       TEXT NOT NULL CHECK (kind IN ('direct', 'team', 'global')),
+    title      TEXT NOT NULL,
+    opener_id  INTEGER NOT NULL REFERENCES people(id),
+    status     TEXT NOT NULL CHECK (status IN ('open', 'closed')),
+    created_at INTEGER NOT NULL
+);
+INSERT INTO threads_7 (id, kind, title, opener_id, status, created_at)
+SELECT id, CASE kind WHEN 'team' THEN 'global' ELSE kind END, title, opener_id, status, created_at
+FROM threads;
+DROP TABLE threads;
+ALTER TABLE threads_7 RENAME TO threads;
+";
+
+/// Opens (or creates) the database and applies the schema. A database of layout 5 or 6 is
+/// refused: only `relevo serve` migrates it (`open_migrating`), so that an admin command never
+/// changes the layout behind the owner's back, before a backup. `":memory:"` works for tests.
 pub fn open(path: &str) -> Result<Connection> {
     open_with(path, false)
 }
 
-/// `open`, migrating a database of layout 5 in place: for `relevo serve`.
+/// `open`, migrating a database of layout 5 or 6 in place: for `relevo serve`.
 pub fn open_migrating(path: &str) -> Result<Connection> {
     open_with(path, true)
 }
@@ -244,23 +302,39 @@ fn open_with(path: &str, migrate: bool) -> Result<Connection> {
     let mut conn = Connection::open(path).with_context(|| format!("opening database {path}"))?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     // A layout it refuses is left as it is: found before anything is written, WAL mode included.
-    let refuses = |layout| layout == Layout::Migrates && !migrate;
-    if refuses(layout(&conn, path)?) {
-        bail!(no_migration(path));
+    let refuses = |layout| matches!(layout, Layout::Migrates(_)) && !migrate;
+    let found = layout(&conn, path)?;
+    if refuses(found) {
+        bail!(no_migration(path, found));
     }
     conn.pragma_update(None, "journal_mode", "WAL")?;
-    conn.pragma_update(None, "foreign_keys", "ON")?;
+    // Off while migrating: layout 7 makes the threads table again, which the others refer to.
+    // (The pragma does nothing inside a transaction, so it is set around it.)
+    conn.pragma_update(None, "foreign_keys", "OFF")?;
     // One transaction, so a process opening a new file at the same time sees it either empty or
     // with its version set, and one opening an old file sees it either old or migrated.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     match layout(&tx, path)? {
-        layout if refuses(layout) => bail!(no_migration(path)),
-        Layout::Migrates => {
-            tx.execute_batch(MIGRATE_FROM_5)
-                .with_context(|| format!("migrating database {path} from layout 5"))?;
+        layout if refuses(layout) => bail!(no_migration(path, layout)),
+        Layout::Migrates(from) => {
+            if from == 5 {
+                tx.execute_batch(MIGRATE_FROM_5)
+                    .with_context(|| format!("migrating database {path} from layout 5"))?;
+                tracing::info!(db = path, "migrated the database from layout 5 to 6");
+            }
+            tx.execute_batch(MIGRATE_FROM_6)
+                .with_context(|| format!("migrating database {path} from layout 6"))?;
+            let broken: i64 =
+                tx.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+                    r.get(0)
+                })?;
+            if broken > 0 {
+                bail!("migrating database {path} from layout 6: {broken} broken references");
+            }
             tracing::info!(
                 db = path,
-                "migrated the database from layout 5 to {SCHEMA_VERSION}"
+                "migrated the database from layout 6 to {SCHEMA_VERSION}: team threads are \
+                 global ones now"
             );
         }
         Layout::New | Layout::Current => {}
@@ -268,16 +342,18 @@ fn open_with(path: &str, migrate: bool) -> Result<Connection> {
     tx.execute_batch(SCHEMA)?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
     Ok(conn)
 }
 
-/// Why a command other than `serve` refuses a database of layout 5.
-fn no_migration(path: &str) -> String {
+/// Why a command other than `serve` refuses a database of layout 5 or 6.
+fn no_migration(path: &str, layout: Layout) -> String {
     format!(
-        "database {path} has the layout of relevo 0.1.0 to 0.2.x, which only `relevo serve` \
-         migrates (in place, when it starts). Keep a copy first with `relevo backup <file>` (it \
-         copies this layout too), then start the server, and run this again once it runs (see \
-         \"Upgrades\" in docs/install.md)"
+        "database {path} has the layout of {}, which only `relevo serve` migrates (in place, \
+         when it starts). Keep a copy first with `relevo backup <file>` (it copies this layout \
+         too), then start the server, and run this again once it runs (see \"Upgrades\" in \
+         docs/install.md)",
+        layout.made_by()
     )
 }
 
@@ -288,8 +364,19 @@ pub enum Layout {
     New,
     /// This version's layout.
     Current,
-    /// Layout 5 (relevo 0.1.0 to 0.2.x): `relevo serve` migrates it.
-    Migrates,
+    /// Layout 5 (relevo 0.1.0 to 0.2.x) or 6 (relevo 0.3.x): `relevo serve` migrates it.
+    Migrates(i64),
+}
+
+impl Layout {
+    /// The versions of relevo that made a layout `serve` migrates.
+    pub fn made_by(self) -> &'static str {
+        match self {
+            Layout::Migrates(5) => "relevo 0.1.0 to 0.2.x",
+            Layout::Migrates(_) => "relevo 0.3.x",
+            Layout::New | Layout::Current => "this relevo",
+        }
+    }
 }
 
 /// The layout of the database `conn` has open, or why this version refuses it.
@@ -301,8 +388,8 @@ fn layout(conn: &Connection, path: &str) -> Result<Layout> {
     if version > SCHEMA_VERSION {
         bail!("database {path} was made by a newer version of relevo; use that one");
     }
-    if version == 5 {
-        return Ok(Layout::Migrates);
+    if version == 5 || version == 6 {
+        return Ok(Layout::Migrates(version));
     }
     let tables: i64 = conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))?;
     if tables > 0 {
@@ -485,7 +572,12 @@ pub fn invite(
         bail!("handle must match ^[a-z0-9][a-z0-9_-]{{1,31}}$");
     }
     if RESERVED_HANDLES.contains(&handle) {
-        bail!("'{handle}' is reserved: it means the whole team");
+        bail!("'{handle}' is reserved: it was 0.3's whole team, and @{handle} names nobody");
+    }
+    if team_id(conn, handle)?.is_some() {
+        bail!(
+            "'{handle}' is the name of a team: a handle cannot be one, so that @{handle} means one thing"
+        );
     }
     one_line("name", name)?;
     if let Some(about) = about {
@@ -696,6 +788,156 @@ pub fn deactivate(conn: &Connection, handle: &str, now: i64) -> Result<usize> {
     Ok(revoked)
 }
 
+fn team_id(conn: &Connection, name: &str) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row("SELECT id FROM teams WHERE name = ?1", [name], |r| r.get(0))
+        .optional()?)
+}
+
+fn existing_team(conn: &Connection, name: &str) -> Result<i64> {
+    team_id(conn, name)?.with_context(|| format!("no team named '{name}' (see relevo teams)"))
+}
+
+/// Creates a team, with nobody in it. Its name follows the rule of handles, and is never the
+/// handle of a person (active or not), nor `team` or `equipo`, so that a mention means one thing.
+pub fn add_team(conn: &Connection, name: &str, title: Option<&str>, now: i64) -> Result<()> {
+    if !valid_handle(name) {
+        bail!("a team name must match ^[a-z0-9][a-z0-9_-]{{1,31}}$");
+    }
+    if RESERVED_HANDLES.contains(&name) {
+        bail!("'{name}' is reserved: it was 0.3's whole team, and @{name} names nobody");
+    }
+    let person: Option<bool> = conn
+        .query_row("SELECT active FROM people WHERE handle = ?1", [name], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    if let Some(active) = person {
+        let state = if active { "" } else { " (inactive)" };
+        bail!("'{name}' is the handle of a person{state}: a team cannot take it");
+    }
+    if team_id(conn, name)?.is_some() {
+        bail!("there is a team named '{name}' already");
+    }
+    if let Some(title) = title {
+        one_line("title", title)?;
+    }
+    conn.execute(
+        "INSERT INTO teams (name, title, created_at) VALUES (?1, coalesce(?2, ''), ?3)",
+        params![name, title, now],
+    )?;
+    Ok(())
+}
+
+/// What `team join` or `team leave` did for one person.
+pub enum Membership {
+    Changed,
+    /// Joining someone already in the team, or leaving someone not in it.
+    Already,
+}
+
+/// Puts active people in a team. An unknown or inactive handle fails, changing nothing.
+pub fn join_team(conn: &Connection, name: &str, handles: &[String]) -> Result<Vec<Membership>> {
+    let team = existing_team(conn, name)?;
+    let tx = conn.unchecked_transaction()?;
+    let mut done = Vec::new();
+    for handle in handles {
+        let active: Option<bool> = tx
+            .query_row(
+                "SELECT active FROM people WHERE handle = ?1",
+                [handle],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let person = match active {
+            Some(true) => person_id(&tx, handle)?,
+            Some(false) => {
+                bail!("'{handle}' is deactivated: invite them back first; nobody joined")
+            }
+            None => bail!("no person with handle '{handle}'; nobody joined"),
+        };
+        let added = tx.execute(
+            "INSERT OR IGNORE INTO team_members (team_id, person_id) VALUES (?1, ?2)",
+            params![team, person],
+        )?;
+        done.push(if added > 0 {
+            Membership::Changed
+        } else {
+            Membership::Already
+        });
+    }
+    tx.commit()?;
+    Ok(done)
+}
+
+/// Takes people out of a team. An unknown handle fails, changing nothing.
+pub fn leave_team(conn: &Connection, name: &str, handles: &[String]) -> Result<Vec<Membership>> {
+    let team = existing_team(conn, name)?;
+    let tx = conn.unchecked_transaction()?;
+    let mut done = Vec::new();
+    for handle in handles {
+        let person = person_id(&tx, handle).context("nobody left")?;
+        let removed = tx.execute(
+            "DELETE FROM team_members WHERE team_id = ?1 AND person_id = ?2",
+            params![team, person],
+        )?;
+        done.push(if removed > 0 {
+            Membership::Changed
+        } else {
+            Membership::Already
+        });
+    }
+    tx.commit()?;
+    Ok(done)
+}
+
+/// Deletes a team and its membership. Its threads keep its name (`thread_teams`), and a later
+/// team may take it.
+pub fn remove_team(conn: &Connection, name: &str) -> Result<()> {
+    let team = existing_team(conn, name)?;
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM team_members WHERE team_id = ?1", [team])?;
+    tx.execute("DELETE FROM teams WHERE id = ?1", [team])?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub struct TeamInfo {
+    pub name: String,
+    pub title: String,
+    /// (handle, active), by handle.
+    pub members: Vec<(String, bool)>,
+}
+
+/// Every team, by name, with its members, active or not.
+pub fn list_teams(conn: &Connection) -> Result<Vec<TeamInfo>> {
+    let mut teams: Vec<(i64, TeamInfo)> = conn
+        .prepare("SELECT id, name, title FROM teams ORDER BY name")?
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                TeamInfo {
+                    name: r.get(1)?,
+                    title: r.get(2)?,
+                    members: Vec::new(),
+                },
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut stmt = conn.prepare(
+        "SELECT m.team_id, p.handle, p.active FROM team_members m
+         JOIN people p ON p.id = m.person_id ORDER BY p.handle",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get(1)?, r.get(2)?)))?;
+    for row in rows {
+        let (team, handle, active) = row?;
+        if let Some((_, t)) = teams.iter_mut().find(|(id, _)| *id == team) {
+            t.members.push((handle, active));
+        }
+    }
+    Ok(teams.into_iter().map(|(_, t)| t).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -767,6 +1009,65 @@ mod tests {
         assert_eq!(people[0].name, "Ana B");
         assert_eq!(list_tokens(&conn, Some("ana")).unwrap().len(), 2);
         assert!(invite(&conn, "team", "T", None, "x", 0).is_err());
+    }
+
+    #[test]
+    fn teams_and_handles_never_share_a_name() {
+        let conn = open(":memory:").unwrap();
+        invite(&conn, "ana", "Ana", None, "laptop", 0).unwrap();
+        invite(&conn, "old", "Old", None, "laptop", 0).unwrap();
+        deactivate(&conn, "old", 0).unwrap();
+        add_team(&conn, "backend", Some("Backend"), 0).unwrap();
+        // A team takes no handle, active or not, nor `team` or `equipo`, nor a bad name.
+        for name in ["ana", "old", "team", "equipo", "Backend", "b", "backend"] {
+            assert!(add_team(&conn, name, None, 0).is_err(), "{name}");
+        }
+        assert!(add_team(&conn, "x", None, 0).is_err());
+        assert!(add_team(&conn, "front", Some("a\nb"), 0).is_err());
+        // And a person takes no team's name.
+        let Err(err) = invite(&conn, "backend", "B", None, "laptop", 0) else {
+            panic!("a handle took a team's name")
+        };
+        assert!(err.to_string().contains("name of a team"), "{err}");
+        assert_eq!(list_people(&conn).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn joining_and_leaving_teams() {
+        let conn = open(":memory:").unwrap();
+        for h in ["ana", "bob", "old"] {
+            invite(&conn, h, h, None, "laptop", 0).unwrap();
+        }
+        deactivate(&conn, "old", 0).unwrap();
+        add_team(&conn, "backend", None, 0).unwrap();
+        let h = |hs: &[&str]| hs.iter().map(|h| h.to_string()).collect::<Vec<_>>();
+        let done = join_team(&conn, "backend", &h(&["ana", "bob"])).unwrap();
+        assert!(done.iter().all(|d| matches!(d, Membership::Changed)));
+        let done = join_team(&conn, "backend", &h(&["ana"])).unwrap();
+        assert!(matches!(done[0], Membership::Already));
+        // Unknown or inactive: refused, and nobody joins.
+        add_team(&conn, "front", None, 0).unwrap();
+        assert!(join_team(&conn, "front", &h(&["ana", "nobody"])).is_err());
+        assert!(join_team(&conn, "front", &h(&["ana", "old"])).is_err());
+        assert!(join_team(&conn, "nope", &h(&["ana"])).is_err());
+        let teams = list_teams(&conn).unwrap();
+        assert_eq!(teams[1].name, "front");
+        assert!(teams[1].members.is_empty());
+        // A member deactivated later stays in, marked.
+        deactivate(&conn, "bob", 0).unwrap();
+        let teams = list_teams(&conn).unwrap();
+        assert_eq!(
+            teams[0].members,
+            vec![("ana".to_string(), true), ("bob".to_string(), false)]
+        );
+        let done = leave_team(&conn, "backend", &h(&["bob", "old"])).unwrap();
+        assert!(matches!(done[0], Membership::Changed));
+        assert!(matches!(done[1], Membership::Already));
+        remove_team(&conn, "backend").unwrap();
+        assert!(remove_team(&conn, "backend").is_err());
+        assert_eq!(list_teams(&conn).unwrap().len(), 1);
+        // The name is free again.
+        add_team(&conn, "backend", None, 0).unwrap();
     }
 
     #[cfg(unix)]

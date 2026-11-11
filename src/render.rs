@@ -66,15 +66,22 @@ fn handles(v: &Value) -> String {
         .unwrap_or_default()
 }
 
-/// The team list: handle, name, about, and where their agents work now.
+/// The people on the server (the protocol's `team` list): handle, name, about, the teams they
+/// are in, and where their agents work now.
 pub fn team(team: &Value, me: Option<&str>) -> String {
-    let mut out = String::from("Team (their agents' live contexts in brackets):\n");
+    let mut out = String::from(
+        "People (mention one with @handle; their agents' live contexts in brackets):\n",
+    );
     for m in team.as_array().into_iter().flatten() {
         let handle = s(&m["handle"]);
         let you = if Some(handle) == me { ", you" } else { "" };
         let _ = write!(out, "- @{handle} ({}{you})", s(&m["name"]));
         if !s(&m["about"]).is_empty() {
             let _ = write!(out, ": {}", s(&m["about"]));
+        }
+        let teams = m["teams"].as_array().map(Vec::as_slice).unwrap_or_default();
+        if !teams.is_empty() {
+            let _ = write!(out, "; in {}", handles(&m["teams"]));
         }
         let contexts: Vec<&str> = m["contexts"]
             .as_array()
@@ -88,6 +95,69 @@ pub fn team(team: &Value, me: Option<&str>) -> String {
         out.push('\n');
     }
     out
+}
+
+/// The teams on the server: name, title and members. Empty for a server that does not list them
+/// (before 0.4.0).
+pub fn teams(teams: &Value, me: Option<&str>) -> String {
+    let Some(teams) = teams.as_array() else {
+        return String::new();
+    };
+    if teams.is_empty() {
+        return "Teams: none on this server.\n".to_string();
+    }
+    let mut out = String::from("Teams (mention one with @name: it reaches its members):\n");
+    for t in teams {
+        let _ = write!(out, "- @{}", s(&t["name"]));
+        if !s(&t["title"]).is_empty() {
+            let _ = write!(out, " ({})", s(&t["title"]));
+        }
+        let members: Vec<String> = t["members"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|m| match me {
+                Some(me) if s(m) == me => format!("@{me} (you)"),
+                _ => format!("@{}", s(m)),
+            })
+            .collect();
+        if members.is_empty() {
+            out.push_str(": nobody active");
+        } else {
+            let _ = write!(out, ": {}", members.join(", "));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// `@a`, `@a and @b`, `@a, @b and @c`.
+fn listing(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => format!("@{one}"),
+        [rest @ .., last] => {
+            let rest: Vec<String> = rest.iter().map(|n| format!("@{n}")).collect();
+            format!("{} and @{last}", rest.join(", "))
+        }
+    }
+}
+
+fn strings(v: &Value) -> Vec<String> {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .map(|x| s(x).to_string())
+        .collect()
+}
+
+/// Whether the thread names the person: always in a `direct` one (and from a server that does
+/// not say).
+fn names_you(t: &Value) -> bool {
+    match t["named"].as_bool() {
+        Some(named) => named,
+        None => s(&t["kind"]) == "direct",
+    }
 }
 
 fn session(v: &Value) -> String {
@@ -136,14 +206,34 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
             neutralise(title).replace('\n', " ")
         );
     }
-    let what = if s(&t["kind"]) == "team" {
-        format!("team question from @{} to everyone", s(&t["from"]))
+    let shared = s(&t["kind"]) != "direct";
+    let named = if !shared {
+        ""
+    } else if names_you(t) {
+        "; it names you"
     } else {
-        format!(
+        "; it does not name you"
+    };
+    let what = match s(&t["kind"]) {
+        // A server before 0.4.0: a question to everyone.
+        "team" if t.get("teams").is_none() => {
+            format!("team question from @{} to everyone", s(&t["from"]))
+        }
+        "team" => format!(
+            "team: {}, opened by @{}, between {}{named}",
+            handles(&t["teams"]),
+            s(&t["from"]),
+            handles(&t["participants"])
+        ),
+        "global" => format!(
+            "global board, posted by @{} to everyone on the server{named}",
+            s(&t["from"])
+        ),
+        _ => format!(
             "direct, opened by @{}, between {}",
             s(&t["from"]),
             handles(&t["participants"])
-        )
+        ),
     };
     let _ = write!(out, "{what}; {}", s(&t["status"]));
     if let Some(c) = t["context"].as_str() {
@@ -171,7 +261,7 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
              thread(id=\"{id}\") before acting."
         );
     }
-    if pending(t) && s(&t["kind"]) == "direct" {
+    if pending(t) {
         let _ = write!(
             out,
             "Pending for your person: they have not handled it yet. If it is for you and needs \
@@ -202,8 +292,8 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
         (Some("other-session"), None) => {
             out.push_str("Another of your sessions has it: leave it to that session.\n")
         }
-        // Team questions are not claimed.
-        _ if pending(t) && s(&t["kind"]) == "direct" => {
+        // Threads that do not name the person are not claimed.
+        _ if pending(t) => {
             let _ = writeln!(
                 out,
                 "Nobody of yours has it. If it needs work first, claim it with \
@@ -219,11 +309,11 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
             let _ = writeln!(out, "{}.", claim_state(s(&h["handle"]), h));
         }
     }
-    if s(&t["kind"]) == "team" && s(&t["status"]) == "open" && Some(opener) != me {
+    if shared && !names_you(t) && s(&t["status"]) == "open" && Some(opener) != me {
         out.push_str(
-            "A team question: answer it only from your own work or your person's files \
-             (repeating a teammate's `about` line, or guessing who might know, is not an answer); \
-             do not claim it.\n",
+            "It does not name your person, so answering is optional: answer only from your own \
+             work or your person's files (repeating someone's `about` line, or guessing who might \
+             know, is not an answer); do not claim it.\n",
         );
     }
 
@@ -272,7 +362,8 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
         out.push_str("\nDelivery (the latest note by someone else that each person has):\n");
         for d in delivery {
             let _ = write!(out, "- @{}: ", s(&d["handle"]));
-            delivered(&mut out, d, s(&t["kind"]) == "direct");
+            let named = d["named"].as_bool().unwrap_or(s(&t["kind"]) == "direct");
+            delivered(&mut out, d, named);
             out.push('\n');
         }
     }
@@ -288,7 +379,8 @@ pub(crate) fn pending(t: &Value) -> bool {
 /// whether they handled it (when and from where), how many of their live sessions have it, and
 /// who of theirs holds the thread. A session that has ended still saw it: `seen_by` counts live
 /// ones only, so "seen by pi" with none live says that pi's session has ended, not "seen by 0".
-fn delivered(out: &mut String, d: &Value, direct: bool) {
+/// Only a person the thread names has something to handle.
+fn delivered(out: &mut String, d: &Value, named: bool) {
     let handle = s(&d["handle"]);
     let live = d["seen_by"].as_i64().unwrap_or(0);
     let handled = d["handled_at"].is_string();
@@ -318,7 +410,7 @@ fn delivered(out: &mut String, d: &Value, direct: bool) {
             }
             let _ = write!(out, " at {}", since(s(&d["handled_at"])));
         } else {
-            if direct {
+            if named {
                 out.push_str(", not handled yet");
             }
             match live {
@@ -380,6 +472,7 @@ pub fn inbox(v: &Value, me: Option<&str>) -> String {
         None => format!("You are session {}.\n\n", session(&v["session"])),
     };
     out.push_str(&team(&v["team"], me));
+    out.push_str(&teams(&v["teams"], me));
     let threads = v["threads"]
         .as_array()
         .map(Vec::as_slice)
@@ -457,19 +550,66 @@ pub fn done(v: &Value, received: bool) -> String {
     out
 }
 
-/// What `send` did.
-pub fn sent(v: &Value) -> String {
+/// Whom a `send` reached, from `kind`, `to`, `added` and `reached`, as a sentence to go before
+/// what it wrote; empty from a server that does not say (before 0.4.0). `opened`: the `send`
+/// opened the thread.
+fn whom(v: &Value, opened: bool) -> String {
+    let Some(reached) = v["reached"].as_i64() else {
+        return String::new();
+    };
+    let people = match reached {
+        1 => "1 person".to_string(),
+        n => format!("{n} people"),
+    };
+    if opened {
+        if s(&v["kind"]) == "global" {
+            return format!(
+                "Posted on the global board ({people}): everyone on the server sees it, and \
+                 nobody has to answer. "
+            );
+        }
+        let mut named = strings(&v["to"]["people"]);
+        named.extend(strings(&v["to"]["teams"]));
+        return format!("Sent to {} ({people}). ", listing(&named));
+    }
+    let added = strings(&v["added"]);
+    let named: Vec<String> = strings(&v["to"]["people"])
+        .into_iter()
+        .filter(|p| !added.contains(p))
+        .collect();
+    let mut out = String::new();
+    if !added.is_empty() {
+        let _ = write!(
+            out,
+            "Added {} to the thread: they get it whole, and it is pending for them ({people} in \
+             it now). ",
+            listing(&added)
+        );
+    }
+    if !named.is_empty() {
+        let _ = write!(
+            out,
+            "Named {} in it: it is pending for them from this note. ",
+            listing(&named)
+        );
+    }
+    out
+}
+
+/// What `send` did. `opened`: it opened the thread (it was given no `thread`).
+pub fn sent(v: &Value, opened: bool) -> String {
     let id = s(&v["thread"]);
+    let whom = whom(v, opened);
     // Closing releases every claim: a closed thread is nobody's, so there is nothing to hold or
     // step aside from.
     if s(&v["status"]) == "closed" {
         return match v["note"].as_str() {
-            Some(note) => format!("Written: note {note} in thread {id}, which is closed."),
+            Some(note) => format!("{whom}Written: note {note} in thread {id}, which is closed."),
             None => format!("Closed thread {id}."),
         };
     }
     let mut out = match v["note"].as_str() {
-        Some(note) => format!("Written: note {note} in thread {id}, which is open."),
+        Some(note) => format!("{whom}Written: note {note} in thread {id}, which is open."),
         // A claim without text: a state, nothing written.
         None => {
             return match v["claimed"].as_str() {
@@ -558,26 +698,68 @@ mod tests {
     }
 
     #[test]
-    fn team_questions_are_answered_only_from_own_work() {
+    fn team_and_global_threads_that_do_not_name_you_are_optional() {
         let mut t = sample();
         t["kind"] = "team".into();
+        t["teams"] = json!(["backend"]);
+        t["named"] = false.into();
+        t["pending"] = false.into();
         let out = thread(&t, Some("oscar"));
         assert!(
-            out.contains("team question from @ana to everyone; open"),
+            out.contains(
+                "team: @backend, opened by @ana, between @ana, @oscar; it does not name you; open"
+            ),
             "{out}"
         );
         assert!(
-            out.contains("answer it only from your own work or your person's files"),
+            out.contains(
+                "It does not name your person, so answering is optional: answer only \
+                           from your own work or your person's files"
+            ),
             "{out}"
         );
         assert!(out.contains("is not an answer); do not claim it."), "{out}");
         assert!(!out.contains("claim=true"), "{out}");
-        // Not to the one who asked, nor once closed.
-        assert!(!thread(&t, Some("ana")).contains("A team question"));
-        t["status"] = "closed".into();
-        assert!(!thread(&t, Some("oscar")).contains("A team question"));
+        assert!(!out.contains("Pending for your person"), "{out}");
+        // Not to the one who opened it, nor once closed.
+        assert!(!thread(&t, Some("ana")).contains("answering is optional"));
+        let mut closed = t.clone();
+        closed["status"] = "closed".into();
+        assert!(!thread(&closed, Some("oscar")).contains("answering is optional"));
+        // The global board, the same.
+        let mut global = t.clone();
+        global["kind"] = "global".into();
+        global["teams"] = json!([]);
+        let out = thread(&global, Some("oscar"));
+        assert!(
+            out.contains(
+                "global board, posted by @ana to everyone on the server; it does not \
+                          name you; open"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("answering is optional"), "{out}");
+        // One that names you is yours to answer, as a direct thread.
+        let mut named = t.clone();
+        named["named"] = true.into();
+        named["pending"] = true.into();
+        let out = thread(&named, Some("oscar"));
+        assert!(out.contains("; it names you; open"), "{out}");
+        assert!(!out.contains("answering is optional"), "{out}");
+        assert!(out.contains("Pending for your person"), "{out}");
+        assert!(out.contains("claim=true"), "{out}");
+        // A team question from a server before 0.4.0: a question to everyone.
+        let mut old = sample();
+        old["kind"] = "team".into();
+        old["pending"] = false.into();
+        let out = thread(&old, Some("oscar"));
+        assert!(
+            out.contains("team question from @ana to everyone; open"),
+            "{out}"
+        );
+        assert!(out.contains("answering is optional"), "{out}");
         // Direct threads have no such line.
-        assert!(!thread(&sample(), Some("oscar")).contains("A team question"));
+        assert!(!thread(&sample(), Some("oscar")).contains("answering is optional"));
     }
 
     #[test]
@@ -909,6 +1091,95 @@ mod tests {
     }
 
     #[test]
+    fn the_inbox_lists_the_teams_after_the_people() {
+        let v = json!({
+            "team": [
+                { "handle": "ana", "name": "Ana", "about": "payments backend", "contexts": [], "teams": ["backend", "ops"] },
+                { "handle": "oscar", "name": "Oscar", "about": "", "contexts": ["web"], "teams": ["backend"] }
+            ],
+            "teams": [
+                { "name": "backend", "title": "Backend", "members": ["ana", "oscar"] },
+                { "name": "empty", "title": "", "members": [] },
+                { "name": "ops", "title": "Operations", "members": ["ana"] }
+            ],
+            "session": { "label": "Claude Code", "context": null },
+            "threads": [],
+            "more": 0
+        });
+        let out = inbox(&v, Some("oscar"));
+        let people = out.find("People (mention one with @handle").unwrap();
+        let teams = out
+            .find("Teams (mention one with @name: it reaches its members):\n")
+            .unwrap();
+        assert!(people < teams, "{out}");
+        for line in [
+            "- @ana (Ana): payments backend; in @backend, @ops\n",
+            "- @oscar (Oscar, you); in @backend [web]\n",
+            "- @backend (Backend): @ana, @oscar (you)\n",
+            "- @empty: nobody active\n",
+            "- @ops (Operations): @ana\n",
+        ] {
+            assert!(out.contains(line), "{line}: {out}");
+        }
+        let mut none = v.clone();
+        none["teams"] = json!([]);
+        assert!(inbox(&none, Some("oscar")).contains("Teams: none on this server.\n"));
+    }
+
+    #[test]
+    fn a_send_says_whom_it_reached() {
+        let opened = |kind: &str, people: Value, teams: Value, reached: i64| {
+            json!({ "thread": "r_1", "kind": kind, "note": "n_1", "status": "open", "claimed": null,
+                    "to": { "people": people, "teams": teams }, "added": [], "reached": reached })
+        };
+        let out = sent(&opened("team", json!(["ana"]), json!(["backend"]), 7), true);
+        assert!(
+            out.starts_with(
+                "Sent to @ana and @backend (7 people). Written: note n_1 in thread r_1, which is \
+                 open. Nobody of yours holds the thread."
+            ),
+            "{out}"
+        );
+        let out = sent(&opened("direct", json!(["bob"]), json!([]), 1), true);
+        assert!(out.starts_with("Sent to @bob (1 person). "), "{out}");
+        let out = sent(
+            &opened("direct", json!(["a", "b", "c"]), json!([]), 3),
+            true,
+        );
+        assert!(
+            out.starts_with("Sent to @a, @b and @c (3 people). "),
+            "{out}"
+        );
+        let out = sent(&opened("global", json!([]), json!([]), 12), true);
+        assert!(
+            out.starts_with(
+                "Posted on the global board (12 people): everyone on the server sees it, and \
+                 nobody has to answer. Written:"
+            ),
+            "{out}"
+        );
+        // In a reply: who it added, and who it named.
+        let mut reply = opened("direct", json!(["bob", "carl"]), json!([]), 3);
+        reply["added"] = json!(["bob"]);
+        reply["claimed"] = "this-session".into();
+        let out = sent(&reply, false);
+        assert!(
+            out.starts_with(
+                "Added @bob to the thread: they get it whole, and it is pending for them (3 \
+                 people in it now). Named @carl in it: it is pending for them from this note. \
+                 Written: note n_1"
+            ),
+            "{out}"
+        );
+        // A reply naming nobody says only what it wrote.
+        let plain = opened("direct", json!([]), json!([]), 1);
+        assert!(sent(&plain, false).starts_with("Written: note n_1"));
+        // A server before 0.4.0 says nothing of whom it reached.
+        let old = json!({ "thread": "r_1", "note": "n_1", "status": "open", "claimed": null });
+        assert!(sent(&old, true).starts_with("Written: note n_1"));
+    }
+
+    #[test]
     fn inbox_and_send_results() {
         let v = json!({
             "team": [
@@ -945,6 +1216,8 @@ mod tests {
             out.contains("3 more thread(s) not shown: older ones, also pending"),
             "{out}"
         );
+        // A server before 0.4.0 lists no teams: nothing is said of them.
+        assert!(!out.contains("Teams"), "{out}");
         let empty = json!({ "team": [], "session": { "label": "x", "context": "a" }, "threads": [], "more": 0 });
         let out = inbox(&empty, None);
         assert!(out.starts_with("You are session \"x\" in a."), "{out}");
@@ -952,24 +1225,24 @@ mod tests {
 
         let other =
             json!({ "thread": "r_1", "note": "n_2", "status": "open", "claimed": "other-session" });
-        let out = sent(&other);
+        let out = sent(&other, false);
         assert!(out.contains("claimed: other-session"), "{out}");
         assert!(out.contains("step aside"), "{out}");
         // Closing releases every claim: nothing to hold or step aside from (an older server may
         // still say another session holds it).
         let closed = json!({ "thread": "r_1", "note": null, "status": "closed", "claimed": null });
-        assert_eq!(sent(&closed), "Closed thread r_1.");
+        assert_eq!(sent(&closed, false), "Closed thread r_1.");
         let held = json!({ "thread": "r_1", "note": null, "status": "closed", "claimed": "other-session" });
-        assert_eq!(sent(&held), "Closed thread r_1.");
+        assert_eq!(sent(&held, false), "Closed thread r_1.");
         let last = json!({ "thread": "r_1", "note": "n_3", "status": "closed", "claimed": "this-session" });
         assert_eq!(
-            sent(&last),
+            sent(&last, false),
             "Written: note n_3 in thread r_1, which is closed."
         );
         // Claimed without a note: a state, nothing written.
         let claimed =
             json!({ "thread": "r_1", "note": null, "status": "open", "claimed": "this-session" });
-        let out = sent(&claimed);
+        let out = sent(&claimed, false);
         assert!(
             out.starts_with("Claimed thread r_1: this session has it now"),
             "{out}"
@@ -977,7 +1250,7 @@ mod tests {
         assert!(out.contains("No note was written."), "{out}");
         let lost =
             json!({ "thread": "r_1", "note": null, "status": "open", "claimed": "other-session" });
-        let out = sent(&lost);
+        let out = sent(&lost, false);
         assert!(out.contains("claimed: other-session"), "{out}");
         assert!(out.contains("step aside"), "{out}");
         assert!(out.contains("nothing was written"), "{out}");

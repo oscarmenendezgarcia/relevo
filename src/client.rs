@@ -114,6 +114,8 @@ impl Client {
         let mut req = req
             .bearer_auth(&self.token)
             .header("relevo-session", &self.session)
+            // A reply's mentions name people (docs/protocol.md, `send`).
+            .header("relevo-mentions", "1")
             .timeout(timeout);
         if let Some(context) = self.context().await {
             req = req.header("relevo-context", context);

@@ -3,12 +3,13 @@
 connect() first ends the session an earlier start of the gateway may have left (DELETE
 /api/session), so it starts as a new session and gets what is still pending for its person; then
 it keeps one waiting inbox request open (wait=55) and backs off on errors. Each thread with new
-notes becomes a MessageEvent from the author of its latest note, and so, once, does a direct thread
-pending for the person whose latest note this adapter never handed over (the answer that carried it
-was lost on the way, say); send() writes the agent's reply in that thread; disconnect() stops the
-loop, then ends the session with DELETE /api/session. One fixed Relevo-Session per profile (see
-client.gateway_session_id), general unless RELEVO_CONTEXT is set. connect() also starts the automatic
-update of this plugin's folder in the background (update.py).
+notes becomes a MessageEvent from the author of its latest note, and so, once, does a thread that
+names the person (any direct one), pending for them, whose latest note this adapter never handed
+over (the answer that carried it was lost on the way, say); send() writes the agent's reply in that
+thread (once more with its offending mentions as plain text, when the server refuses them);
+disconnect() stops the loop, then ends the session with DELETE /api/session. One fixed
+Relevo-Session per profile (see client.gateway_session_id), general unless RELEVO_CONTEXT is set.
+connect() also starts the automatic update of this plugin's folder in the background (update.py).
 """
 
 from __future__ import annotations
@@ -336,7 +337,8 @@ class RelevoAdapter(BasePlatformAdapter):
         if task is not None and task is not asyncio.current_task():
             if self._holding_batch and not task.done():
                 # Mid-batch: these threads have reached the session already, so they would not be
-                # new again until the next start, and a team question never (it is not pending).
+                # new again until the next start, and a thread that does not name the person never
+                # (it is not pending for them).
                 # Let the loop hand them over, then it stops.
                 await asyncio.wait({task}, timeout=self.stop_grace)
             task.cancel()
@@ -508,15 +510,16 @@ class RelevoAdapter(BasePlatformAdapter):
         return getattr(entry, "resume_pending", False) is True
 
     def _hand_over_again(self, thread: dict) -> Optional[dict]:
-        """`thread`, from an inbox answer, to hand over again when it is a direct open thread pending
-        for the person with nothing new, whose latest note (`last_note`), by someone else, this
-        adapter has not handed over: as it was, with that note as its new note and `handed_over` set.
+        """`thread`, from an inbox answer, to hand over again when it is an open thread that names the
+        person (any direct one), pending for them, with nothing new, whose latest note (`last_note`),
+        by someone else, this adapter has not handed over: as it was, with that note as its new note
+        and `handed_over` set.
         Otherwise None. The server delivered that note to this session in an answer the adapter never
         got (lost on the way), or a tool of a relevo turn, acting for this session, fetched it: either
         way its chat never had it. Once handed over, a note the agent leaves alone ([SILENT], not for
         it) stays pending for the person and does not come back in this process."""
         last = thread.get("last_note")
-        if (thread.get("kind") != "direct" or thread.get("status") != "open" or thread.get("pending") is not True
+        if (not client.names_you(thread) or thread.get("status") != "open" or thread.get("pending") is not True
                 or thread.get("new_notes") or not isinstance(last, dict) or not last.get("id")):
             return None
         if last.get("author") == self._me or str(last["id"]) in self._seen:
@@ -607,7 +610,22 @@ class RelevoAdapter(BasePlatformAdapter):
         if not text.strip():
             return SendResult(success=False, error="empty note", error_kind="unknown")
         try:
-            result = await self.api.asend(self._ensure_http(), {"thread": str(chat_id), "text": text})
+            # The reply named someone Relevo does not know (@team too: a team is always named) or a team:
+            # its thread still wants it, so it goes again with those mentions as plain text. The server
+            # names one problem at a time (two teams: the first), so this repeats while each refusal
+            # names a mention still there. Each round takes at least one mention out,
+            # so it ends within as many rounds as the reply has mentions.
+            while True:
+                try:
+                    result = await self.api.asend(self._ensure_http(), {"thread": str(chat_id), "text": text})
+                    break
+                except client.RelevoError as exc:
+                    plain, wrapped = client.as_plain_text(text, client.refused_mentions(exc, text, self._me))
+                    if not wrapped:
+                        raise
+                    logger.warning("[relevo] reply to %s refused (%s) for its mentions: sending it again with %d "
+                                   "of them as plain text", chat_id, client.describe_error(exc), wrapped)
+                    text = plain
         except client.RelevoError as exc:
             logger.warning("[relevo] send to %s refused: %s", chat_id, client.describe_error(exc))
             return SendResult(success=False, error=f"{exc.code}: {exc.message}",

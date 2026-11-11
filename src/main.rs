@@ -22,7 +22,7 @@ enum Command {
     Serve {
         #[arg(long, env = "RELEVO_ADDR", default_value = "127.0.0.1:7878")]
         addr: SocketAddr,
-        /// Team threads one person may open in any rolling 24 hours.
+        /// Team and global-board threads one person may open in any rolling 24 hours.
         #[arg(long, env = "RELEVO_TEAM_QUESTIONS_PER_DAY", default_value_t = 5)]
         team_questions_per_day: u32,
         /// Speak HTTPS with a certificate of its own, kept in <db>.tls/ (self-signed, made on
@@ -88,6 +88,13 @@ enum Command {
     About { handle: String, about: String },
     /// Stop a person from using Relevo (every token of theirs is revoked).
     Deactivate { handle: String },
+    /// Manage teams: named groups of people, whom a note reaches with @<name>.
+    Team {
+        #[command(subcommand)]
+        command: TeamCommand,
+    },
+    /// List every team: name, title and members (inactive ones marked).
+    Teams,
     /// Check a token against a server and save both for `relevo mcp` (in
     /// ~/.config/relevo/config.json, or the file RELEVO_CONFIG names).
     Connect {
@@ -135,6 +142,32 @@ enum Command {
         #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
         keep: Option<u32>,
     },
+}
+
+#[derive(Subcommand)]
+enum TeamCommand {
+    /// Create a team, with nobody in it. Its name cannot be a person's handle, `team` or
+    /// `equipo`.
+    Add {
+        name: String,
+        /// What the team is, in a few words ("Backend").
+        #[arg(long)]
+        title: Option<String>,
+    },
+    /// Put active people in a team (threads already open keep their participants).
+    Join {
+        name: String,
+        #[arg(required = true)]
+        handles: Vec<String>,
+    },
+    /// Take people out of a team (they stay in its threads already open).
+    Leave {
+        name: String,
+        #[arg(required = true)]
+        handles: Vec<String>,
+    },
+    /// Delete a team and its membership; its threads keep its name.
+    Remove { name: String },
 }
 
 #[derive(Subcommand)]
@@ -288,14 +321,15 @@ async fn connect(url: &str, token: Option<String>, fingerprint: Option<String>) 
     // The check is a session of its own: end it, or it stays listed until it is forgotten.
     let _ = client.end(std::time::Duration::from_secs(2)).await;
     config::save(&path, &config)?;
-    let team = people["team"].as_array().map(Vec::len).unwrap_or(0);
+    // `team` lists everyone on the server, whatever teams there are.
+    let people = people["team"].as_array().map(Vec::len).unwrap_or(0);
     let pinned = if config.cert.is_some() {
         " with its certificate"
     } else {
         ""
     };
     println!(
-        "connected to {} (a team of {team}); saved{pinned} to {}",
+        "connected to {} ({people} people on it); saved{pinned} to {}",
         config.url,
         path.display()
     );
@@ -443,10 +477,11 @@ async fn main() -> Result<()> {
         let says = match db::check(&db_file)? {
             db::Layout::Current => "this version's layout",
             db::Layout::New => "empty: `relevo serve` sets it up",
-            db::Layout::Migrates => {
-                "the layout of relevo 0.1.0 to 0.2.x: `relevo serve` migrates it in place when it \
-                 starts (keep a `relevo backup` first)"
-            }
+            layout @ db::Layout::Migrates(_) => &format!(
+                "the layout of {}: `relevo serve` migrates it in place when it starts (keep a \
+                 `relevo backup` first)",
+                layout.made_by()
+            ),
         };
         println!("{db_file}: {says}");
         return Ok(());
@@ -574,6 +609,52 @@ async fn main() -> Result<()> {
         Command::Deactivate { handle } => {
             let revoked = db::deactivate(&conn, &handle, now)?;
             println!("deactivated {handle}, revoked {revoked} token(s)");
+        }
+        Command::Team { command } => match command {
+            TeamCommand::Add { name, title } => {
+                db::add_team(&conn, &name, title.as_deref(), now)?;
+                println!(
+                    "added team {name}, with nobody in it yet: relevo team join {name} <handle>…"
+                );
+            }
+            TeamCommand::Join { name, handles } => {
+                let done = db::join_team(&conn, &name, &handles)?;
+                for (handle, done) in handles.iter().zip(done) {
+                    match done {
+                        db::Membership::Changed => println!("{handle} joined {name}"),
+                        db::Membership::Already => println!("{handle} is in {name} already"),
+                    }
+                }
+            }
+            TeamCommand::Leave { name, handles } => {
+                let done = db::leave_team(&conn, &name, &handles)?;
+                for (handle, done) in handles.iter().zip(done) {
+                    match done {
+                        db::Membership::Changed => println!("{handle} left {name}"),
+                        db::Membership::Already => println!("{handle} was not in {name}"),
+                    }
+                }
+            }
+            TeamCommand::Remove { name } => {
+                db::remove_team(&conn, &name)?;
+                println!("removed team {name}; its threads keep its name");
+            }
+        },
+        Command::Teams => {
+            for t in db::list_teams(&conn)? {
+                let members: Vec<String> = t
+                    .members
+                    .iter()
+                    .map(|(handle, active)| {
+                        if *active {
+                            handle.clone()
+                        } else {
+                            format!("{handle} (inactive)")
+                        }
+                    })
+                    .collect();
+                println!("{}\t{}\t{}", t.name, t.title, members.join(", "));
+            }
         }
         Command::Connect { .. }
         | Command::Mcp { .. }

@@ -99,7 +99,7 @@ test("an inbox answer lost on the way is handed over on the next answer, once", 
   try {
     await sleep(300); // The waiting request is open by now.
     proxy.drop = true;
-    const opened = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Lost answer: is the cache warm?" });
+    const opened = await api(server, ana, "POST", "/api/send", { text: "@oscar Lost answer: is the cache warm?" });
     await until(() => proxy.dropped === 1);
     // The server delivered it to this pi session: it is no longer new there.
     assert.equal((await oscarDelivery(opened.thread)).by.label, "pi laptop");
@@ -111,7 +111,7 @@ test("an inbox answer lost on the way is handed over on the next answer, once", 
     assert.deepEqual(message.details, { thread: opened.thread, from: "ana", kind: "direct" });
     assert.match(message.content, /^Handed over again: it is still pending for your person, and its latest note was never shown in this session/m);
     assert.match(message.content, /Treat that note as new\./);
-    assert.match(message.content, /New notes \(1\):[\s\S]*<untrusted from="@ana">\nLost answer: is the cache warm\?\n<\/untrusted>/);
+    assert.match(message.content, /New notes \(1\):[\s\S]*<untrusted from="@ana">\n@oscar Lost answer: is the cache warm\?\n<\/untrusted>/);
 
     // Left alone (its turn ended without a word): still pending, never handed over again here.
     await sleep(2500); // Several answers of the loop list it, pending, with that latest note.
@@ -137,7 +137,7 @@ test("after a lost answer the next request does not wait, so the note comes at o
   try {
     await sleep(300);
     proxy.drop = true;
-    const opened = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Lost while waiting: is staging up?" });
+    const opened = await api(server, ana, "POST", "/api/send", { text: "@oscar Lost while waiting: is staging up?" });
     await until(() => proxy.dropped === 1);
     const lostAt = Date.now();
     await until(() => ext.seen.length === 1, 5000);
@@ -163,7 +163,7 @@ test("only the latest note of a lost answer comes back, saying earlier ones may 
   try {
     await sleep(300);
     await ext.session.userPrompt(); // Busy: both notes land before the next request.
-    const opened = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Two lost: deploy at 5?" });
+    const opened = await api(server, ana, "POST", "/api/send", { text: "@oscar Two lost: deploy at 5?" });
     await api(server, ana, "POST", "/api/send", { thread: opened.thread, text: "Two lost: if not, at 6." });
     proxy.drop = true;
     await ext.session.finishTurn();
@@ -199,7 +199,7 @@ test("a note written after a lost answer comes as new, saying earlier ones may b
   try {
     await sleep(300);
     proxy.drop = true;
-    const opened = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Lost first: can you review PR 12?" });
+    const opened = await api(server, ana, "POST", "/api/send", { text: "@oscar Lost first: can you review PR 12?" });
     await until(() => proxy.dropped === 1);
     await api(server, ana, "POST", "/api/send", { thread: opened.thread, text: "After the loss: so, can you?" });
     await until(() => ext.seen.length === 1, 5000);
@@ -229,7 +229,7 @@ test("a thread the agent left alone is not handed over again in the same process
   const ext = loadExtension({ env: { RELEVO_URL: server.url, RELEVO_TOKEN: oscar, RELEVO_CONTEXT: "" }, home, wait: 1 });
   await ext.emit("session_start", { reason: "startup" }, ext.ctx(home, "tui"));
   try {
-    const opened = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Left alone: the iOS build?" });
+    const opened = await api(server, ana, "POST", "/api/send", { text: "@oscar Left alone: the iOS build?" });
     await until(() => ext.seen.length === 1);
     assert.doesNotMatch(ext.seen[0].content, /Handed over again/);
     // Its turn ends without a word: not for it. The thread stays pending, and every answer of
@@ -257,9 +257,9 @@ test("a note listed by relevo_inbox or read with relevo_thread is not handed ove
   try {
     await sleep(300);
     await ext.session.userPrompt(); // Busy: the loop asks for nothing.
-    const listed = (await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Shown by the inbox: which bucket?" })).thread;
+    const listed = (await api(server, ana, "POST", "/api/send", { text: "@oscar Shown by the inbox: which bucket?" })).thread;
     assert.match(await ext.tool("relevo_inbox", {}, home), /Shown by the inbox: which bucket\?/);
-    const read = (await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Read whole: which region?" })).thread;
+    const read = (await api(server, ana, "POST", "/api/send", { text: "@oscar Read whole: which region?" })).thread;
     assert.match(await ext.tool("relevo_thread", { id: read }, home), /Read whole: which region\?/);
     await ext.session.finishTurn();
     await sleep(1500);
@@ -288,8 +288,11 @@ test("only a pending open direct thread with nothing new, whose latest note by s
   const shown = new Set<string>();
   const again = handOverAgain(t, shown, "oscar");
   assert.deepEqual(again, { ...t, new_notes: [t.last_note], handed_over: true });
+  // A team or global-board thread that names the person is handed over as a direct one.
+  for (const kind of ["team", "global"] as const) assert.ok(handOverAgain({ ...t, kind, named: true }, shown, "oscar"));
   for (const not of [
     { ...t, kind: "team" as const },
+    { ...t, kind: "global" as const, named: false },
     { ...t, status: "closed" as const },
     { ...t, pending: false },
     { ...t, pending: undefined }, // A server before 0.3.0.

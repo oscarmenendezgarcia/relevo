@@ -9,6 +9,16 @@ export interface Person {
   name: string;
   about: string;
   contexts: string[];
+  /** The teams they are in (servers before 0.4.0 leave it out). */
+  teams?: string[];
+}
+
+/** A team on the server: whom `@name` reaches. */
+export interface Team {
+  name: string;
+  title: string;
+  /** Its active members. */
+  members: string[];
 }
 
 export interface Note {
@@ -27,6 +37,8 @@ export interface SessionRef {
 
 export interface Delivery {
   handle: string;
+  /** Whether the thread names them (servers before 0.4.0 leave it out: every participant of a direct thread is). */
+  named?: boolean;
   note: string | null;
   delivered_at: string | null;
   by: SessionRef | null;
@@ -41,10 +53,15 @@ export interface Delivery {
 
 export interface Thread {
   id: string;
-  kind: "direct" | "team";
+  /** `team` from a server before 0.4.0 is a question to everyone (it has no `teams`). */
+  kind: "direct" | "team" | "global";
   title: string;
   from: string;
   participants: string[];
+  /** The teams its opening note named (servers before 0.4.0 leave it out). */
+  teams?: string[];
+  /** Whether it names the person: only then can it be pending for them (servers before 0.4.0 leave it out). */
+  named?: boolean;
   status: "open" | "closed";
   /** Pending for the person: not handled yet (servers before 0.3.0 leave it out: nothing is pending then). */
   pending?: boolean;
@@ -67,15 +84,18 @@ export interface Thread {
 }
 
 export interface Inbox {
+  /** Every active person on the server (the name is kept from 0.3). */
   team: Person[];
+  /** Every team, with its members (servers before 0.4.0 leave it out). */
+  teams?: Team[];
   /** `you`: the handle of this session's person (servers before it leave it out). */
   session: SessionRef & { you?: string };
   threads: Thread[];
   more: number;
 }
 
+/** Who a note is for is written in its `text` (@handle, @team-name, no @ for the global board): there is no `to`. */
 export interface SendFields {
-  to?: string[];
   thread?: string;
   text?: string;
   close?: boolean;
@@ -90,6 +110,11 @@ export interface SendResult {
   note: string | null;
   status: "open" | "closed";
   claimed: "this-session" | "other-session" | null;
+  /** The rest from 0.4.0 on: the thread's kind, whom this note's mentions named, whom it added, and how many people besides the person take part. */
+  kind?: Thread["kind"];
+  to?: { people: string[]; teams: string[] };
+  added?: string[];
+  reached?: number;
 }
 
 /** An error answered by the server, with its code and any extra fields (`valid` for UNKNOWN_PERSON). */
@@ -135,6 +160,8 @@ export class Client {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.config.token}`,
       "Relevo-Session": this.session,
+      // A reply's @ mentions name people (docs/protocol.md, `send`): this client knows it.
+      "Relevo-Mentions": "1",
     };
     const context = await this.context();
     if (context) headers["Relevo-Context"] = context;
@@ -176,8 +203,8 @@ export class Client {
     return this.request("GET", `/api/inbox${query}`, undefined, signal, TIMEOUT_MS + (options.wait ?? 0) * 1000);
   }
 
-  /** The team, and `you`: the handle of this token's person. */
-  people(signal?: AbortSignal, timeoutMs = TIMEOUT_MS): Promise<{ team: Person[]; you?: string }> {
+  /** The people and the teams on the server, and `you`: the handle of this token's person. */
+  people(signal?: AbortSignal, timeoutMs = TIMEOUT_MS): Promise<{ team: Person[]; teams?: Team[]; you?: string }> {
     return this.request("GET", "/api/people", undefined, signal, timeoutMs);
   }
 
@@ -192,7 +219,9 @@ export class Client {
 
   /** One idempotency key per call; a request that fails on the way or on the server is retried once with it. */
   async send(fields: SendFields, signal?: AbortSignal): Promise<SendResult> {
-    const body = { ...fields, key: randomUUID() };
+    // Only the fields of `send` (docs/protocol.md): never the deprecated `to`.
+    const body: Record<string, unknown> = { key: randomUUID() };
+    for (const k of ["thread", "text", "close", "claim", "done"] as const) if (fields[k] !== undefined) body[k] = fields[k];
     try {
       return await this.request<SendResult>("POST", "/api/send", body, signal);
     } catch (err) {

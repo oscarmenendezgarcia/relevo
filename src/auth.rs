@@ -1,5 +1,6 @@
 //! Bearer-token authentication: a request acts as the person who owns the token, in the
-//! session named by the `Relevo-Session` and `Relevo-Context` headers.
+//! session named by the `Relevo-Session` and `Relevo-Context` headers (and, through 0.4.x, with
+//! `Relevo-Mentions` saying whether a reply's mentions are read).
 
 use std::sync::Arc;
 
@@ -23,10 +24,14 @@ pub struct Caller {
     pub session: String,
     /// The `Relevo-Context`, lowercased; `None` for a general session.
     pub context: Option<String>,
+    /// `Relevo-Mentions: 1`: a 0.4 client, which knows that a reply's `@` names people. Through
+    /// 0.4.x a reply without it is written as 0.3 wrote it, its mentions not read.
+    pub reads_mentions: bool,
 }
 
 const SESSION: HeaderName = HeaderName::from_static("relevo-session");
 const CONTEXT: HeaderName = HeaderName::from_static("relevo-context");
+const MENTIONS: HeaderName = HeaderName::from_static("relevo-mentions");
 
 /// A header as trimmed text; `None` when absent.
 fn header(headers: &HeaderMap, name: &HeaderName) -> Result<Option<String>, ApiError> {
@@ -61,6 +66,15 @@ fn session_headers(headers: &HeaderMap) -> Result<(String, Option<String>), ApiE
     Ok((session, context))
 }
 
+/// `Relevo-Mentions`: absent, or `1`.
+fn mentions_header(headers: &HeaderMap) -> Result<bool, ApiError> {
+    match header(headers, &MENTIONS)?.as_deref() {
+        None => Ok(false),
+        Some("1") => Ok(true),
+        Some(_) => Err(ApiError::bad_request("Relevo-Mentions must be 1")),
+    }
+}
+
 impl FromRequestParts<Arc<App>> for Caller {
     type Rejection = ApiError;
 
@@ -87,6 +101,7 @@ impl FromRequestParts<Arc<App>> for Caller {
             .ok_or_else(ApiError::unauthorized)?;
         // Checked after the token, so that a stranger learns nothing from a 400.
         let (session, context) = session_headers(&parts.headers)?;
+        let reads_mentions = mentions_header(&parts.headers)?;
         Ok(Caller {
             person_id,
             handle,
@@ -94,6 +109,7 @@ impl FromRequestParts<Arc<App>> for Caller {
             label,
             session,
             context,
+            reads_mentions,
         })
     }
 }

@@ -385,9 +385,9 @@ async fn people_lists_every_active_person_with_about() {
     assert_eq!(
         v,
         json!({ "team": [
-            { "handle": "ana", "name": "ANA", "about": "ana things", "contexts": [] },
-            { "handle": "bob", "name": "BOB", "about": "bob things", "contexts": [] },
-        ], "you": "ana" })
+            { "handle": "ana", "name": "ANA", "about": "ana things", "contexts": [], "teams": [] },
+            { "handle": "bob", "name": "BOB", "about": "bob things", "contexts": [], "teams": [] },
+        ], "teams": [], "you": "ana" })
     );
     // `you` is the caller's person, whichever of their tokens and sessions asks.
     let (_, v) = t
@@ -467,12 +467,12 @@ async fn writers_own_notes_are_delivered_at_once() {
     let delivery = th["delivery"].as_array().unwrap();
     assert_eq!(
         delivery[0],
-        json!({ "handle": "ana", "note": null, "delivered_at": null, "by": null,
+        json!({ "handle": "ana", "named": true, "note": null, "delivered_at": null, "by": null,
                 "claimed_by": null, "seen_by": 0, "handled_at": null, "handled_by": null })
     );
     assert_eq!(
         delivery[1],
-        json!({ "handle": "bob", "note": null, "delivered_at": null, "by": null, "claimed_by": null,
+        json!({ "handle": "bob", "named": true, "note": null, "delivered_at": null, "by": null, "claimed_by": null,
                 "seen_by": 0, "handled_at": null, "handled_by": null })
     );
 }
@@ -549,7 +549,8 @@ async fn direct_thread_leaves_the_inbox_when_closed() {
     // Opening the thread claimed nothing, and closing without text does not claim.
     assert_eq!(
         v,
-        json!({ "thread": id, "note": null, "status": "closed", "claimed": null })
+        json!({ "thread": id, "note": null, "status": "closed", "claimed": null,
+                "kind": "direct", "to": { "people": [], "teams": [] }, "added": [], "reached": 1 })
     );
     assert!(thread_ids(&t.inbox("bob").await).is_empty());
     assert_eq!(t.thread("bob", &id).await["status"], "closed");
@@ -578,9 +579,8 @@ async fn any_participant_closes_a_direct_thread_with_a_last_note() {
 #[tokio::test]
 async fn closed_thread_rejects_writes() {
     let t = team(&["ana", "bob"]);
-    let id = t
-        .ok("ana", json!({ "to": ["bob"], "text": "q", "close": true }))
-        .await;
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
+    t.ok("ana", json!({ "thread": id, "close": true })).await;
     let (status, v) = t.send("bob", json!({ "thread": id, "text": "late" })).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(code(&v), "THREAD_CLOSED");
@@ -678,7 +678,7 @@ async fn team_thread_leaves_inboxes_once_delivered_and_never_waits() {
     let id = v["thread"].as_str().unwrap().to_string();
 
     let th = t.thread("ana", &id).await;
-    assert_eq!(th["kind"], "team");
+    assert_eq!(th["kind"], "global");
     assert_eq!(th["participants"], json!(["ana", "bob", "carl"]));
     assert_eq!(th["pending"], false);
     assert!(thread_ids(&t.inbox("ana").await).is_empty());
@@ -718,7 +718,7 @@ async fn equipo_is_team() {
     let id = t
         .ok("ana", json!({ "to": ["@equipo"], "text": "¿Quién sabe?" }))
         .await;
-    assert_eq!(t.thread("bob", &id).await["kind"], "team");
+    assert_eq!(t.thread("bob", &id).await["kind"], "global");
 }
 
 #[tokio::test]
@@ -735,7 +735,8 @@ async fn team_and_equipo_without_at_and_repeated_are_one_team_thread() {
             .await;
         assert_eq!(status, StatusCode::OK, "{to}: {v}");
         let id = v["thread"].as_str().unwrap();
-        assert_eq!(t.thread("bob", id).await["kind"], "team", "{to}");
+        // A question to everyone, as in 0.3: on the global board.
+        assert_eq!(t.thread("bob", id).await["kind"], "global", "{to}");
     }
 }
 
@@ -841,12 +842,6 @@ async fn a_closed_team_thread_does_not_answer_a_waiting_inbox() {
         async move { front.inbox_at("/api/inbox?wait=1").await }
     });
     until_waiting(&t.app, 1).await;
-    // Closed as it is asked: it wakes the request, which finds nothing and waits on.
-    t.ok(
-        "oscar",
-        json!({ "to": ["@team"], "text": "Never mind", "close": true }),
-    )
-    .await;
     let v = waiter.await.unwrap();
     assert!(started.elapsed().as_millis() >= 1000);
     assert!(thread_ids(&v).is_empty(), "{v}");
@@ -917,10 +912,12 @@ async fn unknown_person_lists_valid_handles() {
     assert_eq!(
         v["error"]["valid"],
         json!([
-            { "handle": "ana", "name": "ANA", "about": "ana things", "contexts": [] },
-            { "handle": "bob", "name": "BOB", "about": "bob things", "contexts": [] },
+            { "handle": "ana", "name": "ANA", "about": "ana things", "contexts": [], "teams": [] },
+            { "handle": "bob", "name": "BOB", "about": "bob things", "contexts": [], "teams": [] },
         ])
     );
+    assert_eq!(v["error"]["teams"], json!([]));
+    assert_eq!(v["error"]["unknown"], json!(["zed"]));
     // Nothing was opened.
     assert!(thread_ids(&t.inbox("bob").await).is_empty());
 }
@@ -932,8 +929,13 @@ async fn bad_requests() {
     let many: Vec<String> = (0..21).map(|i| format!("p{i}")).collect();
     for body in [
         json!({ "to": ["bob"], "thread": id, "text": "both" }),
-        json!({ "text": "neither" }),
+        json!({}),
+        json!({ "close": true }),
+        json!({ "text": "@bob q", "close": true }),
+        json!({ "text": "@bob q", "claim": true }),
+        json!({ "text": "@bob q", "done": true }),
         json!({ "to": ["bob"] }),
+        json!({ "to": ["bob"], "text": "x", "close": true }),
         json!({ "to": ["bob"], "close": true }),
         json!({ "thread": id }),
         json!({ "thread": id, "claim": false }),
@@ -1321,11 +1323,8 @@ async fn waiting_threads_with_nothing_new_never_hide_new_notes() {
     let team_q = t
         .ok("carl", json!({ "to": ["@team"], "text": "urgent" }))
         .await;
-    let closed = t
-        .ok(
-            "carl",
-            json!({ "to": ["bob"], "text": "fyi", "close": true }),
-        )
+    let closed = t.ok("carl", json!({ "to": ["bob"], "text": "fyi" })).await;
+    t.ok("carl", json!({ "thread": closed, "close": true }))
         .await;
     let inbox = t.inbox("bob").await;
     let shown = thread_ids(&inbox);
@@ -2070,7 +2069,8 @@ async fn send_says_nobody_holds_a_thread_once_closed() {
     assert_eq!(status, StatusCode::OK, "{v}");
     assert_eq!(
         v,
-        json!({ "thread": id, "note": null, "status": "closed", "claimed": null })
+        json!({ "thread": id, "note": null, "status": "closed", "claimed": null,
+                "kind": "direct", "to": { "people": [], "teams": [] }, "added": [], "reached": 1 })
     );
     // Another session held it: closing released it, so null too.
     let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
@@ -2271,7 +2271,8 @@ async fn claim_without_text_claims_the_thread_and_writes_nothing() {
     assert_eq!(status, StatusCode::OK, "{v}");
     assert_eq!(
         v,
-        json!({ "thread": id, "note": null, "status": "open", "claimed": "this-session" })
+        json!({ "thread": id, "note": null, "status": "open", "claimed": "this-session",
+                "kind": "direct", "to": { "people": [], "teams": [] }, "added": [], "reached": 1 })
     );
     // No note: the thread is as it was, still waiting for Bob, and nothing is new for Ana.
     let th = t.thread("ana", &id).await;
@@ -2327,7 +2328,8 @@ async fn claim_never_takes_a_live_claim_and_claiming_again_keeps_since() {
     assert_eq!(status, StatusCode::OK, "{v}");
     assert_eq!(
         v,
-        json!({ "thread": id, "note": null, "status": "open", "claimed": "other-session" })
+        json!({ "thread": id, "note": null, "status": "open", "claimed": "other-session",
+                "kind": "direct", "to": { "people": [], "teams": [] }, "added": [], "reached": 1 })
     );
     let (_, v) = front
         .send(json!({ "thread": id, "text": "me?", "claim": true }))
@@ -2383,7 +2385,8 @@ async fn claim_without_text_is_idempotent_with_a_key() {
     let (_, first) = pagos.send(body.clone()).await;
     assert_eq!(
         first,
-        json!({ "thread": id, "note": null, "status": "open", "claimed": "this-session" })
+        json!({ "thread": id, "note": null, "status": "open", "claimed": "this-session",
+                "kind": "direct", "to": { "people": [], "teams": [] }, "added": [], "reached": 1 })
     );
     let (status, again) = pagos.send(body.clone()).await;
     assert_eq!(status, StatusCode::OK);
@@ -2421,7 +2424,8 @@ async fn claim_without_text_follows_the_rules_of_writing_in_a_thread() {
         .await;
     assert_eq!(
         v,
-        json!({ "thread": id, "note": null, "status": "closed", "claimed": null })
+        json!({ "thread": id, "note": null, "status": "closed", "claimed": null,
+                "kind": "direct", "to": { "people": [], "teams": [] }, "added": [], "reached": 1 })
     );
     // A closed thread cannot be claimed.
     let (status, v) = t.send("bob", json!({ "thread": id, "claim": true })).await;
@@ -3871,7 +3875,8 @@ async fn done_handles_the_thread_without_a_note() {
     assert_eq!(status, StatusCode::OK, "{v}");
     assert_eq!(
         v,
-        json!({ "thread": id, "note": null, "status": "open", "claimed": null })
+        json!({ "thread": id, "note": null, "status": "open", "claimed": null,
+                "kind": "direct", "to": { "people": [], "teams": [] }, "added": [], "reached": 1 })
     );
     // No note, no claim: the thread just stops being pending for Bob, in every session.
     let th = t.thread("ana", &id).await;
@@ -3980,7 +3985,7 @@ async fn the_senders_delivery_tells_seen_from_handled() {
     let bob = delivery_of(&t.thread("ana", &id).await, "bob").clone();
     assert_eq!(
         bob,
-        json!({ "handle": "bob", "note": null, "delivered_at": null, "by": null,
+        json!({ "handle": "bob", "named": true, "note": null, "delivered_at": null, "by": null,
                 "claimed_by": null, "seen_by": 0, "handled_at": null, "handled_by": null })
     );
     // Seen by pi, not handled.
