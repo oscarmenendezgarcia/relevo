@@ -4,6 +4,13 @@
 
 use std::sync::Arc;
 
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
+#[cfg(target_os = "linux")]
+use std::process::{Child, Command, ExitStatus, Stdio};
+#[cfg(target_os = "linux")]
+use std::time::{Duration, Instant};
+
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use http_body_util::BodyExt;
@@ -475,116 +482,130 @@ fn the_note_renderer_passes_its_tests() {
     }
 }
 
-/// `relevo web` gives the opener a file of its user's, never the address with the key: every
-/// local user can read a command line. The file sends the browser on to the address, and is
-/// gone once the page asked with the key, and when `relevo web` stops.
+/// A `relevo web` of this test's own, with a stand-in `xdg-open` in front of it that records what
+/// it was given, and a config whose team server is a port nothing listens on: every ask is a 502.
 #[cfg(target_os = "linux")]
-#[test]
-fn the_key_never_goes_in_the_openers_command_line() {
-    use std::io::{BufRead, BufReader, Read, Write};
-    use std::os::unix::fs::PermissionsExt;
-    use std::process::{Command, Stdio};
-    use std::time::{Duration, Instant};
+struct WebRun {
+    child: Child,
+    /// The temporary folder of this run.
+    dir: PathBuf,
+    /// `$XDG_RUNTIME_DIR`, where the launcher goes.
+    run: PathBuf,
+    /// The stand-in opener's marker files: `seen.args`, `seen.file`, `seen.modes`, `seen.done`.
+    seen: PathBuf,
+}
 
-    let dir = std::env::temp_dir().join(relevo::db::random_id("relevo-web-open-"));
-    let (bin, run) = (dir.join("bin"), dir.join("run"));
-    std::fs::create_dir_all(&bin).unwrap();
-    std::fs::create_dir_all(&run).unwrap();
-    std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
-    // A stand-in opener: it records its arguments, the file it was given and their modes.
-    let seen = dir.join("seen");
-    let opener = bin.join("xdg-open");
-    std::fs::write(
-        &opener,
-        format!(
-            "#!/bin/sh\nout={seen}\nprintf '%s\\n' \"$@\" > \"$out.args\"\n\
-             cp \"$1\" \"$out.file\"\nstat -c %a \"$1\" \"$(dirname \"$1\")\" > \"$out.modes\"\n\
-             touch \"$out.done\"\n",
-            seen = seen.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&opener, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let config = dir.join("config.json");
-    relevo::config::save(
-        &config,
-        &Config {
-            url: "http://127.0.0.1:9".to_string(),
-            token: "rlv_nothing".to_string(),
-            cert: None,
-            adapters: vec![],
-        },
-    )
-    .unwrap();
+#[cfg(target_os = "linux")]
+impl WebRun {
+    /// Starts it, and waits for the opener to have run: by then the launcher file is there and
+    /// the server is listening.
+    fn start(tag: &str) -> WebRun {
+        use std::os::unix::fs::PermissionsExt;
 
-    let path = format!(
-        "{}:{}",
-        bin.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-    let mut child = Command::new(env!("CARGO_BIN_EXE_relevo"))
-        .args(["web"])
-        .env("PATH", path)
-        .env("HOME", &dir)
-        .env("RELEVO_CONFIG", &config)
-        .env("XDG_RUNTIME_DIR", &run)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
+        let dir = std::env::temp_dir().join(relevo::db::random_id(&format!("relevo-web-{tag}-")));
+        let (bin, run) = (dir.join("bin"), dir.join("run"));
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // A stand-in opener: it records its arguments, the file it was given and their modes.
+        let seen = dir.join("seen");
+        let opener = bin.join("xdg-open");
+        std::fs::write(
+            &opener,
+            format!(
+                "#!/bin/sh\nout={seen}\nprintf '%s\\n' \"$@\" > \"$out.args\"\n\
+                 cp \"$1\" \"$out.file\"\nstat -c %a \"$1\" \"$(dirname \"$1\")\" > \"$out.modes\"\n\
+                 touch \"$out.done\"\n",
+                seen = seen.display()
+            ),
+        )
         .unwrap();
-    let pid = child.id() as libc::pid_t;
-    let stdout = child.stdout.take().unwrap();
-    // Whatever fails, the child is stopped below.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut stdout = BufReader::new(stdout);
-        let mut address = String::new();
-        while !address.contains("#k=") {
-            address.clear();
-            assert!(
-                stdout.read_line(&mut address).unwrap() > 0,
-                "no address printed"
-            );
-        }
-        // The full address is still printed, for a browser that cannot open the file.
-        let address = address.trim().to_string();
-        let key = address.split("#k=").nth(1).unwrap().to_string();
-        let port: u16 = address
+        std::fs::set_permissions(&opener, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config = dir.join("config.json");
+        relevo::config::save(
+            &config,
+            &Config {
+                url: "http://127.0.0.1:9".to_string(),
+                token: "rlv_nothing".to_string(),
+                cert: None,
+                adapters: vec![],
+            },
+        )
+        .unwrap();
+        let child = Command::new(env!("CARGO_BIN_EXE_relevo"))
+            .args(["web"])
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    bin.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .env("HOME", &dir)
+            .env("RELEVO_CONFIG", &config)
+            .env("XDG_RUNTIME_DIR", &run)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let run = WebRun {
+            child,
+            dir,
+            run,
+            seen,
+        };
+        wait_until("the opener never ran", || {
+            run.seen.with_extension("done").exists()
+        });
+        run
+    }
+
+    /// What the opener was given: one argument per line.
+    fn opener_args(&self) -> String {
+        std::fs::read_to_string(self.seen.with_extension("args")).unwrap()
+    }
+
+    /// The copy the opener made of the file it was given.
+    fn opener_copy(&self) -> String {
+        std::fs::read_to_string(self.seen.with_extension("file")).unwrap()
+    }
+
+    /// The modes of the launcher file and of its folder, as `stat` said them.
+    fn opener_modes(&self) -> String {
+        std::fs::read_to_string(self.seen.with_extension("modes")).unwrap()
+    }
+
+    /// The launcher file the opener was given.
+    fn launcher(&self) -> PathBuf {
+        PathBuf::from(self.opener_args().trim())
+    }
+
+    /// The address the launcher sends the browser on to: the one with the key of this run.
+    fn address(&self) -> String {
+        let copy = self.opener_copy();
+        let from = copy.find("url=").unwrap() + 4;
+        copy[from..].split('"').next().unwrap().to_string()
+    }
+
+    fn key(&self) -> String {
+        self.address().split("#k=").nth(1).unwrap().to_string()
+    }
+
+    fn port(&self) -> u16 {
+        self.address()
             .trim_start_matches("http://127.0.0.1:")
             .split('/')
             .next()
             .unwrap()
             .parse()
-            .unwrap();
-        let done = dir.join("seen.done");
-        let start = Instant::now();
-        while !done.exists() {
-            assert!(
-                start.elapsed() < Duration::from_secs(20),
-                "the opener never ran"
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        let args = std::fs::read_to_string(dir.join("seen.args")).unwrap();
-        let file = std::fs::read_to_string(dir.join("seen.file")).unwrap_or_default();
-        let modes = std::fs::read_to_string(dir.join("seen.modes")).unwrap_or_default();
-        let given = std::path::PathBuf::from(args.trim());
+            .unwrap()
+    }
 
-        assert!(
-            !args.contains(&key),
-            "the key is in the opener's arguments: {args}"
-        );
-        assert_eq!(args.lines().count(), 1, "{args}");
-        assert!(given.starts_with(&run), "{args}");
-        // It sends the browser on to the address with the key, and only this user can read it.
-        assert!(
-            file.contains(&format!(
-                r#"<meta http-equiv="refresh" content="0;url={address}">"#
-            )),
-            "{file}"
-        );
-        assert_eq!(modes.split_whitespace().collect::<Vec<_>>(), ["600", "700"]);
-        assert!(given.exists());
-        // The page asks with the key: the launcher is gone.
+    /// Asks the local server as the page would, and answers with the whole answer.
+    fn ask(&self, key: &str) -> String {
+        use std::io::{Read, Write};
+        let port = self.port();
         let mut conn = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         write!(
             conn,
@@ -594,24 +615,114 @@ fn the_key_never_goes_in_the_openers_command_line() {
         .unwrap();
         let mut answer = String::new();
         conn.read_to_string(&mut answer).unwrap();
-        assert!(answer.starts_with("HTTP/1.1 502"), "{answer}");
-        assert!(!given.exists());
-        assert!(!given.parent().unwrap().exists());
-    }));
-    // Stop it as Ctrl-C would.
-    unsafe { libc::kill(pid, libc::SIGINT) };
-    let start = Instant::now();
-    while child.try_wait().unwrap().is_none() {
-        if start.elapsed() > Duration::from_secs(10) {
-            let _ = child.kill();
-            break;
+        answer
+    }
+
+    /// Stops it as the system would, and answers with how it ended. It must leave on its own:
+    /// this never kills the process, which would hide one that ignored the signal.
+    fn stop(&mut self, signal: i32) -> ExitStatus {
+        unsafe { libc::kill(self.child.id() as libc::pid_t, signal) };
+        let start = Instant::now();
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "it is still running 10 s after the signal"
+            );
+            std::thread::sleep(Duration::from_millis(50));
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for WebRun {
+    fn drop(&mut self) {
+        // Only a test that failed gets here with the process still running.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Waits for `done`, and fails with `what` when it never happens.
+#[cfg(target_os = "linux")]
+fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+    let start = Instant::now();
+    while !done() {
+        assert!(start.elapsed() < Duration::from_secs(20), "{what}");
         std::thread::sleep(Duration::from_millis(50));
     }
-    let _ = child.wait();
-    let _ = std::fs::remove_dir_all(&dir);
-    if let Err(e) = result {
-        std::panic::resume_unwind(e);
+}
+
+/// `relevo web` gives the opener a file of its user's, never the address with the key: every
+/// local user can read a command line. The file sends the browser on to the address, and is gone
+/// once the page asked with the key.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_key_never_goes_in_the_openers_command_line() {
+    let run = WebRun::start("open");
+    let args = run.opener_args();
+    let key = run.key();
+    let launcher = run.launcher();
+    assert!(
+        !args.contains(&key),
+        "the key is in the opener's arguments: {args}"
+    );
+    assert_eq!(args.lines().count(), 1, "{args}");
+    assert!(launcher.starts_with(&run.run), "{args}");
+    // It sends the browser on to the address with the key, and only this user can read it.
+    let address = run.address();
+    assert!(
+        run.opener_copy().contains(&format!(
+            r#"<meta http-equiv="refresh" content="0;url={address}">"#
+        )),
+        "{}",
+        run.opener_copy()
+    );
+    assert_eq!(
+        run.opener_modes().split_whitespace().collect::<Vec<_>>(),
+        ["600", "700"]
+    );
+    assert!(launcher.exists());
+    // The page asks with the key: the launcher, and the folder of its own around it, are gone.
+    let answer = run.ask(&key);
+    assert!(answer.starts_with("HTTP/1.1 502"), "{answer}");
+    assert!(!launcher.exists());
+    assert!(!launcher.parent().unwrap().exists());
+}
+
+/// Stopped before the page ever asked, which is how it usually ends, `relevo web` deletes the
+/// launcher that holds the key however it is stopped: Ctrl-C, a kill, a terminal closed. The
+/// process must leave on its own, so this never kills it.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_launcher_is_deleted_however_relevo_web_is_stopped() {
+    for (name, signal) in [
+        ("SIGINT", libc::SIGINT),
+        ("SIGTERM", libc::SIGTERM),
+        ("SIGHUP", libc::SIGHUP),
+    ] {
+        let mut run = WebRun::start("stop");
+        let launcher = run.launcher();
+        assert!(
+            launcher.exists() && launcher.parent().unwrap().exists(),
+            "{name}: the launcher is where the opener was told, still holding the key"
+        );
+        let status = run.stop(signal);
+        assert!(
+            status.success(),
+            "{name}: it did not stop by itself: {status:?}"
+        );
+        assert!(
+            !launcher.exists(),
+            "{name}: the launcher file is left behind"
+        );
+        assert!(
+            !launcher.parent().unwrap().exists(),
+            "{name}: its folder is left behind"
+        );
     }
 }
 
