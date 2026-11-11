@@ -1,9 +1,9 @@
 // The background waiting inbox request: while the pi session lives, one request
 // with `wait` stays open; each thread that comes back with new notes is handed
-// to `deliver` once, oldest first. A new session gets, as new, the direct notes
-// still pending for its person (one that reached a session that died before
-// handling it, say), so the first request hands those over at once. In every
-// answer, a direct thread pending for the person whose latest note, by someone
+// to `deliver` once, oldest first. A new session gets, as new, the notes still
+// pending for its person (one that reached a session that died before handling
+// it, say), so the first request hands those over at once. In every answer, a
+// thread that names the person (any direct one) pending for them whose latest note, by someone
 // else, this process has not shown the agent is handed over too, once: the answer
 // that carried it was lost on the way (the server delivered it all the same), or
 // it was fetched and never shown. Since only that latest note comes back, it says
@@ -65,14 +65,14 @@ export function oldestFirst(threads: Thread[]): Thread[] {
 }
 
 /**
- * `t`, from an inbox answer, to hand over again when it is a direct open thread pending for the
- * person with nothing new, whose latest note (`last_note`), by someone else, is not in `shown`:
+ * `t`, from an inbox answer, to hand over again when it is an open thread that names the person (any
+ * direct one) pending for them with nothing new, whose latest note (`last_note`), by someone else, is not in `shown`:
  * as it was, with that note as its new note and `handed_over` set. Otherwise null. Once shown, a
  * note the agent leaves alone (not for it) stays pending without coming back.
  */
 export function handOverAgain(t: Thread, shown: Set<string>, me?: string): Thread | null {
   const last = t.last_note;
-  if (t.kind !== "direct" || t.status !== "open" || t.pending !== true || !last?.id) return null;
+  if (!(t.kind === "direct" || t.named === true) || t.status !== "open" || t.pending !== true || !last?.id) return null;
   if ((t.new_notes ?? []).length || last.author === me || shown.has(last.id)) return null;
   return { ...t, new_notes: [last], handed_over: true };
 }

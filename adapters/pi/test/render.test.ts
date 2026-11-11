@@ -45,9 +45,11 @@ function wrappersClosed(text: string) {
 
 test("an inbox over the cap shows whole threads and still names the ones left out", async () => {
   for (let i = 1; i <= 15; i++) {
-    await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: log(`Direct log ${i}`) });
+    await api(server, ana, "POST", "/api/send", { text: `@oscar ${log(`Direct log ${i}`)}` });
   }
-  const team = await api(server, ana, "POST", "/api/send", { to: ["@team"], text: "Team question: who owns the refunds queue?" });
+  server.team("add", "backend", "--title", "Backend");
+  server.team("join", "backend", "ana", "oscar");
+  const team = await api(server, ana, "POST", "/api/send", { text: "Team question for @backend: who owns the refunds queue?" });
 
   const ext = extension();
   const out = await ext.tool("relevo_inbox", {}, home);
@@ -55,8 +57,8 @@ test("an inbox over the cap shows whole threads and still names the ones left ou
   assert.doesNotMatch(out, /Output cut/);
   wrappersClosed(out);
   // The team thread sorts last: listed, with how to read it.
-  assert.match(out, new RegExp(`## Thread ${team.thread} \\(team, open\\)`));
-  assert.ok(out.includes(`relevo_thread { id: "${team.thread}" }`) || out.includes("Team question: who owns the refunds queue?"));
+  assert.match(out, new RegExp(`## Thread ${team.thread} \\(team: @backend, open\\)`));
+  assert.ok(out.includes(`relevo_thread { id: "${team.thread}" }`) || out.includes("Team question for @backend: who owns the refunds queue?"));
   // Every direct thread is there, whole or named.
   const shown = [...out.matchAll(/^## Thread (r_\w+)/gm)].map((m) => m[1]);
   assert.equal(shown.length, 16);
@@ -64,11 +66,11 @@ test("an inbox over the cap shows whole threads and still names the ones left ou
 
   // Delivered by that call, so not new any more, but thread still reads it.
   const thread = await ext.tool("relevo_thread", { id: team.thread }, home);
-  assert.match(thread, /Team question: who owns the refunds queue\?/);
+  assert.match(thread, /Team question for @backend: who owns the refunds queue\?/);
 });
 
 test("a long thread shows its latest notes and the delivery, and pages back with before", async () => {
-  const opened = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: log("Thread log 1") });
+  const opened = await api(server, ana, "POST", "/api/send", { text: `@oscar ${log("Thread log 1")}` });
   for (let i = 2; i <= 16; i++) {
     await api(server, ana, "POST", "/api/send", { thread: opened.thread, text: log(`Thread log ${i}`) });
   }
@@ -80,7 +82,7 @@ test("a long thread shows its latest notes and the delivery, and pages back with
     assert.ok(out.length <= 60_000, `${out.length} characters`);
     wrappersClosed(out);
     assert.match(out, /Delivery \(the latest note by someone else that each person has\):\n- @ana/);
-    const marks = [...out.matchAll(/^Thread log (\d+)$/gm)].map((m) => Number(m[1]));
+    const marks = [...out.matchAll(/^(?:@oscar )?Thread log (\d+)$/gm)].map((m) => Number(m[1]));
     if (page === 0) assert.equal(marks[marks.length - 1], 16, "the latest note is shown");
     seen.unshift(...marks);
     const next = out.match(/relevo_thread \{ id: "(r_\w+)", before: "(n_\w+)" \}/);
@@ -92,8 +94,8 @@ test("a long thread shows its latest notes and the delivery, and pages back with
 });
 
 test("a note longer than the cap is read whole with relevo_thread", async () => {
-  const text = `Huge note\n${"y".repeat(63_000)}`;
-  const opened = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text });
+  const text = `Huge note for @oscar\n${"y".repeat(63_000)}`;
+  const opened = await api(server, ana, "POST", "/api/send", { text });
   const ext = extension();
   const out = await ext.tool("relevo_thread", { id: opened.thread }, home);
   assert.ok(out.includes(`<untrusted from="@ana">\n${text}\n</untrusted>`));
@@ -130,15 +132,18 @@ test("an arrival with many new notes keeps the latest whole and points to relevo
   assert.match(out, /\d+ earlier new note\(s\) not shown here: read them with relevo_thread \{ id: "r_aaaaaaaaaaaa" \}\./);
 });
 
-function arrivalThread(kind: "direct" | "team", claimed: Thread["claimed"] = null): Thread {
+/** A thread from ana to oscar: direct, to the team @backend, or on the global board; one that names oscar is pending for him. */
+function arrivalThread(kind: "direct" | "team" | "global", claimed: Thread["claimed"] = null, named = kind === "direct"): Thread {
   return {
     id: "r_bbbbbbbbbbbb",
     kind,
     title: "Which queue?",
     from: "ana",
-    participants: kind === "team" ? ["ana"] : ["ana", "oscar"],
+    participants: ["ana", "oscar"],
+    teams: kind === "team" ? ["backend"] : [],
+    named,
     status: "open",
-    pending: kind === "direct",
+    pending: named,
     context: null,
     claimed,
     new_notes: [{ id: "n_bbbbbbbbbbbb", author: "ana", via: "pi test", created_at: "2026-11-08T10:41:00Z", text: "Which queue?", truncated: false }],
@@ -182,6 +187,7 @@ test("a direct arrival already handled, or closed, neither says it stays pending
   // Closed by the other person with a last note: only to read; writing in it would fail.
   const closed = renderArrival({ ...arrivalThread("direct"), status: "closed", pending: false }, "oscar");
   assert.match(closed, /^Relevo: new in thread r_bbbbbbbbbbbb, which is closed\. You speak for @oscar\. It needs nothing more and cannot be answered: read it/);
+  assert.match(closed, /To follow up, open a new thread with relevo_send \{ text: "@handle …" \}\./);
   for (const wrong of [/stays pending/, /done: true/, /claim: true/, /text: …/]) assert.doesNotMatch(closed, wrong);
 });
 
@@ -193,30 +199,58 @@ test("pending comes from `pending` alone: `waiting_for_you` is gone", () => {
   assert.doesNotMatch(handled, /claim: true/);
   // The 0.2.x name means nothing now.
   assert.doesNotMatch(renderThread({ ...t, pending: undefined, waiting_for_you: true } as Thread, { me: "oscar" }), /Pending/);
-  // Team questions are never pending: answering them is optional.
-  assert.doesNotMatch(renderThread(arrivalThread("team"), { me: "oscar" }), /Pending|done: true/);
-  assert.doesNotMatch(renderArrival(arrivalThread("team"), "oscar"), /done: true/);
+  // Team and global-board threads that do not name the person are never pending: answering them is optional.
+  for (const kind of ["team", "global"] as const) {
+    assert.doesNotMatch(renderThread(arrivalThread(kind), { me: "oscar" }), /Pending|done: true/);
+    assert.doesNotMatch(renderArrival(arrivalThread(kind), "oscar"), /done: true/);
+  }
 });
 
-test("a team arrival is answered only from your own work, and not claimed", () => {
+test("a team or global-board arrival that does not name you is optional, answered only from your own work, and not claimed", () => {
   const out = renderArrival(arrivalThread("team"), "oscar");
-  assert.match(out, /^Relevo: a team question in thread r_bbbbbbbbbbbb, to everyone\. You speak for @oscar\. /);
+  assert.match(out, /^Relevo: new in thread r_bbbbbbbbbbbb, to @backend; it does not name your person, so answering is optional\. You speak for @oscar\. /);
   assert.match(out, /If your own work or your person's files answer it, reply with relevo_send \{ thread: "r_bbbbbbbbbbbb", text: … \}; if not, stay silent/);
-  assert.match(out, /repeating a teammate's `about` line, or guessing who might know, is not an answer\. Do not claim it\./);
+  assert.match(out, /repeating someone's `about` line, or guessing who might know, is not an answer\. Do not claim it\./);
+  assert.match(out, /^## Thread r_bbbbbbbbbbbb \(team: @backend, open\)$/m);
+  assert.match(out, /^Opened by @ana; participants: @ana, @oscar\. It does not name your person\.$/m);
   assert.doesNotMatch(out, /claim: true/);
   assert.doesNotMatch(out, /On it/);
   assert.doesNotMatch(out, /something useful/);
+  const global = renderArrival(arrivalThread("global"), "oscar");
+  assert.match(global, /^Relevo: new in thread r_bbbbbbbbbbbb, on the global board; it does not name your person, so answering is optional\. /);
+  assert.match(global, /^## Thread r_bbbbbbbbbbbb \(global board, open\)$/m);
+  assert.match(global, /^Posted by @ana on the global board, to everyone on the server; participants: @ana, @oscar\. It does not name your person\.$/m);
+  assert.doesNotMatch(global, /claim: true/);
+  // A team question from a server before 0.4.0 (no `teams`, no `named`): a question to everyone, optional.
+  const old = { ...arrivalThread("team"), teams: undefined, named: undefined };
+  const out2 = renderArrival(old, "oscar");
+  assert.match(out2, /^Relevo: new in thread r_bbbbbbbbbbbb, to everyone; it does not name your person, so answering is optional\. /);
+  assert.match(out2, /^## Thread r_bbbbbbbbbbbb \(team question to everyone, open\)$/m);
 });
 
-test("answers to your own team question are for your person, not to be answered", () => {
-  const t = { ...arrivalThread("team"), from: "oscar" };
-  t.new_notes = [{ ...t.new_notes![0], author: "ana", text: "Queue Q7." }];
-  const out = renderArrival(t, "oscar");
-  assert.match(out, /^Relevo: new in thread r_bbbbbbbbbbbb, your person's own team question\. You speak for @oscar\. /);
-  assert.match(out, /These notes answer it: tell your person what they say\. Do not answer it yourself/);
-  for (const wrong of [/If your own work/, /Read what you need first/, /A team question:/, /On it/, /claim: true/]) assert.doesNotMatch(out, wrong);
-  // Without `you`, the agent cannot tell it is its person's: the usual team text.
-  assert.match(renderArrival(t), /If your own work or your person's files answer it/);
+test("a team or global-board arrival that names you is yours to answer, pending, as a direct one", () => {
+  for (const [kind, where] of [["team", ", to @backend"], ["global", ", on the global board"]] as const) {
+    const out = renderArrival(arrivalThread(kind, null, true), "oscar");
+    assert.match(out, new RegExp(`^Relevo: new in thread r_bbbbbbbbbbbb${where}, and it names your person\\. You speak for @oscar\\. Decide from your context`));
+    assert.match(out, /^Pending for your person: they have not handled it yet\./m);
+    assert.match(out, /claim it with relevo_send \{ thread: "r_bbbbbbbbbbbb", claim: true \}/);
+    assert.match(out, /mark it handled with relevo_send \{ thread: "r_bbbbbbbbbbbb", done: true \}/);
+    assert.match(out, /participants: @ana, @oscar\. It names your person\.$/m);
+    assert.doesNotMatch(out, /answering is optional/);
+  }
+});
+
+test("answers to your own question to a team or to everyone are for your person, not to be answered", () => {
+  for (const kind of ["team", "global"] as const) {
+    const t = { ...arrivalThread(kind), from: "oscar" };
+    t.new_notes = [{ ...t.new_notes![0], author: "ana", text: "Queue Q7." }];
+    const out = renderArrival(t, "oscar");
+    assert.match(out, /^Relevo: new in thread r_bbbbbbbbbbbb, your person's own question to a team or to everyone\. You speak for @oscar\. /);
+    assert.match(out, /These notes answer it: tell your person what they say\. Do not answer it yourself/);
+    for (const wrong of [/If your own work/, /Read what you need first/, /answering is optional/, /On it/, /claim: true/]) assert.doesNotMatch(out, wrong);
+    // Without `you`, the agent cannot tell it is its person's: the usual text.
+    assert.match(renderArrival(t), /If your own work or your person's files answer it/);
+  }
 });
 
 test("an arrival held by another of your sessions says to step aside, and your own new notes are not wrapped", () => {
@@ -233,13 +267,15 @@ test("an arrival held by another of your sessions says to step aside, and your o
   assert.match(unknown, /<untrusted from="@oscar">\nMine first\n<\/untrusted>/);
 });
 
-test("an open team question from someone else says to answer it only from your own work", () => {
+test("an open team or global-board thread from someone else that does not name you says answering is optional", () => {
   const line =
-    "A team question: answer it only from your own work or your person's files " +
-    '(repeating a teammate\'s `about` line, or guessing who might know, is not an answer); do not claim it.';
+    "It does not name your person, so answering is optional: answer only from your own work or your person's files " +
+    "(repeating someone's `about` line, or guessing who might know, is not an answer); do not claim it.";
   assert.ok(renderThread(arrivalThread("team"), { me: "oscar" }).includes(line));
-  // Not for a direct thread, your own team question, or a closed one.
+  assert.ok(renderThread(arrivalThread("global"), { me: "oscar" }).includes(line));
+  // Not for a direct thread, one that names you, your own question, or a closed one.
   assert.ok(!renderThread(arrivalThread("direct"), { me: "oscar" }).includes(line));
+  assert.ok(!renderThread(arrivalThread("team", null, true), { me: "oscar" }).includes(line));
   assert.ok(!renderThread({ ...arrivalThread("team"), from: "oscar" }, { me: "oscar" }).includes(line));
   assert.ok(!renderThread({ ...arrivalThread("team"), status: "closed" }, { me: "oscar" }).includes(line));
 });
@@ -266,9 +302,9 @@ test("other people's text can neither close its wrapper nor open a fake one, in 
 test("an inbox starts with whom the agent speaks for, or with the session when the server does not say", () => {
   const team = [{ handle: "oscar", name: "Oscar", about: "", contexts: [] }];
   const known = renderInbox({ team, session: { label: "pi", context: "relevo", you: "oscar" }, threads: [], more: 0 });
-  assert.ok(known.startsWith('You speak for @oscar (your person): notes by @oscar are theirs, from this session or another of theirs. This session: "pi", context relevo.\n\nTeam:\n- @oscar (Oscar, you)'), known);
+  assert.ok(known.startsWith('You speak for @oscar (your person): notes by @oscar are theirs, from this session or another of theirs. This session: "pi", context relevo.\n\nPeople (mention one with @handle):\n- @oscar (Oscar, you)'), known);
   const unknown = renderInbox({ team, session: { label: "pi", context: null }, threads: [], more: 0 });
-  assert.ok(unknown.startsWith('This session: "pi", general.\n\nTeam:\n- @oscar (Oscar)\n'), unknown);
+  assert.ok(unknown.startsWith('This session: "pi", general.\n\nPeople (mention one with @handle):\n- @oscar (Oscar)\n'), unknown);
 });
 
 test("a pending thread with nothing new shows its latest note, as relevo mcp does", () => {
@@ -361,6 +397,34 @@ test("the delivery tells seen from handled, and never says seen by 0, as relevo 
   assert.equal(line(0, cc), '- @oscar: note n_1 seen by "pi" in embeddings at 10:46 UTC on 2026-11-08; handled by "Claude Code" in producto at 19:30 UTC on 2026-11-08.');
   // Answering a team question is optional: nothing is "not handled" there.
   assert.doesNotMatch(line(1, null, "team")!, /not handled/);
+});
+
+test("the inbox lists the people with their teams, then the teams with their members", () => {
+  const out = renderInbox({
+    team: [
+      { handle: "ana", name: "Ana", about: "payments backend", contexts: [], teams: ["backend", "ops"] },
+      { handle: "oscar", name: "Oscar", about: "", contexts: ["web"], teams: ["backend"] },
+    ],
+    teams: [
+      { name: "backend", title: "Backend", members: ["ana", "oscar"] },
+      { name: "empty", title: "", members: [] },
+      { name: "ops", title: "Operations", members: ["ana"] },
+    ],
+    session: { label: "pi", context: null, you: "oscar" },
+    threads: [],
+    more: 0,
+  });
+  assert.ok(
+    out.includes(
+      "People (mention one with @handle):\n- @ana (Ana): payments backend; in @backend, @ops\n- @oscar (Oscar, you); in @backend (live in web)\n\n" +
+        "Teams (mention one with @name: it reaches its members):\n- @backend (Backend): @ana, @oscar (you)\n- @empty: nobody active\n- @ops (Operations): @ana\n\n",
+    ),
+    out,
+  );
+  const none = renderInbox({ team: [], teams: [], session: { label: "pi", context: null }, threads: [], more: 0 });
+  assert.match(none, /^Teams: none on this server\.$/m);
+  // A server before 0.4.0 lists no teams: nothing is said of them.
+  assert.doesNotMatch(renderInbox({ team: [], session: { label: "pi", context: null }, threads: [], more: 0 }), /Teams/);
 });
 
 test("more threads than shown: call again when new ones were shown, else answer, close or mark done to make room", () => {

@@ -46,7 +46,7 @@ test("a note is delivered once with a message that triggers a turn, and shutdown
   const ext = extension();
   await ext.emit("session_start", { reason: "startup" }, ext.ctx(home, "rpc"));
   try {
-    const opened = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Is the refunds migration safe to run?" });
+    const opened = await api(server, ana, "POST", "/api/send", { text: "@oscar Is the refunds migration safe to run?" });
     await until(() => ext.sent.length === 1);
     const [{ message, options }] = ext.sent;
     assert.deepEqual(options, { triggerTurn: true });
@@ -55,7 +55,7 @@ test("a note is delivered once with a message that triggers a turn, and shutdown
     assert.equal(message.display, true);
     assert.deepEqual(message.details, { thread: opened.thread, from: "ana", kind: "direct" });
     assert.match(message.content, new RegExp(`^Relevo: new in thread ${opened.thread}\\.`));
-    assert.match(message.content, /<untrusted from="@ana">\nIs the refunds migration safe to run\?\n<\/untrusted>/);
+    assert.match(message.content, /<untrusted from="@ana">\n@oscar Is the refunds migration safe to run\?\n<\/untrusted>/);
 
     // Several waits later the thread is still waiting for a reply, but nothing more is delivered.
     await sleep(2500);
@@ -65,7 +65,7 @@ test("a note is delivered once with a message that triggers a turn, and shutdown
     await api(server, ana, "POST", "/api/send", { thread: opened.thread, text: "It touches 2M rows." });
     await until(() => ext.sent.length === 2);
     assert.match(ext.sent[1].message.content, /New notes \(1\):[\s\S]*It touches 2M rows\./);
-    assert.doesNotMatch(ext.sent[1].message.content, /\nIs the refunds migration safe to run\?\n/);
+    assert.doesNotMatch(ext.sent[1].message.content, /\n@oscar Is the refunds migration safe to run\?\n/);
   } finally {
     const t = Date.now();
     await ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, "rpc"));
@@ -74,7 +74,7 @@ test("a note is delivered once with a message that triggers a turn, and shutdown
 
   // Stopped: a note sent now is not fetched in the background, so it stays new.
   await ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, "rpc")); // twice is fine
-  const late = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Still there?" });
+  const late = await api(server, ana, "POST", "/api/send", { text: "@oscar Still there?" });
   await sleep(1500);
   assert.equal(ext.sent.length, 2);
   const inbox = await api(server, oscar, "GET", "/api/inbox?all=1", undefined, "checker-session");
@@ -87,7 +87,7 @@ test("a note that lands while the agent is busy reaches it even if the person pr
   try {
     await sleep(300);
     await ext.session.userPrompt();
-    await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Busy check: is the deploy frozen?" });
+    await api(server, ana, "POST", "/api/send", { text: "@oscar Busy check: is the deploy frozen?" });
     await sleep(1500); // Several waits of the loop.
     assert.equal(ext.session.followUps.length, 0, "nothing goes into pi's follow-up queue");
     await ext.session.escape(); // Empties pi's queues.
@@ -103,7 +103,7 @@ test("while the agent is busy notes stay new on the server, so relevo_inbox show
   try {
     await sleep(300);
     await ext.session.userPrompt();
-    const opened = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Mid-turn: which region?" });
+    const opened = await api(server, ana, "POST", "/api/send", { text: "@oscar Mid-turn: which region?" });
     await sleep(1500);
     assert.equal(ext.sent.length, 0);
     const out = await ext.tool("relevo_inbox", {}, home);
@@ -122,7 +122,7 @@ test("a turn that ends before pi shows the note keeps it: it is added to the ses
   await ext.emit("session_start", { reason: "startup" }, ext.ctx(home, "tui"));
   try {
     ext.session.dropNextStart();
-    const opened = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Dropped start: still there?" });
+    const opened = await api(server, ana, "POST", "/api/send", { text: "@oscar Dropped start: still there?" });
     await until(() => ext.seen.length === 1);
     assert.equal(ext.sent.length, 2);
     assert.deepEqual(ext.sent[0].options, { triggerTurn: true });
@@ -142,7 +142,7 @@ test("a note fetched while pi compacts reaches the agent once pi is idle again",
   try {
     await sleep(300);
     ext.session.compacting(); // A manual /compact: not idle, but no turn and no agent_settled.
-    await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "During compaction: ping" });
+    await api(server, ana, "POST", "/api/send", { text: "@oscar During compaction: ping" });
     await sleep(1500);
     assert.equal(ext.sent.length, 0, "nothing handed to pi while it is not idle");
     ext.session.compacting(false);
@@ -158,7 +158,7 @@ test("a note arriving during the wait wakes the loop at once", async () => {
   try {
     await sleep(300); // The waiting request is open by now.
     const t = Date.now();
-    await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Quick one: which queue for refunds?" });
+    await api(server, ana, "POST", "/api/send", { text: "@oscar Quick one: which queue for refunds?" });
     await until(() => ext.sent.some((s) => s.message.content.includes("which queue")));
     assert.ok(Date.now() - t < 2000);
   } finally {
@@ -172,7 +172,7 @@ test("shutdown ends the session on the server, so the threads it holds show agai
   const holder = () => thread.delivery.find((d: any) => d.handle === "oscar").claimed_by;
   let thread: any;
   try {
-    const opened = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Can you look at the shutdown path?" });
+    const opened = await api(server, ana, "POST", "/api/send", { text: "@oscar Can you look at the shutdown path?" });
     await until(() => ext.seen.some((m) => m.details?.thread === opened.thread));
     assert.match(await ext.tool("relevo_send", { thread: opened.thread, claim: true }, home), /this session has it now/);
     await api(server, ana, "POST", "/api/send", { thread: opened.thread, text: "It is in src/index.ts." });
@@ -224,7 +224,7 @@ test("print and json runs start no loop", async () => {
   for (const mode of ["print", "json"]) {
     const ext = extension();
     await ext.emit("session_start", { reason: "startup" }, ext.ctx(home, mode));
-    await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: `In ${mode} mode?` });
+    await api(server, ana, "POST", "/api/send", { text: `@oscar In ${mode} mode?` });
     await sleep(500);
     assert.equal(ext.sent.length, 0);
     await ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, mode));
@@ -272,12 +272,12 @@ test("an invalid RELEVO_CONTEXT falls back to general with a notice, and notes s
   try {
     assert.equal(ext.notified.length, 1);
     assert.match(ext.notified[0], /RELEVO_CONTEXT "Pagos API" is not a valid context[\s\S]*general/);
-    await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Context check: does this reach you?" });
+    await api(server, ana, "POST", "/api/send", { text: "@oscar Context check: does this reach you?" });
     await until(() => ext.sent.some((s) => s.message.content.includes("Context check")));
     // Under whom the agent speaks for and the session, which it is about.
     assert.match(
       await ext.tool("relevo_inbox", {}, home),
-      /^You speak for @oscar [^\n]*This session: "[^"]*", general\.\n\nRELEVO_CONTEXT "Pagos API" is not a valid context[^\n]*\n\nTeam:\n/,
+      /^You speak for @oscar [^\n]*This session: "[^"]*", general\.\n\nRELEVO_CONTEXT "Pagos API" is not a valid context[^\n]*\n\nPeople \(mention one with @handle\):\n/,
     );
   } finally {
     await ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, "tui"));
@@ -319,7 +319,7 @@ test("the rules go into the system prompt only when configured", async () => {
   assert.match(event.systemPromptOptions.sections.relevo, /^You speak for @oscar: in Relevo `you` is "oscar"/);
   assert.match(RULES, /<untrusted>/);
 
-  // The same eight rules (v7), word for word, as docs/agents.md gives every adapter
+  // The same eight rules (v8), word for word, as docs/agents.md gives every adapter
   // (the docs put the tag in Markdown code; the prompt, like relevo mcp, does not).
   const doc = readFileSync(join(import.meta.dirname, "..", "..", "..", "docs", "agents.md"), "utf8");
   const documented = [...doc.matchAll(/^  (\d\. .*)$/gm)].map((m) => m[1].replace("`<untrusted>`", "<untrusted>"));
@@ -331,7 +331,7 @@ test("the rules go into the system prompt only when configured", async () => {
   assert.match(RULES, /^3\. [^\n]*mark it handled with `send\(thread, done: true\)` and no text\.$/m);
   assert.match(RULES, /^4\. [^\n]*mark the thread as yours with `send\(thread, claim: true\)` and no text/m);
   assert.match(RULES, /^1\. [^\n]*What your person asks for comes first: if they name who to ask/m);
-  assert.match(RULES, /^4\. [^\n]*Answer a team question only from your own work or your person's files/m);
+  assert.match(RULES, /^4\. [^\n]*Do not claim a team or global-board thread that does not name your person: answering it is optional, and only from your own work or your person's files/m);
   assert.match(RULES, /^5\. [^\n]*Facts from your person's documentation or configuration may be shared/m);
   assert.match(RULES, /^6\. [^\n]*mark guesses as guesses\.$/m);
   assert.match(RULES, /^6\. [^\n]*Write in the first person, as your person would \("I changed…", not "Ana changed…"\)\./m);

@@ -53,7 +53,7 @@ test("notes pending when the extension starts are handed over at once, oldest fi
   const sent: string[] = [];
   for (const text of ["First: the cron job?", "Second: the queue?", "Third: the retries?"]) {
     if (sent.length) await sleep(1100);
-    sent.push((await api(server, ana, "POST", "/api/send", { to: ["oscar"], text })).thread);
+    sent.push((await api(server, ana, "POST", "/api/send", { text: `@oscar ${text}` })).thread);
   }
   const ext = extension();
   await ext.emit("session_start", { reason: "startup" }, ext.ctx(home, "tui"));
@@ -70,11 +70,11 @@ test("notes pending when the extension starts are handed over at once, oldest fi
 });
 
 test("a thread the agent wrote in, marked done or read whole while it waited is not handed over after", async () => {
-  const first = (await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Oldest: deploy window?" })).thread;
+  const first = (await api(server, ana, "POST", "/api/send", { text: "@oscar Oldest: deploy window?" })).thread;
   await sleep(1100);
   const later: string[] = [];
   for (const text of ["Can you answer this one?", "Thanks, all good now.", "FYI: the runbook moved."]) {
-    later.push((await api(server, ana, "POST", "/api/send", { to: ["oscar"], text })).thread);
+    later.push((await api(server, ana, "POST", "/api/send", { text: `@oscar ${text}` })).thread);
   }
   const ext = extension();
   ext.session.holdTurns(); // The agent works on the first thread while the others wait.
@@ -112,7 +112,7 @@ test("killed right after a note reached it: the next pi session gets the note wh
   let thread: string;
   try {
     await sleep(500); // The child's waiting request is open by now.
-    thread = (await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Kill test: is the backup running?" })).thread;
+    thread = (await api(server, ana, "POST", "/api/send", { text: "@oscar Kill test: is the backup running?" })).thread;
     await until(() => out.includes(`received ${thread}`), 10_000);
   } finally {
     // Dropped mid-turn without a word: no shutdown, no DELETE /api/session.
@@ -152,7 +152,7 @@ test("a note a session leaves alone stays pending: a session started later gets 
   await a.emit("session_start", { reason: "startup" }, a.ctx(home, "tui"));
   const b = extension();
   try {
-    const thread = (await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Not for this one: the iOS build?" })).thread;
+    const thread = (await api(server, ana, "POST", "/api/send", { text: "@oscar Not for this one: the iOS build?" })).thread;
     await until(() => a.seen.length === 1); // Its turn ends without a word: not for it.
     await b.emit("session_start", { reason: "startup" }, b.ctx(home, "tui"));
     await until(() => b.seen.length === 1);

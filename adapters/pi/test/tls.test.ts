@@ -45,11 +45,11 @@ test("the tools work over https with the certificate saved in the config", async
   assert.match(server.url, /^https:\/\//);
   const RELEVO_CONFIG = configFile({ url: server.url, token: oscar, cert: server.cert });
   const ext = loadExtension({ env: { RELEVO_CONFIG, RELEVO_CONTEXT: "" }, home });
-  const out = await ext.tool("relevo_send", { to: ["ana"], text: "Over TLS: is /refunds idempotent?" }, home);
+  const out = await ext.tool("relevo_send", { text: "@ana Over TLS: is /refunds idempotent?" }, home);
   const id = out.match(/thread (r_\w+)/)?.[1];
   assert.ok(id, out);
   const seen = await api(server, ana, "GET", `/api/threads/${id}`);
-  assert.equal(seen.notes[0].text, "Over TLS: is /refunds idempotent?");
+  assert.equal(seen.notes[0].text, "@ana Over TLS: is /refunds idempotent?");
 
   await api(server, ana, "POST", "/api/send", { thread: id, text: "Yes, by key." });
   const inbox = await ext.tool("relevo_inbox", {}, home);
@@ -74,7 +74,7 @@ test("the waiting inbox request, its wake-up and the end of the session work ove
   await ext.emit("session_start", { reason: "startup" }, ext.ctx(home, "rpc"));
   let thread: string;
   try {
-    const opened = await api(server, ana, "POST", "/api/send", { to: ["oscar"], text: "Can you look at the TLS ticket?" });
+    const opened = await api(server, ana, "POST", "/api/send", { text: "@oscar Can you look at the TLS ticket?" });
     thread = opened.thread;
     await until(() => ext.sent.length === 1);
     assert.deepEqual(ext.sent[0].options, { triggerTurn: true });
