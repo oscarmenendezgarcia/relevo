@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.2 (12-nov-2026)
+
+**`relevo web`**: clicking a card with no replies no longer causes a layout jump. The app no longer fetches the conversation nor renders the empty conversation element for single-note threads.
+
 ## 0.4.1 (12-nov-2026)
 
 **`relevo web`**: fixed "requests from another site are refused" on Chrome on macOS. Chrome sends `Sec-Fetch-Site: cross-site` for same-origin requests to `127.0.0.1`; the `Origin` header is now the authoritative check when it is present. Builds for macOS (Intel and Apple Silicon) are now included in every release.
