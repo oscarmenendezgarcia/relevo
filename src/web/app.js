@@ -735,8 +735,8 @@ if (typeof document !== 'undefined') {
       a.append(chips);
     }
 
-    // Expanded conversation
-    a.append(convo(t, full));
+    // Expanded conversation — only when there are replies
+    if (hasReplies) a.append(convo(t, full));
 
     a.onclick = (e) => {
       if (e.target.closest('.convo')) return;
@@ -755,7 +755,8 @@ if (typeof document !== 'undefined') {
     else {
       state.open.add(id);
       state.opening = id;
-      if (!state.convos.has(id)) loadConvo(id);
+      const t = [...state.threads, ...state.needs].find((t) => t.id === id);
+      if ((!t || t.notes > 1) && !state.convos.has(id)) loadConvo(id);
     }
     renderFeed();
     const card = document.querySelector('[data-id="' + CSS.escape(id) + '"]');
