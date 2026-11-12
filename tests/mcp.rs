@@ -1000,6 +1000,9 @@ async fn without_ca_roots_http_works_and_https_says_why() {
     assert_eq!(mcp.init["serverInfo"]["name"], "relevo");
     let (failed, err) = mcp.call("inbox", json!({})).await;
     assert!(failed);
+    // On macOS the system keychain provides CA roots regardless of SSL_CERT_FILE/SSL_CERT_DIR,
+    // so rustls has roots and fails with "Connection refused" (nothing on port 1) instead.
+    #[cfg(not(target_os = "macos"))]
     assert!(err.contains("TLS roots could not be loaded"), "{err}");
     // connect needs no roots to look at a certificate (it can pin one, tests/tls.rs): here it
     // finds no server.
