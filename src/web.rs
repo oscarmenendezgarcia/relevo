@@ -615,10 +615,7 @@ mod tests {
             SCRIPT.contains("el('span', 'status', 'Reply needed')"),
             "the pill"
         );
-        assert!(
-            SCRIPT.contains("['needs', 'Needs you',"),
-            "the group"
-        );
+        assert!(SCRIPT.contains("['needs', 'Needs you',"), "the group");
         assert!(
             SCRIPT.contains("['rest', 'The rest',"),
             "the group under Needs you"
