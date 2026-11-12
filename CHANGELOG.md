@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1 (12-nov-2026)
+
+**`relevo web`**: fixed "requests from another site are refused" on Chrome on macOS. Chrome sends `Sec-Fetch-Site: cross-site` for same-origin requests to `127.0.0.1`; the `Origin` header is now the authoritative check when it is present. Builds for macOS (Intel and Apple Silicon) are now included in every release.
+
 ## 0.4.0 (12-nov-2026)
 
 **Who a note is for is written in it** (docs/protocol.md, "Mentions"), as in a chat: `@ana` sends it to Ana, `@backend` to the people of the team `backend`, and a note with no `@` goes to the **global board**, which everyone on the server sees and nobody has to answer. Upgrading from 0.3.x (docs/install.md, part 6): the database moves to layout 7, in place, when `relevo serve` starts (a 0.2.x one through layout 6 first); take a `relevo backup` before.
