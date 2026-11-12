@@ -387,6 +387,72 @@ fn a_migrated_database_has_the_layout_of_a_new_one() {
 }
 
 #[test]
+fn a_layout_6_database_with_a_broken_thread_reference_names_the_row_and_refuses_to_start() {
+    let dir = TempDir::new();
+    let path = dir.db();
+    layout6(&path);
+    // A thread that is not there, with notes, participants and sessions still pointing at it: the
+    // migration makes the `threads` table again, and these are the references it can break.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    // The bundled SQLite has DEFAULT_FOREIGN_KEYS=1, so FK is ON by default; turn it off to
+    // delete a thread that child rows still point to — that is what this test sets up.
+    conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+    conn.execute("DELETE FROM threads WHERE id = ?1", ["r_26jmvdxtfgsv"])
+        .unwrap();
+    let note: i64 = conn
+        .query_row(
+            "SELECT seq FROM notes WHERE thread_id = 'r_26jmvdxtfgsv' ORDER BY seq LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    drop(conn);
+    let err = format!("{:#}", db::open_migrating(&path).unwrap_err());
+    // Which row, not only how many: the owner has to be able to find it.
+    assert!(
+        err.contains(&format!("notes rowid {note} refers to threads")),
+        "{err}"
+    );
+    for table in ["participants", "session_threads"] {
+        assert!(err.contains(table), "{table}: {err}");
+    }
+    // Nothing was written: the database is still layout 6, for `relevo backup` to copy.
+    assert_eq!(user_version(&path), 6);
+}
+
+#[test]
+fn a_broken_reference_elsewhere_does_not_stop_the_migration() {
+    let dir = TempDir::new();
+    let path = dir.db();
+    layout6(&path);
+    // The idempotency key of a person who is not on the server: broken under 0.3 as well, and
+    // nothing to do with the threads table the migration makes again. It must not lock the owner
+    // out of their own server.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    // FK is ON by default (DEFAULT_FOREIGN_KEYS=1); turn it off to insert an orphaned key.
+    conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+    conn.execute(
+        "INSERT INTO send_keys (person_id, key, thread_id, note_id, status, claimed_by, created_at)
+         VALUES (999, 'k-orphan', 'r_pxsxyijycdc5', NULL, 'open', NULL, 1794393850)",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    db::open_migrating(&path).unwrap();
+    assert_eq!(user_version(&path), 7);
+    // Still broken: the check the migration makes is over the tables that refer to threads.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let broken: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM pragma_foreign_key_check('send_keys')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(broken, 1);
+}
+
+#[test]
 fn other_layouts_are_refused_and_left_as_they_are() {
     for (version, says) in [
         (4, "older version of relevo"),

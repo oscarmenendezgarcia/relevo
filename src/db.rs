@@ -3,7 +3,9 @@
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -332,36 +334,82 @@ fn open_with(path: &str, migrate: bool) -> Result<Connection> {
     // One transaction, so a process opening a new file at the same time sees it either empty or
     // with its version set, and one opening an old file sees it either old or migrated.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // Said here, logged once the transaction has committed: a migration that did not happen must
+    // not be announced as if it had.
+    let mut from_5 = false;
+    let mut from_6 = false;
     match layout(&tx, path)? {
         layout if refuses(layout) => bail!(no_migration(path, layout)),
         Layout::Migrates(from) => {
             if from == 5 {
                 tx.execute_batch(MIGRATE_FROM_5)
                     .with_context(|| format!("migrating database {path} from layout 5"))?;
-                tracing::info!(db = path, "migrated the database from layout 5 to 6");
+                from_5 = true;
             }
             tx.execute_batch(MIGRATE_FROM_6)
                 .with_context(|| format!("migrating database {path} from layout 6"))?;
-            let broken: i64 =
-                tx.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
-                    r.get(0)
-                })?;
-            if broken > 0 {
-                bail!("migrating database {path} from layout 6: {broken} broken references");
+            let broken = broken_thread_refs(&tx)?;
+            if !broken.is_empty() {
+                let rows: Vec<String> = broken
+                    .iter()
+                    .map(|(table, rowid, parent)| {
+                        format!("{table} rowid {rowid} refers to {parent}")
+                    })
+                    .collect();
+                bail!(
+                    "migrating database {path} from layout 6: {} broken references: {}",
+                    broken.len(),
+                    rows.join("; ")
+                );
             }
-            tracing::info!(
-                db = path,
-                "migrated the database from layout 6 to {SCHEMA_VERSION}: team threads are \
-                 global ones now"
-            );
+            from_6 = true;
         }
         Layout::New | Layout::Current => {}
     }
     tx.execute_batch(SCHEMA)?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
+    if from_5 {
+        tracing::info!(db = path, "migrated the database from layout 5 to 6");
+    }
+    if from_6 {
+        tracing::info!(
+            db = path,
+            "migrated the database from layout 6 to {SCHEMA_VERSION}: team threads are \
+             global ones now"
+        );
+    }
     conn.pragma_update(None, "foreign_keys", "ON")?;
     Ok(conn)
+}
+
+/// The tables that refer to `threads`: the only references layout 6 to 7 can break, since it makes
+/// the `threads` table again. A broken reference elsewhere was there with 0.3 too, and is no
+/// reason to refuse to start.
+const THREAD_REFERENCES: [&str; 4] = ["participants", "notes", "session_threads", "thread_teams"];
+
+/// The references that no longer hold in those tables, each as (table, rowid, parent).
+fn broken_thread_refs(tx: &Connection) -> Result<Vec<(String, i64, String)>> {
+    let mut out = Vec::new();
+    for table in THREAD_REFERENCES {
+        // `thread_teams` is one of the tables layout 7 brings: in a database of layout 6 it is
+        // not there yet, and has no reference to check.
+        let there: i64 = tx.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [table],
+            |r| r.get(0),
+        )?;
+        if there == 0 {
+            continue;
+        }
+        let mut stmt =
+            tx.prepare_cached("SELECT \"table\", rowid, parent FROM pragma_foreign_key_check(?1)")?;
+        let rows = stmt.query_map([table], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        for row in rows {
+            out.push(row?);
+        }
+    }
+    Ok(out)
 }
 
 /// Why a command other than `serve` refuses a database of layout 5 or 6.
@@ -592,18 +640,19 @@ pub fn invite(
     if RESERVED_HANDLES.contains(&handle) {
         bail!("'{handle}' is reserved: it was 0.3's whole team, and @{handle} names nobody");
     }
-    if team_id(conn, handle)?.is_some() {
-        bail!(
-            "'{handle}' is the name of a team: a handle cannot be one, so that @{handle} means one thing"
-        );
-    }
     one_line("name", name)?;
     if let Some(about) = about {
         one_line("about", about)?;
     }
     check_label(label)?;
-    // A failed invite must not leave the person created or reactivated.
-    let tx = conn.unchecked_transaction()?;
+    // IMMEDIATE so the team-name check and the insert are one atomic step: a concurrent
+    // `team add <handle>` sees the person and fails, not a silent duplicate @-name.
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    if team_id(&tx, handle)?.is_some() {
+        bail!(
+            "'{handle}' is the name of a team: a handle cannot be one, so that @{handle} means one thing"
+        );
+    }
     tx.execute(
         "INSERT INTO people (handle, name, about, created_at) VALUES (?1, ?2, coalesce(?3, ''), ?4)
          ON CONFLICT (handle) DO UPDATE SET name = ?2, about = coalesce(?3, about), active = 1",
@@ -825,7 +874,13 @@ pub fn add_team(conn: &Connection, name: &str, title: Option<&str>, now: i64) ->
     if RESERVED_HANDLES.contains(&name) {
         bail!("'{name}' is reserved: it was 0.3's whole team, and @{name} names nobody");
     }
-    let person: Option<bool> = conn
+    if let Some(title) = title {
+        one_line("title", title)?;
+    }
+    // IMMEDIATE so the person-handle check and the insert are one atomic step: a concurrent
+    // `invite <name>` sees the team and fails, not a silent duplicate @-name.
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let person: Option<bool> = tx
         .query_row("SELECT active FROM people WHERE handle = ?1", [name], |r| {
             r.get(0)
         })
@@ -834,16 +889,14 @@ pub fn add_team(conn: &Connection, name: &str, title: Option<&str>, now: i64) ->
         let state = if active { "" } else { " (inactive)" };
         bail!("'{name}' is the handle of a person{state}: a team cannot take it");
     }
-    if team_id(conn, name)?.is_some() {
+    if team_id(&tx, name)?.is_some() {
         bail!("there is a team named '{name}' already");
     }
-    if let Some(title) = title {
-        one_line("title", title)?;
-    }
-    conn.execute(
+    tx.execute(
         "INSERT INTO teams (name, title, created_at) VALUES (?1, coalesce(?2, ''), ?3)",
         params![name, title, now],
     )?;
+    tx.commit()?;
     Ok(())
 }
 

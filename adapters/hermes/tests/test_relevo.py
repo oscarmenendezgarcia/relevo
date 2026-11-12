@@ -1126,6 +1126,15 @@ class Tools(Base):
                                          "and nobody has to answer. Wrote note"), board)
         self.assertEqual(opened(board)["kind"], "global")
 
+    def test_an_empty_thread_is_the_server_to_refuse(self):
+        """`thread: ""` is not "no thread": dropping it would open a new one, and a text with no @
+        would land on the global board. The key goes to the server, which says the thread is none."""
+        self.bob.inbox(all_=True)  # settle what earlier tests left new for this session
+        before = [t["id"] for t in self.bob.inbox(all_=True)["threads"]]
+        out = tools.relevo_send({"thread": "", "text": "Office closed on Friday."})
+        self.assertTrue(out.startswith("Error: Relevo refused it: NOT_FOUND: no such thread"), out)
+        self.assertEqual([t["id"] for t in self.bob.inbox(all_=True)["threads"]], before)
+
     def test_a_reply_says_whom_it_added_or_named(self):
         sent = tools.relevo_send({"text": "Refunds export\n@ana can you rerun it?"})
         thread_id = re.search(r"in thread (r_\w+)", sent).group(1)
