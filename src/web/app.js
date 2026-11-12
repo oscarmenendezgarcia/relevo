@@ -321,6 +321,15 @@ function addedThreads(known, threads) {
   return threads.filter((t) => !known.has(t.id));
 }
 
+/// The first note as its row shows it. Closed up: the text after its title line, or the title
+/// when that is all there is (clamped to two lines by the page). Open: the whole note, title line
+/// included, once.
+function openerText(text, title, truncated, open) {
+  if (open) return text;
+  const rest = withoutTitle(text, title);
+  return (rest.trim() ? rest : shownTitle(title, text)) + (truncated ? '…' : '');
+}
+
 if (typeof module === 'object' && module.exports) {
   module.exports = {
     parseNote,
@@ -331,6 +340,7 @@ if (typeof module === 'object' && module.exports) {
     excerpt,
     withoutTitle,
     shownTitle,
+    openerText,
     pickKey,
     askShown,
     focusAfter,
@@ -752,15 +762,13 @@ if (typeof document !== 'undefined') {
     who.append(el('b', '', nameOf(t.from)), el('span', '', 'via ' + first.via), el('span', 'tag', where(t)));
     who.append(timeEl((t.last_note || first).created_at, short));
     msgBody.append(who);
-    const noteText = withoutTitle(first.text, t.title);
+    const shown = openerText(first.text, t.title, first.truncated, open);
     if (open) {
-      const bodyText = noteText.trim() ? noteText : (t.title ? t.title + '\n\n' + first.text : first.text);
-      const noteEl = renderNote(bodyText, document);
+      const noteEl = renderNote(shown, document);
       noteEl.classList.add('text');
       msgBody.append(noteEl);
     } else {
-      const textStr = (noteText.trim() ? noteText : shownTitle(t.title, first.text)) + (first.truncated ? '…' : '');
-      msgBody.append(md(textStr, 'text'));
+      msgBody.append(md(shown, 'text'));
     }
     // Closed up, say how many replies the line passes over; open, they are shown instead
     if (hasReplies) {
