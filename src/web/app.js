@@ -596,7 +596,7 @@ if (typeof document !== 'undefined') {
       if (state.busy === gen) state.busy = null;
       $('loadmore').disabled = false;
       if (hadFocus && added) {
-        const first = added.length ? rowButton(added[0].id) : null;
+        const first = added.length ? document.querySelector('[data-id="' + CSS.escape(added[0].id) + '"]') : null;
         const back = first || ($('loadmore').hidden ? $('feed') : $('loadmore'));
         back.focus({ preventScroll: true });
       }
@@ -646,16 +646,13 @@ if (typeof document !== 'undefined') {
   }
 
   /// The answer a row shows: by someone else when the person started the thread, else the latest.
-  const answerOf = (t) => (t.from === you() ? t.last_other_note : t.last_note);
-
   function md(text, cls) {
     const div = el('div', cls);
     div.appendChild(toDom(preview(text), document));
     return div;
   }
 
-  /// The conversation, every note once, in place of the row's previews: the first note without
-  /// its title, which is just above.
+  /// The expanded conversation: replies only (the opener is already in the card's first .msg).
   function convo(t, full) {
     const box = el('div', 'convo');
     box.id = 'convo-' + t.id;
@@ -675,13 +672,17 @@ if (typeof document !== 'undefined') {
       return box;
     }
     full.notes.forEach((n, i) => {
-      const note = el('div');
+      if (i === 0) return; // opener shown in the card's first .msg
+      const avCol = el('div', 'av-col');
+      avCol.append(avatar(n.author));
+      const msgBody = el('div', 'msg-body');
       const who = el('div', 'who');
-      who.append(el('b', '', nameOf(n.author)), ' · ' + n.via + (n.context ? ' in ' + n.context : '') + ' · ', timeEl(n.created_at, noteTime));
-      note.append(who);
-      const text = i === 0 ? withoutTitle(n.text, full.title) : n.text;
-      if (text.trim()) note.append(renderNote(text, document));
-      box.append(note);
+      who.append(el('b', '', nameOf(n.author)), el('span', '', 'via ' + n.via + (n.context ? ' in ' + n.context : '')), timeEl(n.created_at, noteTime));
+      msgBody.append(who);
+      if (n.text.trim()) msgBody.append(renderNote(n.text, document));
+      const msg = el('div', 'msg');
+      msg.append(avCol, msgBody);
+      box.append(msg);
     });
     if (state.opening === t.id) {
       box.classList.add('opening');
@@ -694,52 +695,59 @@ if (typeof document !== 'undefined') {
     const open = state.open.has(t.id);
     const full = open ? state.convos.get(t.id) : null;
     const first = t.first_note;
-    const a = el('article', 'row' + (t.status === 'closed' ? ' closed' : ''));
+    const cls = 'card' + (t.status === 'closed' ? ' closed' : '') + (open ? ' open' : '');
+    const a = el('article', cls);
     a.dataset.id = t.id;
-    const content = el('div');
+    a.setAttribute('role', 'button');
+    a.setAttribute('tabindex', '0');
+    a.setAttribute('aria-expanded', String(open));
+    if (open) a.setAttribute('aria-controls', 'convo-' + t.id);
 
-    const meta = el('div', 'meta');
-    meta.append(el('b', '', nameOf(t.from)), el('span', 'label', 'via ' + first.via), el('span', 'tag', where(t)));
-    if (t.notes > 1) meta.append(el('span', 'label', '· ' + t.notes + ' notes'));
-    if (t.status === 'closed') meta.append(el('span', 'label closed-label', 'Closed'));
-    meta.append(timeEl((t.last_note || first).created_at, short));
-    // The title is the row's control: a button in a heading, for the keyboard and screen readers.
-    const title = el('button', '', shownTitle(t.title, first.text));
-    title.setAttribute('aria-expanded', String(open));
-    if (open) title.setAttribute('aria-controls', 'convo-' + t.id);
-    const h3 = el('h3');
-    h3.append(title);
-    content.append(meta, h3);
-
-    if (!full) {
-      const rest = excerpt(first.text, t.title);
-      if (rest) content.append(md(rest + (first.truncated ? '…' : ''), 'excerpt'));
-      const answer = answerOf(t);
-      if (answer) {
-        const line = md(answer.text + (answer.truncated ? '…' : ''), 'answer');
-        const p = line.firstChild || line.appendChild(el('p'));
-        p.prepend(el('b', '', nameOf(answer.author)), ' ');
-        content.append(line);
-      }
+    // Opener message
+    const hasReplies = t.notes > 1;
+    const avCol = el('div', 'av-col');
+    avCol.append(avatar(t.from));
+    if (hasReplies) {
+      const lineEl = el('div', 'line');
+      lineEl.setAttribute('aria-hidden', 'true');
+      avCol.append(lineEl);
     }
-    if (t.pending) {
+    const msgBody = el('div', 'msg-body');
+    const who = el('div', 'who');
+    who.append(el('b', '', nameOf(t.from)), el('span', '', 'via ' + first.via), el('span', 'tag', where(t)));
+    who.append(timeEl((t.last_note || first).created_at, short));
+    msgBody.append(who);
+    const noteText = withoutTitle(first.text, t.title);
+    const textStr = (noteText.trim() ? noteText : shownTitle(t.title, first.text)) + (first.truncated ? '…' : '');
+    msgBody.append(md(textStr, 'text'));
+    const openerMsg = el('div', 'msg');
+    openerMsg.append(avCol, msgBody);
+    a.append(openerMsg);
+
+    // Status chips — before the convo so they anchor to the opener
+    if (t.pending || t.status === 'closed') {
       const chips = el('div', 'chips');
-      chips.append(el('span', 'status', 'Needs you'));
-      if (t.kind === 'global') chips.append(el('span', 'label', 'mentioned you'));
-      content.append(chips);
+      if (t.pending) {
+        chips.append(el('span', 'status', 'Needs you'));
+        if (t.kind === 'global') chips.append(el('span', 'label', 'mentioned you'));
+      }
+      if (t.status === 'closed') chips.append(el('span', 'label closed-label', 'Closed'));
+      a.append(chips);
     }
-    if (open) content.append(convo(t, full));
-    a.append(avatar(t.from), content);
+
+    // Expanded conversation
+    a.append(convo(t, full));
+
     a.onclick = (e) => {
       if (e.target.closest('.convo')) return;
-      if (e.target !== title && String(window.getSelection())) return;
+      if (String(window.getSelection())) return;
       toggle(t.id);
+    };
+    a.onkeydown = (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(t.id); }
     };
     return a;
   }
-
-  /// The control of a row: the button of its title.
-  const rowButton = (id) => document.querySelector('[data-id="' + CSS.escape(id) + '"] h3 button');
 
   function toggle(id) {
     if (state.loading) return;
@@ -750,8 +758,8 @@ if (typeof document !== 'undefined') {
       if (!state.convos.has(id)) loadConvo(id);
     }
     renderFeed();
-    const again = rowButton(id);
-    if (again) again.focus({ preventScroll: true });
+    const card = document.querySelector('[data-id="' + CSS.escape(id) + '"]');
+    if (card) card.focus({ preventScroll: true });
   }
 
   /// What a row shows: drawn again only when it changes, so focus, a text selection and an open
@@ -793,11 +801,11 @@ if (typeof document !== 'undefined') {
   function renderFeed(fresh) {
     const feed = $('feed');
     const focused = document.activeElement;
-    const focusedRow = focused && focused.closest ? focused.closest('.row') : null;
-    // Where the focused row sits among the rows shown, in case this redraw drops it.
-    const at = focusedRow ? [...feed.querySelectorAll('.row')].indexOf(focusedRow) : -1;
+    const focusedRow = focused && focused.closest ? focused.closest('.card') : null;
+    // Where the focused card sits among the cards shown, in case this redraw drops it.
+    const at = focusedRow ? [...feed.querySelectorAll('.card')].indexOf(focusedRow) : -1;
     const old = new Map();
-    feed.querySelectorAll('.row').forEach((r) => old.set(r.dataset.id, r));
+    feed.querySelectorAll('.card').forEach((r) => old.set(r.dataset.id, r));
     const rows = (threads) =>
       threads.map((t) => {
         const sig = rowSig(t);
@@ -841,12 +849,12 @@ if (typeof document !== 'undefined') {
     // The row that had focus, if it was drawn again; else the row that took its place, or the one
     // before it, or the feed: focus never falls to the page body.
     if (focusedRow && !focusedRow.isConnected) {
-      const again = rowButton(focusedRow.dataset.id);
+      const again = document.querySelector('[data-id="' + CSS.escape(focusedRow.dataset.id) + '"]');
       if (again) {
         again.focus({ preventScroll: true });
       } else {
-        const near = focusAfter([...feed.querySelectorAll('.row')], at);
-        const next = (near && rowButton(near.dataset.id)) || feed;
+        const near = focusAfter([...feed.querySelectorAll('.card')], at);
+        const next = near || feed;
         next.focus({ preventScroll: true });
       }
     }
