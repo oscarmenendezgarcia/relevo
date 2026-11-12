@@ -388,6 +388,9 @@ if (typeof document !== 'undefined') {
     convoLoading: new Set(),
     convoFailed: new Set(),
     opening: null,
+    // Threads whose Reply needed pill has already grown in, so a refresh doesn't replay it.
+    reached: new Set(),
+    growing: 0,
     lastOk: null,
     lastTry: 0,
     // Each view the person picks is a new generation: an answer for an older one is dropped when
@@ -414,9 +417,18 @@ if (typeof document !== 'undefined') {
     return 'c' + (h % 8);
   }
 
+  // The first character the eye sees: a whole grapheme (an emoji with its skin tone, a letter
+  // with its accent), after any leading spaces.
+  const graphemes = typeof Intl !== 'undefined' && Intl.Segmenter ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
+  function initial(name) {
+    const trimmed = String(name).trim().normalize('NFC');
+    const first = graphemes ? graphemes.segment(trimmed)[Symbol.iterator]().next().value : null;
+    return ((first ? first.segment : Array.from(trimmed)[0]) || '?').toUpperCase();
+  }
+
   function avatar(handle) {
     const name = state.names[handle] || handle;
-    const a = el('div', 'av ' + colour(handle), (Array.from(name)[0] || '?').toUpperCase());
+    const a = el('div', 'av ' + colour(handle), initial(name));
     a.setAttribute('aria-hidden', 'true');
     return a;
   }
@@ -652,8 +664,24 @@ if (typeof document !== 'undefined') {
     return div;
   }
 
+  /// A line of the conversation box in the message grid, under the text column; when the thread
+  /// is pending, the thread line runs past it to the seat.
+  function inColumn(content, pending) {
+    const avCol = el('div', 'av-col');
+    if (pending) {
+      const lineEl = el('div', 'line joined');
+      lineEl.setAttribute('aria-hidden', 'true');
+      avCol.append(lineEl);
+    }
+    const body = el('div', 'msg-body');
+    body.append(content);
+    const msg = el('div', 'msg');
+    msg.append(avCol, body);
+    return msg;
+  }
+
   /// The expanded conversation: replies only (the opener is already in the card's first .msg).
-  function convo(t, full) {
+  function convo(t, full, pending) {
     const box = el('div', 'convo');
     box.id = 'convo-' + t.id;
     if (!full) {
@@ -665,9 +693,9 @@ if (typeof document !== 'undefined') {
         };
         const line = el('div', 'who', "Couldn't load the conversation.");
         line.append(retry);
-        box.append(line);
+        box.append(inColumn(line, pending));
       } else {
-        box.append(el('div', 'who', 'Loading…'));
+        box.append(inColumn(el('div', 'who', 'Loading…'), pending));
       }
       return box;
     }
@@ -675,6 +703,12 @@ if (typeof document !== 'undefined') {
       if (i === 0) return; // opener shown in the card's first .msg
       const avCol = el('div', 'av-col');
       avCol.append(avatar(n.author));
+      // The thread line runs on from each reply to the next, and from the last to your seat
+      if (pending || i < full.notes.length - 1) {
+        const lineEl = el('div', 'line joined');
+        lineEl.setAttribute('aria-hidden', 'true');
+        avCol.append(lineEl);
+      }
       const msgBody = el('div', 'msg-body');
       const who = el('div', 'who');
       who.append(el('b', '', nameOf(n.author)), el('span', '', 'via ' + n.via + (n.context ? ' in ' + n.context : '')), timeEl(n.created_at, noteTime));
@@ -707,8 +741,9 @@ if (typeof document !== 'undefined') {
     const hasReplies = t.notes > 1;
     const avCol = el('div', 'av-col');
     avCol.append(avatar(t.from));
-    if (hasReplies) {
-      const lineEl = el('div', 'line');
+    if (hasReplies || t.pending) {
+      // Joined to what comes next when something is drawn below: the replies, or your seat
+      const lineEl = el('div', t.pending || (open && full) ? 'line joined' : 'line');
       lineEl.setAttribute('aria-hidden', 'true');
       avCol.append(lineEl);
     }
@@ -727,23 +762,55 @@ if (typeof document !== 'undefined') {
       const textStr = (noteText.trim() ? noteText : shownTitle(t.title, first.text)) + (first.truncated ? '…' : '');
       msgBody.append(md(textStr, 'text'));
     }
+    // Closed up, say how many replies the line passes over; open, they are shown instead
+    if (hasReplies) {
+      const n = t.notes - 1;
+      msgBody.append(el('div', 'replies', n.toLocaleString('en') + (n === 1 ? ' reply' : ' replies')));
+    }
+    // Closed label — inside the opener, so the thread line runs past it unbroken
+    if (t.status === 'closed') {
+      const chips = el('div', 'chips');
+      chips.append(el('span', 'label closed-label', 'Closed'));
+      msgBody.append(chips);
+    }
+    // The status for screen readers, early in the row's name: the seat below comes after every
+    // reply when the thread is open, and a long name is cut before it
+    if (t.pending) msgBody.append(el('span', 'sr', ' Reply needed' + (t.kind === 'global' ? ', mentioned you' : '') + '.'));
     const openerMsg = el('div', 'msg');
     openerMsg.append(avCol, msgBody);
     a.append(openerMsg);
 
-    // Status chips — before the convo so they anchor to the opener
-    if (t.pending || t.status === 'closed') {
-      const chips = el('div', 'chips');
-      if (t.pending) {
-        chips.append(el('span', 'status', 'Needs you'));
-        if (t.kind === 'global') chips.append(el('span', 'label', 'mentioned you'));
-      }
-      if (t.status === 'closed') chips.append(el('span', 'label closed-label', 'Closed'));
-      a.append(chips);
-    }
-
     // Expanded conversation — only when there are replies
-    if (hasReplies) a.append(convo(t, full));
+    if (hasReplies) a.append(convo(t, full, t.pending));
+
+    // Your turn: the thread line runs on to an empty seat for you, with your name and the pill.
+    // It grows in the first time the row is drawn.
+    if (t.pending) {
+      const seat = el('div', 'av-col');
+      const ghost = avatar(you());
+      ghost.classList.add('ghost');
+      seat.append(ghost);
+      const body = el('div', 'msg-body');
+      body.append(el('b', '', 'You'), el('span', 'status', 'Reply needed'));
+      if (t.kind === 'global') body.append(el('span', 'label', 'mentioned you'));
+      const turn = el('div', 'msg turn');
+      turn.setAttribute('aria-hidden', 'true'); // said once, in the opener
+      turn.append(seat, body);
+      if (!state.reached.has(t.id)) {
+        state.reached.add(t.id);
+        turn.classList.add('grow');
+        // Several at once grow 50 ms apart, up to 200 ms
+        turn.style.setProperty('--d', Math.min(state.growing++, 4) * 50 + 'ms');
+        // Grown: drop the class, or moving the row to another group (a filter, a tab) would
+        // restart it. The body's animation ends last.
+        body.addEventListener('animationend', (e) => {
+          if (e.target !== body) return;
+          turn.classList.remove('grow');
+          turn.style.removeProperty('--d');
+        });
+      }
+      a.append(turn);
+    }
 
     a.onclick = (e) => {
       if (e.target.closest('.convo')) return;
@@ -809,6 +876,7 @@ if (typeof document !== 'undefined') {
 
   function renderFeed(fresh) {
     const feed = $('feed');
+    state.growing = 0;
     const focused = document.activeElement;
     const focusedRow = focused && focused.closest ? focused.closest('.card') : null;
     // Where the focused card sits among the cards shown, in case this redraw drops it.

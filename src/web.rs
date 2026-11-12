@@ -573,10 +573,38 @@ mod tests {
                 );
             }
         }
+        // The initial in your seat's ring: each avatar colour mixed in sRGB with the text colour,
+        // by --ghost-mix (one per theme), on the page and on the soft tint of a fresh row.
+        let avatars = colours("--c");
+        assert_eq!(avatars.len(), 8, "the eight avatar colours");
+        let mixes: Vec<f64> = STYLE
+            .match_indices("--ghost-mix: ")
+            .map(|(at, m)| {
+                let rest = &STYLE[at + m.len()..];
+                rest[..rest.find('%').unwrap()].parse::<f64>().unwrap() / 100.0
+            })
+            .collect();
+        assert_eq!(mixes.len(), 2, "--ghost-mix, dark and light");
+        let (text, bg, soft) = (colours("--text"), colours("--bg"), colours("--soft"));
+        for theme in 0..2 {
+            for (i, c) in avatars.iter().enumerate() {
+                let m = mixes[theme];
+                let ink = [0, 1, 2].map(|k| c[k] * (1.0 - m) + text[theme][k] * m);
+                for (name, under) in [("--bg", bg[theme]), ("--soft", soft[theme])] {
+                    let (a, b) = (luminance(ink), luminance(under));
+                    let ratio = (a.max(b) + 0.05) / (a.min(b) + 0.05);
+                    assert!(
+                        ratio >= 4.5,
+                        "the seat's initial for .c{i} on {name}, theme {theme}: {ratio:.2}"
+                    );
+                }
+            }
+        }
     }
 
-    /// One word for each thing (docs/web.md): what is pending is *Needs you*, the person is
-    /// *You*, and the group under *Needs you* is *The rest*. The words that were there before are
+    /// One word for each thing (docs/web.md): what is pending is *Needs you* (the filter and the
+    /// group), the pill on a pending thread says what to do, *Reply needed*, the person is *You*,
+    /// and the group under *Needs you* is *The rest*. The words that were there before are
     /// gone from the page, and the tests would not notice them coming back.
     #[test]
     fn the_page_says_the_one_word_for_each_thing() {
@@ -584,9 +612,10 @@ mod tests {
             assert!(!SCRIPT.contains(gone), "the page says {gone}");
         }
         assert!(
-            SCRIPT.contains("el('span', 'status', 'Needs you')"),
+            SCRIPT.contains("el('span', 'status', 'Reply needed')"),
             "the pill"
         );
+        assert!(SCRIPT.contains("['needs', 'Needs you',"), "the group");
         assert!(
             SCRIPT.contains("['rest', 'The rest',"),
             "the group under Needs you"

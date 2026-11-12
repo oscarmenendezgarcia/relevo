@@ -4,6 +4,8 @@
   color-scheme: dark light;
   --bg: #0b0c0f; --text: #e7e9ee; --body: #b9bec8; --faint: #7f8896; --line: #1c1f26;
   --soft: #14161b; --need: #f5c451; --mention: #a9bcff; --focus: #7c9cff;
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ghost-mix: 25%;
   --pill: #f5c451; --pill-text: #1a1405; --pill-dot: rgba(26, 20, 5, .7);
   --tag: #c9b8ff; --tag-bg: #1f1b2c;
   --thread-line: color-mix(in srgb, var(--faint) 35%, transparent);
@@ -15,6 +17,7 @@
     --bg: #ffffff; --text: #15161a; --body: #4a5160; --faint: #616a78; --line: #eceef2;
     --soft: #f5f6f8; --need: #9e6400; --mention: #3b55d9; --focus: #4f6bed;
     --pill: #fde4a1; --pill-text: #5c3a00; --pill-dot: #b07200;
+    --ghost-mix: 55%;
     --tag: #5b3fc4; --tag-bg: #f1ecff;
   }
 }
@@ -68,15 +71,18 @@ section + section { margin-top: 32px; }
 .av-col { display: flex; flex-direction: column; align-items: center; }
 .av {
   width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center;
-  font-size: 12px; font-weight: 700; color: #0b0c0f; flex-shrink: 0;
+  font-size: 12px; font-weight: 700; color: #0b0c0f; flex-shrink: 0; background: var(--c);
 }
-.c0 { background: #93c5fd; } .c1 { background: #f9a8d4; } .c2 { background: #86efac; }
-.c3 { background: #c4b5fd; } .c4 { background: #fcd34d; } .c5 { background: #fdba74; }
-.c6 { background: #67e8f9; } .c7 { background: #fca5a5; }
+.c0 { --c: #93c5fd; } .c1 { --c: #f9a8d4; } .c2 { --c: #86efac; }
+.c3 { --c: #c4b5fd; } .c4 { --c: #fcd34d; } .c5 { --c: #fdba74; }
+.c6 { --c: #67e8f9; } .c7 { --c: #fca5a5; }
 /* Connector stub — indicates there are replies; stretches to fill when open */
 .av-col .line {
   flex: 1; width: 2px; background: var(--thread-line); margin-top: 4px; min-height: 14px; border-radius: 1px;
 }
+
+/* Joined: runs through the 12px between messages and stops 4px short of the next avatar */
+.av-col .line.joined { margin-bottom: -8px; }
 
 /* Message body */
 .msg-body { min-width: 0; overflow-wrap: anywhere; }
@@ -92,13 +98,40 @@ section + section { margin-top: 32px; }
 }
 .text p { display: inline; margin: 0; }
 
+.replies { margin-top: 4px; font-size: 13px; color: var(--faint); }
+.card.open .replies { display: none; }
+
 /* Closed threads */
 .closed .av { opacity: .62; }
 .closed .msg:first-child .who b { color: var(--body); }
 .closed .msg:first-child .text { color: var(--faint); }
 
 /* The three kinds of mark: status pill, tag (where it went), labels */
-.chips { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
+.chips { display: flex; gap: 6px; margin-top: 6px; align-items: center; }
+/* Your turn: the thread line runs on to an empty seat for you, a dotted ring with your initial,
+   as if you were about to write; your name and the pill beside it */
+/* 13px: with the ring's -1px margin, the line stops 4px short of it, as at every avatar */
+.msg.turn { margin-top: 13px; }
+.av.ghost {
+  /* The avatar colour, pulled towards the text so the initial is 4.5:1 in both themes */
+  --ink: color-mix(in srgb, var(--c), var(--text) var(--ghost-mix));
+  background: transparent; color: var(--ink); border: 2px dotted var(--ink); box-sizing: border-box;
+  /* A dotted ring reads smaller than a filled disc of the same size: 2px more, same centre */
+  width: 30px; height: 30px; margin: -1px;
+}
+/* One line centred on the ring; on a narrow screen it wraps and grows, never spills */
+.turn .msg-body {
+  display: flex; flex-wrap: wrap; align-items: center; align-content: center;
+  min-height: 28px; column-gap: 7px; row-gap: 2px;
+}
+.turn .status, .turn .label { white-space: nowrap; }
+.turn .msg-body b { color: var(--faint); font-weight: 600; font-size: 15px; }
+/* Grows in once: the seat appears at the end of the line, then your name and the pill */
+.turn.grow .ghost { animation: seat 160ms var(--ease-out) var(--d, 0ms) both; }
+.turn.grow .msg-body { animation: arrive 200ms var(--ease-out) calc(var(--d, 0ms) + 100ms) both; }
+@keyframes seat { from { opacity: 0; transform: scale(.9); } }
+@keyframes arrive { from { opacity: 0; transform: translateX(-4px); } }
+@keyframes fade { from { opacity: 0; } }
 .status {
   display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600;
   padding: 2px 10px 2px 8px; border-radius: 999px; background: var(--pill); color: var(--pill-text);
@@ -142,6 +175,8 @@ code { font-family: var(--mono); font-size: 12.5px; background: var(--soft); pad
 @media (prefers-reduced-motion: reduce) {
   .card.open .convo.opening { animation: none; }
   .card.fresh { animation: none; }
+  /* Gentler, not none: the seat, your name and the pill just fade in */
+  .turn.grow .ghost, .turn.grow .msg-body { animation: fade 150ms ease-out both; }
 }
 @media (hover: hover) {
   .seg button:hover, .filters button:hover, .more:hover, .foot:hover { color: var(--text); }
