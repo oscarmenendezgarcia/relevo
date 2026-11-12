@@ -734,7 +734,8 @@ async fn an_adapter_registers_itself_and_is_updated_from_then_on() {
         saved.adapters,
         vec![Adapter {
             kind: "pi".into(),
-            path: pi.clone()
+            // macOS resolves /var → /private/var; canonicalize both sides.
+            path: pi.canonicalize().unwrap_or_else(|_| pi.clone())
         }]
     );
     // The token and the rest of the file stay as they were.
@@ -897,7 +898,9 @@ fn have(program: &str) -> bool {
 }
 
 /// deploy/make-dist.sh with a throwaway key made by openssl: what it signs, a client checks.
+/// macOS ships bash 3.2 and BSD find/stat, but make-dist.sh needs GNU tools: skip there.
 #[tokio::test]
+#[cfg_attr(target_os = "macos", ignore)]
 async fn the_dist_the_release_makes_is_what_clients_install() {
     if !have("openssl") {
         eprintln!("skipped: no openssl");

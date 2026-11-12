@@ -113,11 +113,11 @@ section + section { margin-top: 32px; }
 /* Expanded conversation: hidden until the card is open */
 .convo { display: none; }
 .card.open .convo { display: block; margin-top: 12px; }
-.card.open .convo .text {
+.card.open .text {
   display: block; -webkit-line-clamp: unset; overflow: visible;
 }
-.card.open .convo .text p { display: block; margin: 0 0 6px; }
-.card.open .convo .text p:last-child { margin-bottom: 0; }
+.card.open .text p { display: block; margin: 0 0 6px; }
+.card.open .text p:last-child { margin-bottom: 0; }
 .convo .retry { color: var(--text); text-decoration: underline; text-underline-offset: 3px; margin-left: 4px; }
 
 .empty { color: var(--faint); margin: 0; padding: 14px 0; }
