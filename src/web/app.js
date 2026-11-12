@@ -694,7 +694,7 @@ if (typeof document !== 'undefined') {
   function row(t) {
     const open = state.open.has(t.id);
     const full = open ? state.convos.get(t.id) : null;
-    const first = t.first_note;
+    const first = (full && full.notes && full.notes[0]) ? full.notes[0] : t.first_note;
     const cls = 'card' + (t.status === 'closed' ? ' closed' : '') + (open ? ' open' : '');
     const a = el('article', cls);
     a.dataset.id = t.id;
@@ -718,8 +718,15 @@ if (typeof document !== 'undefined') {
     who.append(timeEl((t.last_note || first).created_at, short));
     msgBody.append(who);
     const noteText = withoutTitle(first.text, t.title);
-    const textStr = (noteText.trim() ? noteText : shownTitle(t.title, first.text)) + (first.truncated ? '…' : '');
-    msgBody.append(md(textStr, 'text'));
+    if (open) {
+      const bodyText = noteText.trim() ? noteText : (t.title ? t.title + '\n\n' + first.text : first.text);
+      const noteEl = renderNote(bodyText, document);
+      noteEl.classList.add('text');
+      msgBody.append(noteEl);
+    } else {
+      const textStr = (noteText.trim() ? noteText : shownTitle(t.title, first.text)) + (first.truncated ? '…' : '');
+      msgBody.append(md(textStr, 'text'));
+    }
     const openerMsg = el('div', 'msg');
     openerMsg.append(avCol, msgBody);
     a.append(openerMsg);
@@ -756,7 +763,8 @@ if (typeof document !== 'undefined') {
       state.open.add(id);
       state.opening = id;
       const t = [...state.threads, ...state.needs].find((t) => t.id === id);
-      if ((!t || t.notes > 1) && !state.convos.has(id)) loadConvo(id);
+      const needsFull = !t || t.notes > 1 || (t.first_note && t.first_note.truncated);
+      if (needsFull && !state.convos.has(id)) loadConvo(id);
     }
     renderFeed();
     const card = document.querySelector('[data-id="' + CSS.escape(id) + '"]');

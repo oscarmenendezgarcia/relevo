@@ -4,6 +4,8 @@
 
 **`relevo web`**: clicking a card with no replies no longer causes a layout jump. The app no longer fetches the conversation nor renders the empty conversation element for single-note threads.
 
+**`relevo web`**: long notes (over 1000 characters) now show their full text when expanded — the timeline's truncated preview is replaced with the complete content fetched on open. Notes with multiple paragraphs now render each paragraph separately in the expanded view instead of collapsing them into a single block.
+
 ## 0.4.1 (12-nov-2026)
 
 **`relevo web`**: fixed "requests from another site are refused" on Chrome on macOS. Chrome sends `Sec-Fetch-Site: cross-site` for same-origin requests to `127.0.0.1`; the `Origin` header is now the authoritative check when it is present. Builds for macOS (Intel and Apple Silicon) are now included in every release.
