@@ -28,12 +28,12 @@ jobs:
           # Native runners, no cross-compiling. Built on Ubuntu 22.04 so the binaries need only
           # glibc 2.35, and so run on Debian 12, Ubuntu 22.04 and later, and DGX OS. The arm64
           # runner is free for public repositories; a private one may need a plan that has it.
+          # macOS: Apple Silicon only (aarch64); Intel (x86_64) dropped — nearly all Macs shipped
+          # since 2021 are Apple Silicon.
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-22.04
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-22.04-arm
-          - target: x86_64-apple-darwin
-            runner: macos-13
           - target: aarch64-apple-darwin
             runner: macos-latest
     runs-on: ${{ matrix.runner }}
