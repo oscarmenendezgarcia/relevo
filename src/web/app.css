@@ -5,6 +5,7 @@
   --bg: #0b0c0f; --text: #e7e9ee; --body: #b9bec8; --faint: #7f8896; --line: #1c1f26;
   --soft: #14161b; --need: #f5c451; --mention: #a9bcff; --focus: #7c9cff;
   --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ghost-mix: 25%;
   --pill: #f5c451; --pill-text: #1a1405; --pill-dot: rgba(26, 20, 5, .7);
   --tag: #c9b8ff; --tag-bg: #1f1b2c;
   --thread-line: color-mix(in srgb, var(--faint) 35%, transparent);
@@ -16,6 +17,7 @@
     --bg: #ffffff; --text: #15161a; --body: #4a5160; --faint: #616a78; --line: #eceef2;
     --soft: #f5f6f8; --need: #9e6400; --mention: #3b55d9; --focus: #4f6bed;
     --pill: #fde4a1; --pill-text: #5c3a00; --pill-dot: #b07200;
+    --ghost-mix: 55%;
     --tag: #5b3fc4; --tag-bg: #f1ecff;
   }
 }
@@ -105,17 +107,24 @@ section + section { margin-top: 32px; }
 .closed .msg:first-child .text { color: var(--faint); }
 
 /* The three kinds of mark: status pill, tag (where it went), labels */
-.chips { display: flex; gap: 6px; margin-top: 8px; margin-left: 40px; align-items: center; }
+.chips { display: flex; gap: 6px; margin-top: 6px; align-items: center; }
 /* Your turn: the thread line runs on to an empty seat for you, a dotted ring with your initial,
    as if you were about to write; your name and the pill beside it */
-.msg.turn { margin-top: 12px; }
+/* 13px: with the ring's -1px margin, the line stops 4px short of it, as at every avatar */
+.msg.turn { margin-top: 13px; }
 .av.ghost {
-  --ink: color-mix(in srgb, var(--c), var(--text) 25%);
+  /* The avatar colour, pulled towards the text so the initial is 4.5:1 in both themes */
+  --ink: color-mix(in srgb, var(--c), var(--text) var(--ghost-mix));
   background: transparent; color: var(--ink); border: 2px dotted var(--ink); box-sizing: border-box;
   /* A dotted ring reads smaller than a filled disc of the same size: 2px more, same centre */
   width: 30px; height: 30px; margin: -1px;
 }
-.turn .msg-body { display: flex; align-items: center; gap: 8px; align-self: end; height: 28px; flex-wrap: wrap; }
+/* One line centred on the ring; on a narrow screen it wraps and grows, never spills */
+.turn .msg-body {
+  display: flex; flex-wrap: wrap; align-items: center; align-content: center;
+  min-height: 28px; column-gap: 7px; row-gap: 2px;
+}
+.turn .status, .turn .label { white-space: nowrap; }
 .turn .msg-body b { color: var(--faint); font-weight: 600; font-size: 15px; }
 /* Grows in once: the seat appears at the end of the line, then your name and the pill */
 .turn.grow .ghost { animation: seat 160ms var(--ease-out) var(--d, 0ms) both; }
