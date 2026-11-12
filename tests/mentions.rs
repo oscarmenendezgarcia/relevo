@@ -466,6 +466,35 @@ async fn an_unknown_name_fails_and_never_falls_back_to_the_global_board() {
 }
 
 #[tokio::test]
+async fn an_attempt_at_a_name_is_refused_with_the_whole_run_named() {
+    let s = server(&["ana", "bob"], &[("backend", &["bob"])]);
+    let agent = s.agent("ana", "term-0001", "");
+    let long = "a".repeat(33);
+    // An `@` that is plainly an attempt at a name never falls back to the board: the send refuses,
+    // naming the whole run (`josé`, not `jos`).
+    for (text, run) in [
+        ("@a: deploy?", "a"),
+        (&format!("@{long} deploy?"), long.as_str()),
+        ("@josé deploy?", "josé"),
+        ("@user@mastodon.social deploy?", "user@mastodon.social"),
+    ] {
+        let (status, v) = agent.send(json!({ "text": text })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+        assert_eq!(code(&v), "UNKNOWN_PERSON", "{text}: {v}");
+        assert_eq!(v["error"]["unknown"], json!([run]), "{text}: {v}");
+        assert!(message(&v).contains(&format!("@{run}")), "{text}: {v}");
+    }
+    assert_eq!(s.notes(), 0);
+    // An `@` followed by a digit, a space or nothing is plain text, and `@@ana` mentions nobody:
+    // a note with nothing else goes to the global board.
+    for text in ["@1", "@2024", "@ ", "check @ this", "@@ana"] {
+        let v = s.ok("ana", json!({ "text": text })).await;
+        assert_eq!(v["kind"], "global", "{text}: {v}");
+        assert_eq!(v["to"], json!({ "people": [], "teams": [] }), "{text}: {v}");
+    }
+}
+
+#[tokio::test]
 async fn malformed_mentions_are_bad_requests_before_the_session_counts() {
     let s = server(&["ana", "bob"], &[("backend", &["bob"])]);
     let twenty_one: String = (0..21).map(|i| format!("@p{i:02} ")).collect();
@@ -475,6 +504,8 @@ async fn malformed_mentions_are_bad_requests_before_the_session_counts() {
         "@bob/pagos @bob/front",
         "@bob/Pagos@ deploy",
         "@bob/.x",
+        // A mention of yourself is ignored, but its context is checked like anyone else's.
+        "@ana/.x",
         twenty_one.as_str(),
     ] {
         let (status, v) = agent.send(json!({ "text": text })).await;
@@ -870,4 +901,38 @@ async fn a_reply_from_a_client_before_0_4_is_written_as_0_3_wrote_it() {
     let (status, v) = odd.send(json!({ "thread": thread, "text": "hi" })).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(message(&v).contains("Relevo-Mentions"), "{v}");
+}
+
+#[tokio::test]
+async fn the_per_minute_limit_fires_even_with_a_mention() {
+    let s = server(&["ana", "bob", "carl"], &[]);
+    // Open 3 threads, 20 replies each: 60 notes, one short of the per-minute limit.
+    for _ in 0..3 {
+        let thread = s.open("ana", "@bob start").await;
+        for i in 1..20 {
+            s.ok("ana", json!({ "thread": thread, "text": i.to_string() }))
+                .await;
+        }
+    }
+    // The 61st is a note with a mention: the mention does not buy a free pass.
+    let (status, v) = s.send("ana", json!({ "text": "@carl 61st" })).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(code(&v), "RATE_LIMITED");
+}
+
+#[tokio::test]
+async fn the_per_thread_limit_fires_even_with_a_mention() {
+    let s = server(&["ana", "bob", "carl"], &[]);
+    // Reply 20 times in one thread: exactly at the per-thread-per-hour limit.
+    let thread = s.open("ana", "@bob first").await;
+    for i in 1..20 {
+        s.ok("bob", json!({ "thread": thread, "text": i.to_string() }))
+            .await;
+    }
+    // The 21st reply has a mention: still refused with THREAD_BUSY.
+    let (status, v) = s
+        .send("bob", json!({ "thread": thread, "text": "@carl 21st" }))
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(code(&v), "THREAD_BUSY");
 }

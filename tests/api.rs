@@ -1713,6 +1713,40 @@ async fn a_request_counts_as_seen_once_past_its_own_parameter_checks() {
     }
 }
 
+#[tokio::test]
+async fn a_fresh_row_that_names_nobody_starts_no_session_nowhere() {
+    let t = team(&["ana", "bob"]);
+    let id = t
+        .ok("ana", json!({ "to": ["bob"], "text": "the refunds flag" }))
+        .await;
+    t.ok("bob", json!({ "thread": id, "text": "on it" })).await;
+    // Ana's session has Bob's note but she has not handled it: the thread is fresh for her.
+    assert!(thread_ids(&t.inbox("ana").await).contains(&id));
+    // A row that should not exist: fresh, and naming nobody. In SQLite `max(a, NULL)` is NULL, and
+    // a session started nowhere would never see its person's threads again.
+    t.app
+        .db()
+        .execute(
+            "UPDATE participants SET named_seq = NULL WHERE thread_id = ?1 AND person_id = \
+             (SELECT id FROM people WHERE handle = 'ana')",
+            [&id],
+        )
+        .unwrap();
+    let new = t.agent("ana", "term-0001", "");
+    new.inbox().await;
+    let nowhere: i64 = t
+        .app
+        .db()
+        .query_row(
+            "SELECT count(*) FROM session_threads WHERE delivered_seq IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(nowhere, 0);
+    assert!(!thread_ids(&new.inbox().await).contains(&id));
+}
+
 // ---------- routing, claims and delivery per session ----------
 
 /// The texts of the new notes of `id` in an inbox, or `None` when it does not show `id`.

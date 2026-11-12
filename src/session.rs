@@ -124,14 +124,17 @@ fn start(conn: &Connection, id: i64, person: i64) -> Result<(), ApiError> {
 
 /// The rows a new session `?1` of person `?2` starts with, read from an index that holds only
 /// fresh threads: it costs nothing for a person without any. It starts where the person's pending
-/// notes do (`api::FLOOR`): after what they handled, and from the note that named them on.
+/// notes do (`api::FLOOR`): after what they handled, and from the note that named them on. Only a
+/// named participant is ever fresh, but the starting point is `max` of what may be `NULL`, and in
+/// SQLite `max(a, NULL)` is `NULL`: the name is said here too, so that one row that should not
+/// exist cannot leave a new session of this person started nowhere.
 const START_SQL: &str = "
 INSERT INTO session_threads (session_id, thread_id, person_id, delivered_seq, has_new, waiting,
                              last_seq, claimed_by, context, person_inbox, resolved)
 SELECT ?1, thread_id, person_id, max(coalesce(handled_seq, 0), named_seq - 1), 1,
        waiting, last_seq, claimed_by, context, inbox, resolved
 FROM participants INDEXED BY participants_fresh
-WHERE person_id = ?2 AND fresh = 1";
+WHERE person_id = ?2 AND fresh = 1 AND named_seq IS NOT NULL";
 
 /// The caller's session as it is recorded, without recording anything: for a waiting request
 /// looking again. `None` when it was forgotten meanwhile.

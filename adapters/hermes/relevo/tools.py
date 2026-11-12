@@ -70,8 +70,11 @@ def relevo_send(args: dict, **_: Any) -> str:
 
     def go() -> str:
         payload: dict[str, Any] = {}
+        # The key whenever it was given, empty string included: an empty `thread` is no thread, and
+        # the server is the one that says so (`relevo mcp` and pi pass it through the same way).
+        # Dropping it here would open a new thread, and a text with no @ would reach everyone.
         thread = args.get("thread")
-        if thread:
+        if thread is not None:
             payload["thread"] = str(thread)
         if args.get("text") is not None:
             payload["text"] = str(args["text"])
@@ -82,7 +85,7 @@ def relevo_send(args: dict, **_: Any) -> str:
         if args.get("done"):
             payload["done"] = True
             return client.describe_done(api.send(payload))
-        return client.describe_send(api.send(payload), opened=not thread)
+        return client.describe_send(api.send(payload), opened=thread is None)
 
     try:
         api = _api()
