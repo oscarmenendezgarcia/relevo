@@ -4,7 +4,7 @@
 'use strict';
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { parseNote, parseInline, toDom, preview, excerpt, withoutTitle, shownTitle, pickKey, askShown, focusAfter, addedThreads, short, noteTime, ago, absolute } = require(
+const { parseNote, parseInline, toDom, preview, excerpt, withoutTitle, shownTitle, openerText, pickKey, askShown, focusAfter, addedThreads, short, noteTime, ago, absolute } = require(
   path.join(__dirname, '..', '..', 'src', 'web', 'app.js')
 );
 
@@ -154,6 +154,19 @@ check('the title line is not shown twice', () => {
   assert.equal(withoutTitle(long + '\nbody', title), 'body');
   assert.equal(withoutTitle('', ''), '');
   assert.equal(withoutTitle('body', ''), 'body');
+});
+
+check('the opener: its text once, closed up or open', () => {
+  // A note that is only its title line: shown once, never title + note.
+  const only = '@pedro Is the embeddings service in production?';
+  assert.equal(openerText(only, only, false, true), only);
+  assert.equal(openerText(only, only, false, false), 'Is the embeddings service in production?');
+  // A title line and a body: closed up the body, open the whole note.
+  const both = '@oscar Refunds contract\nI need to know whether the 422 breaks anything.';
+  assert.equal(openerText(both, '@oscar Refunds contract', false, false), 'I need to know whether the 422 breaks anything.');
+  assert.equal(openerText(both, '@oscar Refunds contract', false, true), both);
+  // Cut by the timeline: an ellipsis closed up; open, the full note came from the thread.
+  assert.equal(openerText(both, '@oscar Refunds contract', true, false), 'I need to know whether the 422 breaks anything.…');
 });
 
 check('titles: cut ones end in an ellipsis, leading mentions go', () => {
