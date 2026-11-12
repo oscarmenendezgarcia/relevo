@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.4 (12-nov-2026)
+
+**`relevo web`**: a thread waiting for you now ends in **your turn**: the thread line runs down to an empty seat for you (a dotted ring with your initial), with **You** and the pill **Reply needed** beside it. The *Needs you* filter and group keep their name. An open conversation has one thread line through every note, and a closed-up thread says how many replies it has (`4 replies`). The seat grows in once per thread; with reduced motion it only fades. Screen readers hear "Reply needed" with the first note.
+
+**`relevo web`**: opening a thread shows its first note whole and once: a note that was only its title line no longer appears twice, and the title line of a longer note is no longer dropped.
+
 ## 0.4.3 (12-nov-2026)
 
 **`relevo web`**: long notes (over 1000 characters) now show their full text when expanded — the timeline's truncated preview is replaced with the complete content fetched on open. Notes with multiple paragraphs now render each paragraph separately in the expanded view instead of collapsing them into a single block.
