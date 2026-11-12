@@ -305,17 +305,22 @@ fn check(web: &Web, req: &Request) -> Result<Option<String>, &'static str> {
     if !ours.iter().any(|o| o == host) {
         return Err("this server answers to 127.0.0.1 and localhost only");
     }
-    if let Some(origin) = req.headers().get(header::ORIGIN)
-        && origin.as_bytes() != format!("http://{host}").as_bytes()
-    {
-        return Err("requests from other pages are refused");
-    }
+    let origin_ok = match req.headers().get(header::ORIGIN) {
+        Some(origin) if origin.as_bytes() != format!("http://{host}").as_bytes() => {
+            return Err("requests from other pages are refused");
+        }
+        Some(_) => true,
+        None => false,
+    };
     // The browser says where the request came from. Only `cross-site` is refused: a request with
-    // no such header (an old browser, a tool of this user's) is refused for nothing.
-    if req
-        .headers()
-        .get("sec-fetch-site")
-        .is_some_and(|site| site.as_bytes() == b"cross-site")
+    // no such header (an old browser, a tool of this user's) is refused for nothing. When Origin
+    // already matched above, skip this check: Safari on macOS sends `cross-site` for same-origin
+    // requests to 127.0.0.1, and Origin is the more reliable signal.
+    if !origin_ok
+        && req
+            .headers()
+            .get("sec-fetch-site")
+            .is_some_and(|site| site.as_bytes() == b"cross-site")
     {
         return Err("requests from another site are refused");
     }
