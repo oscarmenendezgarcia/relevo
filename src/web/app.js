@@ -294,14 +294,28 @@ function addedThreads(known, threads) {
   return threads.filter((t) => !known.has(t.id));
 }
 
+/// One @mention at the start of a note (a handle, maybe with a context), and what separates it
+/// from the next.
+const LEADING_MENTION = /^@[A-Za-z0-9][A-Za-z0-9_-]{1,31}(?:\/[A-Za-z0-9._@/-]*)?[\s,:;]*/;
+/// Mentions a closed-up row shows before it says '+N' for the rest of a leading run.
+const MENTIONS_SHOWN = 3;
+
 /// A note as its row shows it. Open: the whole note. Closed up: the note from its first line on,
 /// @mentions and all, as one paragraph the page clamps to two lines, without a heading's #, and
-/// ending in '…' when the server cut it.
+/// ending in '…' when the server cut it; a run of more than three @mentions it starts with shows
+/// the first three and '+N', so the two lines still say what it is about.
 function rowText(text, truncated, open) {
   if (open) return text;
   const { lines, first, line } = titleLine(text);
   if (first < 0) return truncated ? '…' : '';
-  return [line].concat(lines.slice(first + 1)).join('\n') + (truncated ? '…' : '');
+  let rest = [line].concat(lines.slice(first + 1)).join('\n');
+  const run = [];
+  for (let m; (m = rest.match(LEADING_MENTION)); rest = rest.slice(m[0].length)) run.push(m[0].trim().replace(/[,:;]+$/, ''));
+  const head = run.length > MENTIONS_SHOWN
+    ? run.slice(0, MENTIONS_SHOWN).join(' ') + ' +' + (run.length - MENTIONS_SHOWN) + (rest ? ' ' : '')
+    : null;
+  const shown = head === null ? [line].concat(lines.slice(first + 1)).join('\n') : head + rest;
+  return shown + (truncated ? '…' : '');
 }
 
 if (typeof module === 'object' && module.exports) {
@@ -948,6 +962,10 @@ if (typeof document !== 'undefined') {
       $(id).tabIndex = on ? 0 : -1;
       if (on) $('feed').setAttribute('aria-labelledby', id);
     }
+    // An amber dot, no number, when something waits for the person: seen from Everyone too
+    const n = state.data ? state.data.counts.waiting : 0;
+    $('for-you-dot').hidden = n === 0;
+    $('for-you-sr').textContent = n > 0 ? ', ' + n + ' need you' : '';
   }
 
   /// For you's filters, drawn again only when they change; the one focused keeps the focus.

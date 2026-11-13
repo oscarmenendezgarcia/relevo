@@ -160,6 +160,14 @@ check('a row: the note from its first line, once, closed up or open', () => {
   assert.equal(rowText('# Refunds\nbody', false, false), 'Refunds\nbody');
   assert.equal(rowText('\n\n@ana hi', false, false), '@ana hi');
   assert.equal(rowText('\n\n', false, false), '');
+  // A long run of leading mentions: three and +N closed up, all of them open; three or fewer stay.
+  const many = '@ana @luis, @pedro/api @sam @raquel: can you all check the 422?';
+  assert.equal(rowText(many, false, false), '@ana @luis @pedro/api +2 can you all check the 422?');
+  assert.equal(rowText(many, false, true), many);
+  assert.equal(rowText('@ana @luis @pedro hi', false, false), '@ana @luis @pedro hi');
+  assert.equal(rowText('@a1 @b2 @c3 @d4', false, false), '@a1 @b2 @c3 +1');
+  // A mention later in the text is left alone.
+  assert.equal(rowText('hi @ana @luis @pedro @sam', false, false), 'hi @ana @luis @pedro @sam');
 });
 
 check('the key: from the address, else what the tab kept', () => {
