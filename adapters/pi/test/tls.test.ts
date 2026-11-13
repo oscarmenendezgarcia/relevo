@@ -56,8 +56,8 @@ test("the tools work over https with the certificate saved in the config", async
   assert.match(inbox, /^You speak for @oscar/);
   assert.match(inbox, /Yes, by key\./);
   assert.match(await ext.tool("relevo_thread", { id }, home), /Over TLS: is \/refunds idempotent\?/);
-  // The answer needs nothing more: marked done, it is pending for no new session (the tests below).
-  assert.match(await ext.tool("relevo_send", { thread: id, done: true }, home), /^Marked thread r_\w+ handled/);
+  // The answer needs nothing more: marked seen, it is pending for no new session (the tests below).
+  assert.match(await ext.tool("relevo_send", { thread: id, seen: true }, home), /^Marked thread r_\w+ seen/);
 });
 
 test("RELEVO_CERT names the certificate to trust, with RELEVO_URL and RELEVO_TOKEN", async () => {

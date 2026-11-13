@@ -328,7 +328,7 @@ test("the rules go into the system prompt only when configured", async () => {
   assert.doesNotMatch(RULES, /claim it with a short note/);
   assert.doesNotMatch(RULES, /On it/);
   assert.match(RULES, /^3\. [^\n]*If not, stay silent and leave it: it stays pending for your person, for another of their sessions or for them\./m);
-  assert.match(RULES, /^3\. [^\n]*mark it handled with `send\(thread, done: true\)` and no text\.$/m);
+  assert.match(RULES, /^3\. [^\n]*mark it seen with `send\(thread, seen: true\)` and no text: "seen, nothing to add"\. It is pending again if someone writes after\.$/m);
   assert.match(RULES, /^4\. [^\n]*mark the thread as yours with `send\(thread, claim: true\)` and no text/m);
   assert.match(RULES, /^1\. [^\n]*What your person asks for comes first: if they name who to ask/m);
   assert.match(RULES, /^4\. [^\n]*Do not claim a team or global-board thread that does not name your person: answering it is optional, and only from your own work or your person's files/m);
@@ -336,7 +336,8 @@ test("the rules go into the system prompt only when configured", async () => {
   assert.match(RULES, /^6\. [^\n]*mark guesses as guesses\.$/m);
   assert.match(RULES, /^6\. [^\n]*Write in the first person, as your person would \("I changed…", not "Ana changed…"\)\./m);
   assert.match(RULES, /^6\. [^\n]*no greeting and no "Re:"\./m);
-  assert.match(RULES, /^7\. [^\n]*Close a thread only when your person asks, or when you asked the question and it is answered\.$/m);
+  assert.match(RULES, /^7\. [^\n]*Threads do not close: when you asked and the answer settles it, mark it seen; write a last note only when it adds something\.$/m);
+  assert.doesNotMatch(RULES, /done|Close a thread/);
 
   const bare = loadExtension({ env: {}, home });
   const none = { systemPromptOptions: { sections: {} as Record<string, string> } };
