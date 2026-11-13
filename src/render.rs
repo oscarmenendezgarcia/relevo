@@ -265,7 +265,7 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
         let _ = write!(
             out,
             "Pending for your person: they have not handled it yet. If it is for you and needs \
-             nothing, mark it handled with send(thread=\"{id}\", done=true) and no text. "
+             nothing, mark it seen with send(thread=\"{id}\", seen=true) and no text. "
         );
     }
     // Who of the person has it, and since when: only `thread`'s delivery says.
@@ -309,7 +309,7 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
             let _ = writeln!(out, "{}.", claim_state(s(&h["handle"]), h));
         }
     }
-    if shared && !names_you(t) && s(&t["status"]) == "open" && Some(opener) != me {
+    if shared && !names_you(t) && Some(opener) != me {
         out.push_str(
             "It does not name your person, so answering is optional: answer only from your own \
              work or your person's files (repeating someone's `about` line, or guessing who might \
@@ -502,7 +502,7 @@ pub fn inbox(v: &Value, me: Option<&str>) -> String {
         let _ = write!(
             out,
             "\n{more} more thread(s) not shown: older ones, also pending for your person. Calling \
-             inbox again shows the same threads; answering, closing or marking done those above \
+             inbox again shows the same threads; answering or marking seen those above \
              makes room.\n"
         );
     }
@@ -526,22 +526,24 @@ pub fn pushed(threads: &[Value], me: Option<&str>) -> String {
     out
 }
 
-/// What `send` with `done` did. `received`: whether any note of the thread reached this session
-/// (as far as the client knows); `done` handles only those.
-pub fn done(v: &Value, received: bool) -> String {
+/// What `send` with `seen` (or the deprecated `done`, or `close` without text) did. `received`:
+/// whether any note of the thread reached this session (as far as the client knows); `seen`
+/// handles only those.
+pub fn seen(v: &Value, received: bool) -> String {
     let id = s(&v["thread"]);
     let mut out = if received {
         format!(
-            "Marked thread {id} handled, up to the notes this session has received: those are no \
-             longer pending for your person. Any note this session has not received yet, and any \
-             new one by someone else, stays pending. Nothing was written, and nothing claimed."
+            "Marked thread {id} seen, up to the notes this session has received: those are no \
+             longer pending for your person. Any note this session has not received yet stays \
+             pending, and a new one by someone else makes it pending again. Nothing was written, \
+             and this session does not hold the thread."
         )
     } else {
         format!(
-            "No note of thread {id} has reached this session, so `done` may have handled nothing: \
+            "No note of thread {id} has reached this session, so `seen` may have handled nothing: \
              a note this session has not received stays pending for your person. Read it first \
-             with thread(id=\"{id}\"), then mark it done if it needs nothing. Nothing was \
-             written, and nothing claimed."
+             with thread(id=\"{id}\"), then mark it seen if it needs nothing. Nothing was \
+             written, and this session does not hold the thread."
         )
     };
     if v["claimed"] == "other-session" {
@@ -600,14 +602,6 @@ fn whom(v: &Value, opened: bool) -> String {
 pub fn sent(v: &Value, opened: bool) -> String {
     let id = s(&v["thread"]);
     let whom = whom(v, opened);
-    // Closing releases every claim: a closed thread is nobody's, so there is nothing to hold or
-    // step aside from.
-    if s(&v["status"]) == "closed" {
-        return match v["note"].as_str() {
-            Some(note) => format!("{whom}Written: note {note} in thread {id}, which is closed."),
-            None => format!("Closed thread {id}."),
-        };
-    }
     let mut out = match v["note"].as_str() {
         Some(note) => format!("{whom}Written: note {note} in thread {id}, which is open."),
         // A claim without text: a state, nothing written.
@@ -721,11 +715,8 @@ mod tests {
         assert!(out.contains("is not an answer); do not claim it."), "{out}");
         assert!(!out.contains("claim=true"), "{out}");
         assert!(!out.contains("Pending for your person"), "{out}");
-        // Not to the one who opened it, nor once closed.
+        // Not to the one who opened it.
         assert!(!thread(&t, Some("ana")).contains("answering is optional"));
-        let mut closed = t.clone();
-        closed["status"] = "closed".into();
-        assert!(!thread(&closed, Some("oscar")).contains("answering is optional"));
         // The global board, the same.
         let mut global = t.clone();
         global["kind"] = "global".into();
@@ -837,7 +828,7 @@ mod tests {
         assert!(
             out.contains(
                 "Pending for your person: they have not handled it yet. If it is for you and \
-                 needs nothing, mark it handled with send(thread=\"r_1\", done=true) and no text. "
+                 needs nothing, mark it seen with send(thread=\"r_1\", seen=true) and no text. "
             ),
             "{out}"
         );
@@ -942,33 +933,35 @@ mod tests {
     }
 
     #[test]
-    fn done_says_nothing_was_written() {
+    fn seen_says_nothing_was_written() {
         let v = json!({ "thread": "r_1", "note": null, "status": "open", "claimed": null });
-        let out = done(&v, true);
-        assert!(out.starts_with("Marked thread r_1 handled"), "{out}");
+        let out = seen(&v, true);
+        assert!(out.starts_with("Marked thread r_1 seen"), "{out}");
         // Only what reached this session: a note it has not received stays pending.
         assert!(
             out.contains("up to the notes this session has received")
                 && out.contains("Any note this session has not received yet"),
             "{out}"
         );
+        assert!(out.contains("pending again"), "{out}");
         assert!(
-            out.contains("Nothing was written, and nothing claimed."),
+            out.contains("Nothing was written, and this session does not hold the thread."),
             "{out}"
         );
         assert!(!out.contains("still holds"), "{out}");
         let held =
             json!({ "thread": "r_1", "note": null, "status": "open", "claimed": "other-session" });
-        assert!(done(&held, true).contains("Another of your person's sessions still holds it."));
+        assert!(seen(&held, true).contains("Another of your person's sessions still holds it."));
         // From a session that received nothing of the thread: it says it may have handled
         // nothing, and to read it first.
-        let out = done(&v, false);
+        let out = seen(&v, false);
         assert!(!out.contains("Marked thread"), "{out}");
         assert!(
             out.contains("No note of thread r_1 has reached this session")
-                && out.contains("may have handled nothing")
+                && out.contains("`seen` may have handled nothing")
                 && out.contains("Read it first with thread(id=\"r_1\")")
-                && out.contains("Nothing was written, and nothing claimed."),
+                && out.contains("then mark it seen")
+                && out.contains("Nothing was written"),
             "{out}"
         );
     }
@@ -1228,17 +1221,12 @@ mod tests {
         let out = sent(&other, false);
         assert!(out.contains("claimed: other-session"), "{out}");
         assert!(out.contains("step aside"), "{out}");
-        // Closing releases every claim: nothing to hold or step aside from (an older server may
-        // still say another session holds it).
-        let closed = json!({ "thread": "r_1", "note": null, "status": "closed", "claimed": null });
-        assert_eq!(sent(&closed, false), "Closed thread r_1.");
-        let held = json!({ "thread": "r_1", "note": null, "status": "closed", "claimed": "other-session" });
-        assert_eq!(sent(&held, false), "Closed thread r_1.");
-        let last = json!({ "thread": "r_1", "note": "n_3", "status": "closed", "claimed": "this-session" });
-        assert_eq!(
-            sent(&last, false),
-            "Written: note n_3 in thread r_1, which is closed."
-        );
+        // A note sent with a deprecated close is a note: nothing is said of closing.
+        let last =
+            json!({ "thread": "r_1", "note": "n_3", "status": "open", "claimed": "this-session" });
+        let out = sent(&last, false);
+        assert!(out.starts_with("Written: note n_3 in thread r_1"), "{out}");
+        assert!(!out.contains("close"), "{out}");
         // Claimed without a note: a state, nothing written.
         let claimed =
             json!({ "thread": "r_1", "note": null, "status": "open", "claimed": "this-session" });
