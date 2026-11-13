@@ -555,7 +555,6 @@ mod tests {
             ("--need", "--bg"),
             ("--need", "--soft"),
             ("--mention", "--bg"),
-            ("--tag", "--tag-bg"),
             ("--pill-text", "--pill"),
         ] {
             let (fg, bg) = (colours(text), colours(background));

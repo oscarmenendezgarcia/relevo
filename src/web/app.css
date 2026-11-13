@@ -7,7 +7,6 @@
   --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
   --ghost-mix: 25%;
   --pill: #f5c451; --pill-text: #1a1405; --pill-dot: rgba(26, 20, 5, .7);
-  --tag: #c9b8ff; --tag-bg: #1f1b2c;
   --thread-line: color-mix(in srgb, var(--faint) 35%, transparent);
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
@@ -18,7 +17,6 @@
     --soft: #f5f6f8; --need: #9e6400; --mention: #3b55d9; --focus: #4f6bed;
     --pill: #fde4a1; --pill-text: #5c3a00; --pill-dot: #b07200;
     --ghost-mix: 55%;
-    --tag: #5b3fc4; --tag-bg: #f1ecff;
   }
 }
 
@@ -40,8 +38,6 @@ h1 { font-size: 1em; font-weight: 700; margin: 0; }
 .seg { margin-left: auto; display: flex; gap: 2px; background: var(--soft); padding: 3px; border-radius: 9px; }
 .seg button { font-size: 13.5px; color: var(--faint); padding: 5px 12px; border-radius: 7px; }
 .seg button[aria-selected="true"] { background: var(--bg); color: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, .25); }
-.cnt { color: var(--need); font-variant-numeric: tabular-nums; margin-left: 3px; font-weight: 600; }
-.cnt:empty { display: none; }
 /* The line of a failed refresh. Its space is always reserved, so nothing below it moves when a
    refresh fails and works again; it is the body text's colour, not the amber of the pill: it
    asks for nothing. */
@@ -89,8 +85,6 @@ section + section { margin-top: 32px; }
 .who { display: flex; gap: 7px; flex-wrap: wrap; font-size: 13px; color: var(--faint); align-items: baseline; }
 .who b { color: var(--text); font-weight: 600; font-size: 15px; }
 .who time { margin-left: auto; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.tag { font-size: 12px; padding: 1px 7px; border-radius: 4px; background: var(--tag-bg); color: var(--tag); font-family: var(--mono); }
-.tag::before { content: "→ "; font-family: var(--sans); }
 /* The message text: clamped to 2 lines in the collapsed opener */
 .text {
   color: var(--body); margin-top: 2px;
@@ -100,13 +94,16 @@ section + section { margin-top: 32px; }
 
 .replies { margin-top: 4px; font-size: 13px; color: var(--faint); }
 .card.open .replies { display: none; }
+/* Closed up, the latest reply under the first note; open, the conversation shows it instead */
+.msg.latest { margin-top: 12px; }
+.card.open .msg.latest { display: none; }
 
 /* Closed threads */
 .closed .av { opacity: .62; }
 .closed .msg:first-child .who b { color: var(--body); }
 .closed .msg:first-child .text { color: var(--faint); }
 
-/* The three kinds of mark: status pill, tag (where it went), labels */
+/* The two kinds of mark: the status pill, and labels */
 .chips { display: flex; gap: 6px; margin-top: 6px; align-items: center; }
 /* Your turn: the thread line runs on to an empty seat for you, a dotted ring with your initial,
    as if you were about to write; your name and the pill beside it */

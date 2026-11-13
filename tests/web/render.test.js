@@ -4,7 +4,7 @@
 'use strict';
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { parseNote, parseInline, toDom, preview, excerpt, withoutTitle, shownTitle, openerText, pickKey, askShown, focusAfter, addedThreads, short, noteTime, ago, absolute } = require(
+const { parseNote, parseInline, toDom, preview, rowText, pickKey, askShown, focusAfter, addedThreads, short, noteTime, ago, absolute } = require(
   path.join(__dirname, '..', '..', 'src', 'web', 'app.js')
 );
 
@@ -144,39 +144,22 @@ check('only allowed elements, whatever the text', () => {
   assert.equal(show(frag), '<p></p>');
 });
 
-check('the title line is not shown twice', () => {
-  assert.equal(withoutTitle('# Refunds\nbody', 'Refunds'), 'body');
-  assert.equal(withoutTitle('\nRefunds\nbody', 'Refunds'), 'body');
-  assert.equal(withoutTitle('Other\nbody', 'Refunds'), 'Other\nbody');
-  // A first line over 80 characters: the server cut the title, the line starts with it.
-  const long = '@oscar Https-callback-failure-in-refunds-service-production-eu-west-1-ProcessRefund-handler';
-  const title = long.slice(0, 80);
-  assert.equal(withoutTitle(long + '\nbody', title), 'body');
-  assert.equal(withoutTitle('', ''), '');
-  assert.equal(withoutTitle('body', ''), 'body');
-});
-
-check('the opener: its text once, closed up or open', () => {
+check('a row: the note from its first line, once, closed up or open', () => {
   // A note that is only its title line: shown once, never title + note.
   const only = '@pedro Is the embeddings service in production?';
-  assert.equal(openerText(only, only, false, true), only);
-  assert.equal(openerText(only, only, false, false), 'Is the embeddings service in production?');
-  // A title line and a body: closed up the body, open the whole note.
-  const both = '@oscar Refunds contract\nI need to know whether the 422 breaks anything.';
-  assert.equal(openerText(both, '@oscar Refunds contract', false, false), 'I need to know whether the 422 breaks anything.');
-  assert.equal(openerText(both, '@oscar Refunds contract', false, true), both);
-  // Cut by the timeline: an ellipsis closed up; open, the full note came from the thread.
-  assert.equal(openerText(both, '@oscar Refunds contract', true, false), 'I need to know whether the 422 breaks anything.…');
-});
-
-check('titles: cut ones end in an ellipsis, leading mentions go', () => {
-  const long = 'Https-callback-failure-in-refunds-service-production-eu-west-1-ProcessRefund-handler-x';
-  assert.equal(shownTitle(long.slice(0, 80), long), long.slice(0, 80) + '…');
-  assert.equal(shownTitle('Refunds', '# Refunds\nbody'), 'Refunds');
-  assert.equal(shownTitle('@oscar can you review it?', '@oscar can you review it?'), 'Can you review it?');
-  assert.equal(shownTitle('@product, @ana/pagos: who owns it?', '@product, @ana/pagos: who owns it?'), 'Who owns it?');
-  assert.equal(shownTitle('@ana', '@ana'), '@ana');
-  assert.equal(shownTitle('ana@example.com is down', 'ana@example.com is down'), 'ana@example.com is down');
+  assert.equal(rowText(only, false, true), only);
+  assert.equal(rowText(only, false, false), only);
+  // A first line and a body: closed up both, @mentions and all (the page makes them one clamped
+  // paragraph); open, the whole note.
+  const both = '@oscar @ana Refunds contract\nI need to know whether the 422 breaks anything.';
+  assert.equal(rowText(both, false, false), both);
+  assert.equal(rowText(both, false, true), both);
+  // Cut by the timeline: an ellipsis closed up.
+  assert.equal(rowText(both, true, false), both + '…');
+  // A heading's # goes; leading blank lines go; nothing stays nothing.
+  assert.equal(rowText('# Refunds\nbody', false, false), 'Refunds\nbody');
+  assert.equal(rowText('\n\n@ana hi', false, false), '@ana hi');
+  assert.equal(rowText('\n\n', false, false), '');
 });
 
 check('the key: from the address, else what the tab kept', () => {
@@ -223,10 +206,6 @@ check('a row\'s preview is one paragraph, only allowed elements', () => {
   );
   assert.ok(doc.created.every((t) => ALLOWED.has(t)));
   assert.deepEqual(preview(''), []);
-  // The first note after its title, without the @mentions it starts with.
-  assert.equal(excerpt('@oscar Release train\nWhen does it ship?', '@oscar Release train'), 'When does it ship?');
-  assert.equal(excerpt('Title\n@ana @bob: look', 'Title'), 'look');
-  assert.equal(excerpt('Title only', 'Title only'), '');
 });
 
 check('parseInline keeps line breaks inside a paragraph', () => {
