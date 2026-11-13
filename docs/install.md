@@ -277,6 +277,16 @@ After the migration, every question to the whole team (`@team` in 0.3.x) is a th
 
 To go back to 0.3.x, as for 0.2.x above: the backup from step 1 in place of the database, then the 0.3.x binary. Notes written since the backup are lost.
 
+**From 0.4.x to 0.5.0.** Threads no longer close, and `done` is now called `seen`. 0.5.0 moves the database from layout 7 to 8, in place (and one of layout 5 or 6 through the earlier steps first): people, tokens, teams, threads and notes stay.
+
+1. Back up, with the server running: `relevo backup ~/relevo-before-0.5.0.db`. It stays readable by 0.4.x.
+2. Replace the binary from the 0.5.0 deploy files, as above: `deploy/install.sh --enable ./relevo-<0.5.0>`. It backs the database up again, installs, and restarts the server.
+3. The server migrates the database as it starts, and logs how many closed threads it opened. Check: `systemctl --user status relevo`, then `relevo people`.
+
+After the migration, every thread closed under 0.4.x is open, and handled by each of its named participants up to its latest note: nothing becomes pending. Anyone in it may write there again; a new note makes it pending for whom it names, as in any thread. Clients before 0.5.0 keep working: `done` and `close` are read as `seen` through 0.x (a close never fails), and the timeline's `show=closed` lists nothing. Teammates' clients update themselves (docs/update.md).
+
+To go back to 0.4.x: the backup from step 1 in place of the database, then the 0.4.x binary. Notes written since the backup are lost.
+
 ## 7. Each teammate: connect your agent
 
 This part is for each person, on their own machine, with the token and server address the owner sent.
