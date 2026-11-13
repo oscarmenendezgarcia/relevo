@@ -653,6 +653,19 @@ if (typeof document !== 'undefined') {
     return msg;
   }
 
+  /// A note's header: the author's name (or You), `via <label>` and the time, on one line. A long
+  /// name or label is cut with an ellipsis (the label first), the whole of it on hover; the time
+  /// keeps its place.
+  function header(author, label, iso, format) {
+    const who = el('div', 'who');
+    const name = el('b', '', nameOf(author));
+    name.title = name.textContent;
+    const via = el('span', '', 'via ' + label);
+    via.title = via.textContent;
+    who.append(name, via, timeEl(iso, format));
+    return who;
+  }
+
   /// A closed-up row's latest reply: avatar, name, time and two lines; the thread line runs on
   /// from it to your seat when the thread waits for you.
   function latest(n, pending) {
@@ -664,9 +677,7 @@ if (typeof document !== 'undefined') {
       avCol.append(lineEl);
     }
     const body = el('div', 'msg-body');
-    const who = el('div', 'who');
-    who.append(el('b', '', nameOf(n.author)), el('span', '', 'via ' + n.via), timeEl(n.created_at, short));
-    body.append(who, md(rowText(n.text, n.truncated, false), 'text'));
+    body.append(header(n.author, n.via, n.created_at, short), md(rowText(n.text, n.truncated, false), 'text'));
     const msg = el('div', 'msg latest');
     msg.append(avCol, body);
     return msg;
@@ -683,11 +694,11 @@ if (typeof document !== 'undefined') {
           loadConvo(t.id);
           renderFeed();
         };
-        const line = el('div', 'who', "Couldn't load the conversation.");
+        const line = el('div', 'who wrap', "Couldn't load the conversation.");
         line.append(retry);
         box.append(inColumn(line, pending));
       } else {
-        box.append(inColumn(el('div', 'who', 'Loading…'), pending));
+        box.append(inColumn(el('div', 'who wrap', 'Loading…'), pending));
       }
       return box;
     }
@@ -702,9 +713,7 @@ if (typeof document !== 'undefined') {
         avCol.append(lineEl);
       }
       const msgBody = el('div', 'msg-body');
-      const who = el('div', 'who');
-      who.append(el('b', '', nameOf(n.author)), el('span', '', 'via ' + n.via + (n.context ? ' in ' + n.context : '')), timeEl(n.created_at, noteTime));
-      msgBody.append(who);
+      msgBody.append(header(n.author, n.via + (n.context ? ' in ' + n.context : ''), n.created_at, noteTime));
       if (n.text.trim()) msgBody.append(renderNote(n.text, document));
       const msg = el('div', 'msg');
       msg.append(avCol, msgBody);
@@ -740,24 +749,35 @@ if (typeof document !== 'undefined') {
       avCol.append(lineEl);
     }
     const msgBody = el('div', 'msg-body');
-    const who = el('div', 'who');
-    who.append(el('b', '', nameOf(t.from)), el('span', '', 'via ' + first.via));
-    who.append(timeEl(first.created_at, short));
+    // Open, the first note is one note of the conversation: its time and context as the replies'.
+    const label = first.via + (open && first.context ? ' in ' + first.context : '');
+    const who = header(t.from, label, first.created_at, open ? noteTime : short);
     msgBody.append(who);
     const shown = rowText(first.text, first.truncated, open);
+    let textEl;
     if (open) {
-      const noteEl = renderNote(shown, document);
-      noteEl.classList.add('text');
-      msgBody.append(noteEl);
+      textEl = renderNote(shown, document);
+      textEl.classList.add('text');
     } else {
-      msgBody.append(md(shown, 'text'));
+      textEl = md(shown, 'text');
     }
+    msgBody.append(textEl);
+    // The row's name, for screen readers: who opened it, what it says and its status, not the
+    // whole row (the latest reply, an open conversation). The status comes right after the text.
+    const base = 'row-' + t.id;
+    who.firstChild.id = base + '-from';
+    textEl.id = base + '-text';
+    const names = [who.firstChild.id, textEl.id];
+    if (t.pending) {
+      const sr = el('span', 'sr', ' Reply needed' + (t.kind === 'global' ? ', mentioned you' : '') + '.');
+      sr.id = base + '-status';
+      msgBody.append(sr);
+      names.push(sr.id);
+    }
+    a.setAttribute('aria-labelledby', names.join(' '));
     // Closed up, the latest reply is shown below: say how many more the line passes over
     const more = t.notes - 2;
     if (more > 0) msgBody.append(el('div', 'replies', more.toLocaleString('en') + (more === 1 ? ' more reply' : ' more replies')));
-    // The status for screen readers, early in the row's name: the seat below comes after every
-    // reply when the thread is open, and a long name is cut before it
-    if (t.pending) msgBody.append(el('span', 'sr', ' Reply needed' + (t.kind === 'global' ? ', mentioned you' : '') + '.'));
     const openerMsg = el('div', 'msg');
     openerMsg.append(avCol, msgBody);
     a.append(openerMsg);
