@@ -431,8 +431,9 @@ fn open_with(path: &str, migrate: bool) -> Result<Connection> {
                     );
                 }
             }
-            tx.execute_batch(MIGRATE_FROM_7)
-                .with_context(|| format!("migrating database {path} from layout 7"))?;
+            tx.execute_batch(MIGRATE_FROM_7).with_context(|| {
+                format!("migrating database {path} from layout {old} to {SCHEMA_VERSION}")
+            })?;
             from = Some(old);
         }
         Layout::New | Layout::Current => {}
@@ -440,14 +441,15 @@ fn open_with(path: &str, migrate: bool) -> Result<Connection> {
     tx.execute_batch(SCHEMA)?;
     // How many closed threads layout 8 opens.
     let mut opened = 0;
-    if from.is_some() {
+    if let Some(old) = from {
         opened = tx.query_row(
             "SELECT count(*) FROM threads WHERE status = 'closed'",
             [],
             |r| r.get::<_, i64>(0),
         )?;
-        tx.execute_batch(OPEN_CLOSED)
-            .with_context(|| format!("migrating database {path} from layout 7"))?;
+        tx.execute_batch(OPEN_CLOSED).with_context(|| {
+            format!("migrating database {path} from layout {old} to {SCHEMA_VERSION}")
+        })?;
     }
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
@@ -460,12 +462,12 @@ fn open_with(path: &str, migrate: bool) -> Result<Connection> {
             "migrated the database from layout 6 to 7: team threads are global ones now"
         );
     }
-    if from.is_some() {
+    if let Some(old) = from {
         tracing::info!(
             db = path,
             opened,
-            "migrated the database from layout 7 to {SCHEMA_VERSION}: threads no longer close; \
-             opened {opened} closed threads, handled by everyone they name"
+            "migrated the database from layout {old} to {SCHEMA_VERSION}: threads no longer \
+             close; opened {opened} closed threads, handled by everyone they name"
         );
     }
     conn.pragma_update(None, "foreign_keys", "ON")?;

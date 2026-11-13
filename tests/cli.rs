@@ -148,13 +148,14 @@ fn without_relevo_db_an_admin_command_never_creates_a_database_here() {
 }
 
 #[test]
-fn only_serve_migrates_a_layout_5_or_6_database_and_check_db_says_so() {
+fn only_serve_migrates_a_layout_5_6_or_7_database_and_check_db_says_so() {
     for (dump, made_by) in [
         (
             include_str!("fixtures/layout5.sql"),
             "relevo 0.1.0 to 0.2.x",
         ),
         (include_str!("fixtures/layout6.sql"), "relevo 0.3.x"),
+        (include_str!("fixtures/layout7.sql"), "relevo 0.4.x"),
     ] {
         let dir = std::env::temp_dir().join(db::random_id("relevo-cli-"));
         std::fs::create_dir(&dir).unwrap();

@@ -440,6 +440,49 @@ fn a_layout_6_database_with_a_broken_thread_reference_names_the_row_and_refuses_
 }
 
 #[test]
+fn a_failed_migration_from_layout_7_leaves_it_at_layout_7() {
+    let dir = TempDir::new();
+    let path = dir.db();
+    layout7(&path);
+    // A failure at the very end of the migration, once the inbox's indexes were dropped and made
+    // again and the closed threads handled: opening them is refused.
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER no_reopening BEFORE UPDATE OF status ON threads
+             BEGIN SELECT RAISE(ABORT, 'refused for the test'); END;",
+        )
+        .unwrap();
+    let err = format!("{:#}", db::open_migrating(&path).unwrap_err());
+    assert!(err.contains("from layout 7 to 8"), "{err}");
+    assert!(err.contains("refused for the test"), "{err}");
+    // Nothing of it stayed: still layout 7, its indexes as 0.4.x made them, its threads closed.
+    assert_eq!(user_version(&path), 7);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let index: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name = 'participants_inbox_claim'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(index.contains("resolved = 0"), "{index}");
+    let closed: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM threads WHERE status = 'closed'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(closed, 3);
+    // Once the cause is gone, it migrates.
+    conn.execute_batch("DROP TRIGGER no_reopening").unwrap();
+    drop(conn);
+    db::open_migrating(&path).unwrap();
+    assert_eq!(user_version(&path), 8);
+}
+
+#[test]
 fn a_broken_reference_elsewhere_does_not_stop_the_migration() {
     let dir = TempDir::new();
     let path = dir.db();

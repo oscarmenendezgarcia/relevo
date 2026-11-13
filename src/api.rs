@@ -1098,8 +1098,8 @@ fn write(
              name of 'seen')",
         ));
     }
-    // The deprecated `close`: threads no longer close. With `text` it is ignored (writing the
-    // note handles the thread); without, it is read as `seen`. A 0.4 client's close never fails:
+    // The deprecated `close`: threads no longer close. With `text` the note is written, and this
+    // session lets go of the thread as after `seen` (see `write_as`); without, it is read as `seen`. A 0.4 client's close never fails:
     // with `claim` too, the claim is dropped, as a close without text never claimed.
     if req.close && req.text.is_none() && !req.seen && !req.done {
         req.claim = false;
@@ -1281,9 +1281,10 @@ fn write_as(
         take_claim(tx, caller, session, &thread_id, now)?;
     }
     // `seen`: this session has nothing more to do there, so it lets go of the thread if it holds
-    // it (`refresh` copies that to the sessions' rows). The person's other sessions may see it
+    // it (`refresh` copies that to the sessions' rows). So does a 0.4 client's "reply and close"
+    // (`close` with `text`), once the note is written. The person's other sessions may see it
     // now, so they are woken. Another session's claim stays.
-    let released = req.seen
+    let released = (req.seen || (req.close && note_id.is_some() && req.thread.is_some()))
         && tx.execute(
             "UPDATE participants SET claimed_by = NULL, claimed_context = NULL, claimed_at = NULL
              WHERE thread_id = ?1 AND person_id = ?2 AND claimed_by = ?3",

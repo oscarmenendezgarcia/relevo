@@ -565,7 +565,7 @@ async fn close_without_text_is_read_as_seen_and_closes_nothing() {
 }
 
 #[tokio::test]
-async fn close_with_text_writes_the_note_and_closes_nothing() {
+async fn close_with_text_writes_the_note_closes_nothing_and_lets_go_of_the_thread() {
     let t = team(&["ana", "bob"]);
     let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
     t.inbox("bob").await;
@@ -576,10 +576,12 @@ async fn close_with_text_writes_the_note_and_closes_nothing() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{v}");
-    // Read as a plain note: written, claimed by the session that wrote it, and open.
+    // A note, and the thread open; a 0.4 client that replies and closes is done there, so this
+    // session lets go of it as after `seen`.
     assert_eq!(v["status"], "open");
     assert!(v["note"].is_string(), "{v}");
-    assert_eq!(v["claimed"], "this-session");
+    assert_eq!(v["claimed"], Value::Null);
+    assert_eq!(t.thread("bob", &id).await["claimed"], Value::Null);
     // It handled the thread for Bob, and it is pending for Ana, whom it names.
     assert_eq!(t.thread("bob", &id).await["pending"], false);
     let inbox = t.inbox("ana").await;
@@ -587,7 +589,17 @@ async fn close_with_text_writes_the_note_and_closes_nothing() {
     assert_eq!(th["status"], "open");
     assert_eq!(th["pending"], true);
     assert_eq!(th["new_notes"][0]["text"], "done, closing");
-    // A close with text and no thread is ignored too: it opens the thread its text names.
+    // Another session's claim stays: only this session lets go.
+    let pagos = t.agent("bob", "term-pagos", "pagos-api");
+    let front = t.agent("bob", "term-front", "frontend");
+    pagos.ok(json!({ "thread": id, "claim": true })).await;
+    let (_, v) = front
+        .send(json!({ "thread": id, "text": "Closing from here.", "close": true }))
+        .await;
+    assert!(v["note"].is_string(), "{v}");
+    assert_eq!(v["claimed"], "other-session");
+    assert_eq!(pagos.thread(&id).await["claimed"], "this-session");
+    // A close with text and no thread is the note alone: it opens the thread its text names.
     let (status, v) = t
         .send("ana", json!({ "text": "@bob Another one", "close": true }))
         .await;
@@ -3966,6 +3978,20 @@ async fn seen_handles_the_thread_without_a_note_and_done_is_the_same() {
         delivery_of(&t.thread("ana", &id).await, "bob")["handled_at"],
         Value::Null
     );
+    // `close` with `seen`, or with `done`, is the same as `seen`.
+    for extra in ["seen", "done"] {
+        t.ok("ana", json!({ "thread": id, "text": "Again?" })).await;
+        pi.inbox().await;
+        let (status, v) = pi
+            .send(json!({ "thread": id, "close": true, extra: true }))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{extra}: {v}");
+        assert_eq!(v["note"], Value::Null);
+        assert!(listed(&pi.inbox().await, &id).is_none(), "{extra}");
+    }
+    t.ok("ana", json!({ "thread": id, "text": "And one more." }))
+        .await;
+    pi.inbox().await;
     // `done`, its name up to 0.4.x, does the same.
     let (status, v) = pi.send(json!({ "thread": id, "done": true })).await;
     assert_eq!(status, StatusCode::OK, "{v}");
