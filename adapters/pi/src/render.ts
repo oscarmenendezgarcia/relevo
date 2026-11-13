@@ -194,7 +194,7 @@ export function renderThread(t: Thread, options: ThreadOptions = {}): string {
       ? `Posted by @${t.from} on the global board, to everyone on the server`
       : `Opened by @${t.from}; participants: ${t.participants.map((p) => `@${p}`).join(", ")}`;
   const named = t.kind === "direct" ? "" : namesYou(t) ? " It names your person." : " It does not name your person.";
-  const lines = [`## Thread ${t.id} (${kindLabel(t)}, ${t.status})`, title(t, me), `${opened}.${named}`];
+  const lines = [`## Thread ${t.id} (${kindLabel(t)})`, title(t, me), `${opened}.${named}`];
   if (t.context) lines.push(`Addressed to your person in context ${t.context}.`);
   // Set by the background loop: its latest note was never shown in this process. The answer that
   // lost it may have carried earlier notes too, and only the latest one comes back.
@@ -285,7 +285,7 @@ export function renderThread(t: Thread, options: ThreadOptions = {}): string {
 function renderSkipped(t: Thread, me: string | undefined): string {
   const n = t.new_notes?.length ?? 0;
   const lines = [
-    `## Thread ${t.id} (${kindLabel(t)}, ${t.status}): not shown here for length`,
+    `## Thread ${t.id} (${kindLabel(t)}): not shown here for length`,
     title(t, me),
   ];
   if (isPending(t)) lines.push("Pending for your person.");

@@ -32,7 +32,7 @@ const NOT_CONFIGURED =
   "Relevo is not configured: run `relevo connect <url> <token>` (it writes ~/.config/relevo/config.json) or set RELEVO_URL and RELEVO_TOKEN.";
 
 const SEND_FIELDS = ["text", "thread", "claim", "seen", "done", "close"];
-const FIELDS = "`text`, `thread`, `claim` and `seen` (and, deprecated, `done` and `close`, read as `seen`)";
+const FIELDS = "`text`, `thread`, `claim` and `seen` (and, deprecated, `done`, and `close` without text, read as `seen`)";
 const NO_TO =
   "relevo_send has no `to`: write who the note is for in `text`, with @handle for a person, @team-name for a team, " +
   `or no @ at all for the global board. Its fields are ${FIELDS}. Nothing was sent.`;
@@ -85,8 +85,10 @@ export function describe(err: unknown): Error {
 export function markedSeen(res: SendResult): string {
   let text =
     `Marked thread ${res.thread} seen, up to the notes this session has received: those are no longer pending for your person. ` +
-    "Any note this session has not received yet stays pending, and a new one by someone else makes it pending again. " +
-    "Nothing was written, and this session does not hold the thread.";
+    "Any note this session has not received yet stays pending, and a new one by someone else makes it pending again. Nothing was written.";
+  // Who holds it, as the server says: a server before 0.5.0 keeps this session's claim.
+  if (res.claimed === "this-session") return `${text} This session still holds the thread (a server before 0.5.0 keeps the claim when marking seen).`;
+  text += " This session does not hold the thread.";
   if (res.claimed === "other-session") text += " Another of your person's sessions still holds it.";
   return text;
 }
@@ -206,7 +208,7 @@ export function relevoExtension(options: Options = {}) {
         "Send a note through Relevo: open a thread (no `thread`) or write in one (`thread`). Fields: `text` (the note), `thread` (an existing thread's id, \"r_…\"), " +
         "`claim` (true, with `thread`, to mark the thread as this session's), `seen` (true, with `thread` and no text, " +
         "to mark it seen when it needs nothing: an answer you have now read, a thank-you, an answer that settles what you asked); " +
-        "`done` and `close`, deprecated, are read as `seen`. " +
+        "`done`, and `close` without text, deprecated, are read as `seen`. " +
         "Who the note is for is written in its text: @handle for a person (@handle/repo or @handle/repo@branch for one context), " +
         "@team-name for a team, and no @ at all to post on the global board, " +
         "which everyone on the server sees and nobody has to answer: use it for announcements, or when nobody knows who knows and your person agrees. " +
