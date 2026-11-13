@@ -12,6 +12,7 @@ pub mod dist;
 pub mod error;
 pub mod mcp;
 pub mod mention;
+pub mod release;
 pub mod render;
 pub mod serve;
 pub mod session;

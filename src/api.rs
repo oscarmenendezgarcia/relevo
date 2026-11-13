@@ -424,7 +424,7 @@ fn inbox_count(conn: &Connection, session: &Session, all: bool) -> Result<usize,
 /// Recomputes what the rows of a thread know about it (latest note, new, waiting (pending),
 /// inbox, fresh, and the copies on the sessions' rows). Runs after every change to the thread: a
 /// note, a delivery, a claim, a person handling it, a person named.
-fn refresh(conn: &Connection, thread: &str) -> Result<(), ApiError> {
+pub(crate) fn refresh(conn: &Connection, thread: &str) -> rusqlite::Result<()> {
     // A thread is opened by its first note, so it always has a latest one.
     let last_seq: i64 = conn.query_row(
         "SELECT max(seq) FROM notes WHERE thread_id = ?1",

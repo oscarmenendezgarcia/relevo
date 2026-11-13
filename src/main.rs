@@ -61,6 +61,10 @@ enum Command {
         /// database]
         #[arg(long, value_name = "DIR", env = "RELEVO_DIST")]
         dist: Option<PathBuf>,
+        /// Do not post a new version's release notes on the global board (it is still recorded
+        /// as announced). RELEVO_RELEASE_NOTES=0 does the same.
+        #[arg(long)]
+        no_release_notes: bool,
     },
     /// Print the SHA-256 fingerprint of the certificate `serve --tls` uses, for teammates to
     /// compare with what `relevo connect` shows.
@@ -429,6 +433,32 @@ fn server_tls(
     Ok(Some(cert.server_config()?))
 }
 
+/// Posts this version's release notes on the global board, once (`relevo::release`). A failure is
+/// logged, and the server starts all the same.
+fn release_notes(conn: &rusqlite::Connection, no_release_notes: bool, now: i64) {
+    use relevo::release::{self, Outcome};
+    let version = env!("CARGO_PKG_VERSION");
+    let env = std::env::var("RELEVO_RELEASE_NOTES").ok();
+    let post = release::enabled(no_release_notes, env.as_deref());
+    match release::announce(conn, version, release::CHANGELOG, post, now) {
+        Ok(Outcome::Posted(thread)) => {
+            tracing::info!(%thread, "posted the release notes of relevo {version} on the global board")
+        }
+        Ok(Outcome::Announced) => {}
+        Ok(Outcome::NoSection) => tracing::info!(
+            "the CHANGELOG has no section for relevo {version}: no release notes posted"
+        ),
+        Ok(Outcome::Off) => tracing::info!(
+            "release notes are off: relevo {version} is recorded as announced, nothing posted"
+        ),
+        Ok(Outcome::HandleTaken) => tracing::warn!(
+            "a person has the handle 'relevo', which this version keeps for the server's own \
+             release notes: relevo {version} is recorded as announced, nothing posted"
+        ),
+        Err(e) => tracing::warn!("could not post the release notes of relevo {version}: {e:#}"),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -530,7 +560,9 @@ async fn main() -> Result<()> {
             tls_cert,
             tls_key,
             dist,
+            no_release_notes,
         } => {
+            release_notes(&conn, no_release_notes, now);
             let tls = server_tls(
                 &db_file,
                 tls,

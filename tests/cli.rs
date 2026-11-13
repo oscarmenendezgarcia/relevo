@@ -270,3 +270,48 @@ fn teams_are_kept_from_the_cli() {
     relevo(path, &["invite", "backend", "--name", "B"]);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn relevo_is_the_servers_own_name_and_in_no_list() {
+    let dir = std::env::temp_dir().join(db::random_id("relevo-cli-"));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("relevo.db");
+    let path = path.to_str().unwrap();
+    {
+        let conn = db::open(path).unwrap();
+        db::invite(&conn, "ana", "Ana", None, "laptop", 0).unwrap();
+        conn.execute(
+            "UPDATE meta SET value = '0.0.1' WHERE key = 'announced'",
+            [],
+        )
+        .unwrap();
+        relevo::release::announce(
+            &conn,
+            env!("CARGO_PKG_VERSION"),
+            relevo::release::CHANGELOG,
+            true,
+            0,
+        )
+        .unwrap();
+    }
+    for args in [
+        &["invite", "relevo", "--name", "Mine"][..],
+        &["team", "add", "relevo"][..],
+        &["token", "add", "relevo", "--label", "x"][..],
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_relevo"))
+            .arg("--db")
+            .arg(path)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{args:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("the server's own name"), "{args:?}: {err}");
+    }
+    assert!(!relevo(path, &["people"]).contains("relevo"));
+    assert!(!relevo(path, &["token", "list"]).contains("relevo"));
+    // `serve` takes the switch.
+    assert!(relevo(path, &["serve", "--help"]).contains("--no-release-notes"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

@@ -439,6 +439,47 @@ fn a_layout_6_database_with_a_broken_thread_reference_names_the_row_and_refuses_
     assert_eq!(user_version(&path), 6);
 }
 
+#[tokio::test]
+async fn a_layout_7_database_gets_the_meta_table_and_this_versions_release_notes() {
+    let dir = TempDir::new();
+    let path = dir.db();
+    let seen = layout7(&path);
+    let conn = db::open_migrating(&path).unwrap();
+    // The table is there, and has announced nothing: this start is an upgrade.
+    let announced: i64 = conn
+        .query_row("SELECT count(*) FROM meta", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(announced, 0);
+    let version = env!("CARGO_PKG_VERSION");
+    let outcome =
+        relevo::release::announce(&conn, version, relevo::release::CHANGELOG, true, seen + 30)
+            .unwrap();
+    let relevo::release::Outcome::Posted(thread) = outcome else {
+        panic!("{outcome:?}");
+    };
+    // Once: a restart posts nothing.
+    assert_eq!(
+        relevo::release::announce(&conn, version, relevo::release::CHANGELOG, true, seen + 40)
+            .unwrap(),
+        relevo::release::Outcome::Announced
+    );
+    // Everyone of the old database takes part, and nobody has it pending.
+    let f = Fixture {
+        app: App::new(conn, Clock::fixed(seen + 60), 5),
+        v: serde_json::from_str(FIXTURE7).unwrap(),
+    };
+    for who in ["ana", "bob", "carl"] {
+        let th = f.agent(who, "after-upgrade", "").thread(&thread).await;
+        assert_eq!(th["kind"], "global", "{who}");
+        assert_eq!(th["from"], "relevo", "{who}");
+        assert_eq!(th["pending"], false, "{who}");
+        assert_eq!(
+            th["notes"][0]["text"].as_str().unwrap().lines().next(),
+            Some(format!("Relevo {version}").as_str())
+        );
+    }
+}
+
 #[test]
 fn a_failed_migration_from_layout_7_leaves_it_at_layout_7() {
     let dir = TempDir::new();
