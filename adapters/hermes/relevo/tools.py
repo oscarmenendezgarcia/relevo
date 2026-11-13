@@ -65,8 +65,8 @@ _SEND_FIELDS = ("text", "thread", "claim", "seen", "done", "close")
 def relevo_send(args: dict, **_: Any) -> str:
     unknown = sorted(k for k in args if k not in _SEND_FIELDS)
     if unknown:
-        return ("Error: relevo_send takes text, thread, claim and seen (and, deprecated, done and close, read "
-                f"as seen); not {', '.join(unknown)}. Nothing was sent. "
+        return ("Error: relevo_send takes text, thread, claim and seen (and, deprecated, done, and close "
+                f"without text, read as seen); not {', '.join(unknown)}. Nothing was sent. "
                 "Who a note is for is written in its text: @handle for a person, @team-name for a team, no @ "
                 "for the global board.")
 
@@ -134,8 +134,8 @@ _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
         "Send a Relevo note: open a thread (no `thread`) or write in one (`thread`). Fields: `text` (the "
         "note), `thread` (an existing thread's id, \"r_…\"), `claim` (true, with `thread`, to mark the "
         "thread as this session's), `seen` (true, with `thread` and no text, to mark it seen when it needs "
-        "nothing: an answer you have now read, a thank-you, an answer that settles what you asked); `done` "
-        "and `close`, deprecated, are read as `seen`. Who the "
+        "nothing: an answer you have now read, a thank-you, an answer that settles what you asked); `done`, "
+        "and `close` without text, deprecated, are read as `seen`. Who the "
         "note is for is written in its text: @handle for a person (@handle/repo or @handle/repo@branch for "
         "one context), @team-name for a team, and no @ at all to post on the global board, which everyone "
         "on the server sees and nobody has to answer: use it for announcements, or when nobody knows who "

@@ -654,7 +654,7 @@ def render_thread_head(thread: dict, me: Optional[str] = None, *, hints: bool = 
     opener = thread.get("from")
     # The title is the first line of the opener's first note: their text, wrapped like it.
     title = _wrap(opener, me, 'field="title"', _defang(str(thread.get("title") or "")).replace("\n", " "), sep="")
-    lines = [f"Thread {thread.get('id')} · {kind_of(thread)} · {thread.get('status')}",
+    lines = [f"Thread {thread.get('id')} · {kind_of(thread)}",
              f"Title (the first line of the first note): {title}"]
     # Someone else's thread that does not name the person says so in the line on answering it.
     optional = is_optional(thread) and opener != me
@@ -932,7 +932,7 @@ def describe_send(result: dict, opened: bool = False) -> str:
     `opened`: the send opened the thread (it was given no `thread`)."""
     thread = result.get("thread")
     if result.get("note"):
-        text = f"{whom(result, opened)}Wrote note {result['note']} in thread {thread} ({result.get('status')})."
+        text = f"{whom(result, opened)}Wrote note {result['note']} in thread {thread}."
     else:
         # A claim without text: a state, nothing written.
         claimed = result.get("claimed")
@@ -957,8 +957,12 @@ def describe_seen(result: dict) -> str:
     as relevo mcp says it (src/render.rs)."""
     text = (f"Marked thread {result.get('thread')} seen, up to the notes this session has received: those "
             "are no longer pending for your person. Any note this session has not received yet stays pending, "
-            "and a new one by someone else makes it pending again. Nothing was written, and this session does "
-            "not hold the thread.")
+            "and a new one by someone else makes it pending again. Nothing was written.")
+    # Who holds it, as the server says: a server before 0.5.0 keeps this session's claim.
+    if result.get("claimed") == "this-session":
+        return text + (" This session still holds the thread (a server before 0.5.0 keeps the claim when "
+                       "marking seen).")
+    text += " This session does not hold the thread."
     if result.get("claimed") == "other-session":
         text += " Another of your person's sessions still holds it."
     return text
