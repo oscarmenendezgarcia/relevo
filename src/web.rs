@@ -555,7 +555,6 @@ mod tests {
             ("--need", "--bg"),
             ("--need", "--soft"),
             ("--mention", "--bg"),
-            ("--tag", "--tag-bg"),
             ("--pill-text", "--pill"),
         ] {
             let (fg, bg) = (colours(text), colours(background));
@@ -624,6 +623,72 @@ mod tests {
             SCRIPT.contains("? 'You' :"),
             "the person, in the row and in the notes"
         );
+    }
+
+    /// Threads no longer close (docs/web.md): the filters are All, Needs you, Answered and the
+    /// teams, no row is marked or greyed out as closed, and nothing reads `closed_by` or
+    /// `counts.closed`.
+    #[test]
+    fn nothing_on_the_page_is_closed() {
+        assert!(
+            SCRIPT.contains(
+                "const SHOWS = [\n    ['all', 'All', 'threads'],\n    ['waiting', 'Needs you', \
+                 'waiting'],\n    ['answered', 'Answered', 'answered'],\n  ];"
+            ),
+            "the filters"
+        );
+        for (name, file) in [
+            ("index.html", INDEX),
+            ("app.js", SCRIPT),
+            ("app.css", STYLE),
+        ] {
+            for gone in [
+                "'Closed'",
+                "'closed'",
+                "closed_by",
+                "closed-label",
+                ".closed",
+                "chips",
+            ] {
+                assert!(!file.contains(gone), "{name} has {gone}");
+            }
+        }
+    }
+
+    /// A note's header never wraps (docs/web.md): the label, then the name, are cut with an
+    /// ellipsis, and the time keeps its place.
+    #[test]
+    fn a_notes_header_stays_one_line() {
+        let who = rule(".who {");
+        assert!(who.contains("flex-wrap: nowrap"), "{who}");
+        let parts = rule(".who b, .who span {");
+        for part in [
+            "text-overflow: ellipsis",
+            "white-space: nowrap",
+            "min-width: 0",
+        ] {
+            assert!(parts.contains(part), "{part}: {parts}");
+        }
+        // The label gives way before the name; the time never does.
+        assert!(rule("\n.who span {").contains("flex: 0 10 auto"));
+        assert!(rule("\n.who b {").contains("flex: 0 1 auto"));
+        assert!(rule(".who time {").contains("flex-shrink: 0"));
+        // Every note's header is made by one function, with the whole name and label on hover.
+        assert_eq!(SCRIPT.matches("el('div', 'who')").count(), 1);
+        assert!(SCRIPT.contains("via.title = via.textContent"));
+    }
+
+    /// A row's name for screen readers is its first note and its status, not the whole row.
+    #[test]
+    fn a_row_is_named_by_its_first_note_and_status() {
+        assert!(SCRIPT.contains("a.setAttribute('aria-labelledby', names.join(' '))"));
+        for part in ["-from'", "-text'", "-status'"] {
+            assert!(SCRIPT.contains(part), "{part}");
+        }
+        // Open, the first note shows its time and context as the replies do, in their colour.
+        assert!(SCRIPT.contains("open ? noteTime : short"));
+        assert!(SCRIPT.contains("open && first.context ? ' in ' + first.context : ''"));
+        assert!(rule(".card.open .text {").contains("color: var(--text)"));
     }
 
     /// The body of `selector`'s rule of the stylesheet, as in `.banner {`.

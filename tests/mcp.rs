@@ -252,7 +252,8 @@ async fn tools_carry_a_conversation_between_sessions() {
         "never write a note that only says you are on it",
         "Write in the first person, as your person would (\"I changed…\", not \"Ana changed…\").",
         "Start a new thread with a one-line subject, no greeting and no \"Re:\".",
-        "Close a thread only when your person asks, or when you asked the question and it is answered.",
+        "Threads do not close: when you asked and the answer settles it, mark it seen; write a last note only when it adds something.",
+        "mark it seen with `send(thread, seen: true)` and no text: \"seen, nothing to add\". It is pending again if someone writes after.",
         "Do not claim a team or global-board thread that does not name your person",
         "is not an answer",
         "mark guesses as guesses",
@@ -294,7 +295,8 @@ async fn tools_carry_a_conversation_between_sessions() {
         "one-line subject",
         "no greeting and no \"Re:\"",
         "Write in the first person",
-        "only when your person asks, or when you asked the question and it is answered",
+        "Threads do not close: when you asked and the answer settles it, mark it `seen`",
+        "is pending again when someone writes after",
     ] {
         assert!(about.contains(part), "{part}: {about}");
     }
@@ -320,7 +322,7 @@ async fn tools_carry_a_conversation_between_sessions() {
     );
     assert!(all.contains("Only needed to see those"), "{all}");
     let props = send["inputSchema"]["properties"].as_object().unwrap();
-    for p in ["thread", "text", "close", "claim", "done"] {
+    for p in ["thread", "text", "claim", "seen", "done", "close"] {
         assert!(props.contains_key(p), "{send}");
     }
 
@@ -468,16 +470,24 @@ async fn tools_carry_a_conversation_between_sessions() {
     let (failed, err) = bob.call("thread", json!({ "id": "../people" })).await;
     assert!(failed && err.starts_with("NOT_FOUND: "), "{err}");
 
-    // Ana's other session closes it while the first holds it: closing releases the claim, so it
-    // only says it closed it, not to step aside nor that a note was written.
+    // Ana's other session, as a 0.4 client, closes it while the first holds it: that is its
+    // `seen`, and the first session's claim stays. Nothing says it closed.
     let closed = ana2
         .ok("send", json!({ "thread": id, "close": true }))
         .await;
-    assert_eq!(closed, format!("Closed thread {id}."));
+    assert!(
+        closed.starts_with(&format!("Marked thread {id} seen")),
+        "{closed}"
+    );
+    assert!(
+        closed.ends_with("Another of your person's sessions still holds it."),
+        "{closed}"
+    );
+    assert!(!closed.contains("Closed"), "{closed}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn done_marks_a_thread_handled_without_writing() {
+async fn seen_marks_a_thread_handled_without_writing_and_done_too() {
     let s = server(&["ana", "bob"]).await;
     let mut ana = Mcp::start(&s, "ana", &s.dir, Some(""), &[]).await;
     let mut bob = Mcp::start(&s, "bob", &s.dir, Some("infra"), &[]).await;
@@ -494,12 +504,12 @@ async fn done_marks_a_thread_handled_without_writing() {
             && seen.contains(", not handled yet; nobody of theirs has it"),
         "{seen}"
     );
-    let done = bob.ok("send", json!({ "thread": id, "done": true })).await;
+    let seen = bob.ok("send", json!({ "thread": id, "seen": true })).await;
     assert!(
-        done.starts_with(&format!("Marked thread {id} handled")),
-        "{done}"
+        seen.starts_with(&format!("Marked thread {id} seen")),
+        "{seen}"
     );
-    assert!(done.contains("Nothing was written"), "{done}");
+    assert!(seen.contains("Nothing was written"), "{seen}");
     let inbox = bob.ok("inbox", json!({})).await;
     assert!(
         inbox.contains("Nothing new and nothing pending for you."),
@@ -512,11 +522,30 @@ async fn done_marks_a_thread_handled_without_writing() {
         "{handled}"
     );
     assert_eq!(handled.matches("\n- note n_").count(), 1, "{handled}");
-    // With text, done is refused by the server, and said so.
-    let (failed, err) = bob
-        .call("send", json!({ "thread": id, "done": true, "text": "x" }))
+    // A later note makes it pending again; `done`, the old name, marks it seen as well.
+    ana.ok("send", json!({ "thread": id, "text": "And restarted." }))
         .await;
-    assert!(failed && err.starts_with("BAD_REQUEST: "), "{err}");
+    let inbox = bob.ok("inbox", json!({})).await;
+    assert!(inbox.contains("Pending for your person"), "{inbox}");
+    let done = bob.ok("send", json!({ "thread": id, "done": true })).await;
+    assert!(
+        done.starts_with(&format!("Marked thread {id} seen")),
+        "{done}"
+    );
+    let inbox = bob.ok("inbox", json!({})).await;
+    assert!(
+        inbox.contains("Nothing new and nothing pending for you."),
+        "{inbox}"
+    );
+    // With text, `seen` (or `done`) is refused by the server, and said so; so is both at once.
+    for args in [
+        json!({ "thread": id, "seen": true, "text": "x" }),
+        json!({ "thread": id, "done": true, "text": "x" }),
+        json!({ "thread": id, "seen": true, "done": true }),
+    ] {
+        let (failed, err) = bob.call("send", args).await;
+        assert!(failed && err.starts_with("BAD_REQUEST: "), "{err}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -633,16 +662,25 @@ async fn send_reads_whom_from_the_text_and_names_its_fields() {
         .clone();
     // The description names every field, and the schema takes no other: no `to`.
     let about = send["description"].as_str().unwrap();
-    for field in ["`thread`", "`text`", "`close`", "`claim`", "`done`"] {
+    for field in [
+        "`thread`", "`text`", "`claim`", "`seen`", "`done`", "`close`",
+    ] {
         assert!(about.contains(field), "{field}: {about}");
     }
+    // `done` and `close` only as deprecated names of `seen`: threads do not close.
+    assert!(
+        about.contains("`done`, and `close` without text, deprecated, are read as `seen`"),
+        "{about}"
+    );
+    assert!(about.contains("Threads do not close"), "{about}");
+    assert!(!about.contains("close: true"), "{about}");
     assert!(!about.contains("`to`"), "{about}");
     let schema = &send["inputSchema"];
     // Unknown fields are refused by the tool, which says what to do, not by the schema.
     assert!(schema["additionalProperties"].is_null(), "{schema}");
     let mut props: Vec<&String> = schema["properties"].as_object().unwrap().keys().collect();
     props.sort();
-    assert_eq!(props, ["claim", "close", "done", "text", "thread"]);
+    assert_eq!(props, ["claim", "close", "done", "seen", "text", "thread"]);
     assert!(schema["required"].is_null(), "{schema}");
     // Rules v8, in the description: who the note is for is written in it.
     for part in [
@@ -753,13 +791,15 @@ async fn send_reads_whom_from_the_text_and_names_its_fields() {
                 err,
                 "send has no `to`: write who the note is for in `text`, with @handle for a \
                  person, @team-name for a team, or no @ at all for the global board. Its fields \
-                 are `text`, `thread`, `close`, `claim` and `done`. Nothing was sent.",
+                 are `text`, `thread`, `claim` and `seen` (and, deprecated, `done`, and `close` \
+                 without text, read as `seen`). Nothing was sent.",
             );
         } else {
             assert_eq!(
                 err,
-                "send has no `message`: its fields are `text`, `thread`, `close`, `claim` and \
-                 `done`. Nothing was sent."
+                "send has no `message`: its fields are `text`, `thread`, `claim` and `seen` \
+                 (and, deprecated, `done`, and `close` without text, read as `seen`). Nothing was \
+                 sent."
             );
         }
     }
@@ -1324,19 +1364,19 @@ async fn inbox_hands_over_once_what_a_lost_answer_delivered() {
     assert!(inbox.contains("Pending for your person"), "{inbox}");
     assert!(!inbox.contains("Handed over"), "{inbox}");
 
-    // It reached this session: done handles it.
-    let done = ana.ok("send", json!({ "thread": id, "done": true })).await;
+    // It reached this session: seen handles it.
+    let done = ana.ok("send", json!({ "thread": id, "seen": true })).await;
     assert!(
-        done.starts_with(&format!("Marked thread {id} handled")),
+        done.starts_with(&format!("Marked thread {id} seen")),
         "{done}"
     );
 
-    // A thread whose notes never reached this session: done says it may have handled nothing,
+    // A thread whose notes never reached this session: seen says it may have handled nothing,
     // and indeed it stays pending, its note new for the session.
     let sent = bob.ok("send", json!({ "text": "@ana Unseen" })).await;
     let unseen = thread_id(&sent);
     let done = ana
-        .ok("send", json!({ "thread": unseen, "done": true }))
+        .ok("send", json!({ "thread": unseen, "seen": true }))
         .await;
     assert!(
         done.starts_with(&format!(

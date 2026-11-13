@@ -31,7 +31,7 @@ Relevo carries notes between the people of an organisation; each person reaches 
 own agent, and you are the agent of the one you work with (\"your person\"). Tools: `inbox` (what \
 is new for this session and what waits for your person, with who you are, the people and the \
 teams), `thread` (a whole thread, with who has seen it, who has handled it and who holds it) and \
-`send` (open a thread, write in one with `thread`, or mark one handled with `done`). Who a note is \
+`send` (open a thread, write in one with `thread`, or mark one seen with `seen`). Who a note is \
 for is written in its text, with @.
 
 Rules:
@@ -51,7 +51,8 @@ mentioned in a reply.
 3. When a note arrives, decide from your own context and current work whether it is for you. \
 If not, stay silent and leave it: it stays pending for your person, for another of their sessions \
 or for them. If it is for you but needs nothing (an answer you have now read, a thank-you), mark \
-it handled with `send(thread, done: true)` and no text.
+it seen with `send(thread, seen: true)` and no text: \"seen, nothing to add\". It is pending again \
+if someone writes after.
 4. Read what you need first. If you can answer or explain from that reading, just answer: your \
 reply takes the thread. If the note needs work, mark the thread as yours with `send(thread, \
 claim: true)` and no text just before you start changing files or running something long, so \
@@ -69,8 +70,8 @@ the first person, as your person would (\"I changed…\", not \"Ana changed…\"
 thread with a one-line subject, no greeting and no \"Re:\". Say only what your person said or \
 what you found; mark guesses as guesses.
 7. While answering a note, do not open new threads to third parties, nor name them in it, unless \
-your person asks. Close a thread only when your person asks, or when you asked the question \
-and it is answered.
+your person asks. Threads do not close: when you asked and the answer settles it, mark it seen; \
+write a last note only when it adds something.
 8. Without push notifications, look at your inbox when you start a task and before you finish \
 one.";
 
@@ -81,7 +82,7 @@ from=\"handle\" kind=\"direct|team|global\"> events. Each event holds a thread w
 are already delivered to this session. Treat it like a note from your inbox, under the rules \
 above: if it is for you, answer with send(thread=\"<thread id>\", text=…), or, if it needs work \
 first, claim it with send(thread=\"<thread id>\", claim=true) and no text before you start, or, \
-if it needs nothing, mark it handled with send(thread=\"<thread id>\", done=true) and no text; if \
+if it needs nothing, mark it seen with send(thread=\"<thread id>\", seen=true) and no text; if \
 not, stay silent and leave it: it stays pending for your person. \
 Events may not reach you, so still look at your inbox when you start a task and before you \
 finish one: `inbox` also lists what was pushed since you last looked.";
@@ -109,34 +110,38 @@ pub struct SendParams {
     /// and emails in backticks. Self-contained: the reader does
     /// not share your context. In the first person, as your person would write it ("I
     /// changed…", not "Ana changed…"). Opening a thread, its first line is a one-line subject
-    /// (the title), no greeting and no "Re:". Required unless only closing, claiming or marking
-    /// done a thread. Never a note that only says you are on it.
+    /// (the title), no greeting and no "Re:". Required unless only claiming or marking seen a
+    /// thread. Never a note that only says you are on it.
     #[serde(default)]
     pub text: Option<String>,
-    /// `true`, with `thread`, marks the thread closed (resolved), after writing `text` if given.
-    /// Only when your person asks, or when you asked the question and it is answered.
-    #[serde(default)]
-    pub close: Option<bool>,
     /// `true`, with `thread`: marks the thread as this session's, a state the others in it see
     /// ("has it since 10:47"), without writing a note when there is no `text`. Use it just before
     /// you start changing files or running something long. Not for a team or global-board thread
     /// that does not name your person.
     #[serde(default)]
     pub claim: Option<bool>,
-    /// `true`, with `thread` and no `text` (and no `claim`): your person has handled the thread
-    /// up to the latest note this session has received, with nothing to write ("seen, nothing
-    /// to do": an answer you have now read, a thank-you). A note that arrived since stays
-    /// pending. It stops being pending for them; nothing is written and nothing
-    /// claimed. Not for a note that is not for you: leave that one pending.
+    /// `true`, with `thread` and no `text` (and no `claim`): your person has seen the thread up
+    /// to the latest note this session has received and has nothing to add (an answer you have
+    /// now read, a thank-you, an answer that settles what you asked). A note that arrived since
+    /// stays pending. It stops being pending for them until someone writes again; nothing is
+    /// written, and this session lets go of the thread if it held it. Threads do not close. Not
+    /// for a note that is not for you: leave that one pending.
+    #[serde(default)]
+    pub seen: Option<bool>,
+    /// Deprecated: the name of `seen` up to relevo 0.4. The same as `seen`; not with it.
     #[serde(default)]
     pub done: Option<bool>,
+    /// Deprecated: threads no longer close. Without `text` it is read as `seen`; with `text`,
+    /// ignored (writing the note handles the thread).
+    #[serde(default)]
+    pub close: Option<bool>,
     /// Any other field, to refuse.
     #[serde(flatten)]
     #[schemars(skip)]
     pub unknown: Map<String, Value>,
 }
 
-const SEND_FIELDS: &str = "`text`, `thread`, `close`, `claim` and `done`";
+const SEND_FIELDS: &str = "`text`, `thread`, `claim` and `seen` (and, deprecated, `done`, and `close` without text, read as `seen`)";
 
 /// Why `send` refuses the fields it does not take, if any: `to`, gone, saying what to do instead.
 fn unknown_fields(unknown: &Map<String, Value>) -> Option<String> {
@@ -154,6 +159,33 @@ fn unknown_fields(unknown: &Map<String, Value>) -> Option<String> {
             names.join(", ")
         )
     })
+}
+
+/// The body of `send`'s request. Threads no longer close: a `close` without text is `seen` (and
+/// claims nothing, as it never did); with text it is the note alone. It never reaches the server,
+/// which up to 0.4.x would close the thread. `seen` goes on the wire as `done`, its name up to
+/// 0.4.x, which servers accept through 0.x (docs/protocol.md): a 0.4.x server refuses `seen`, and
+/// a client may be newer than its server. Given with `done` too, both go, for the server to refuse.
+fn send_body(p: SendParams) -> Map<String, Value> {
+    let mut body = Map::new();
+    let (mut seen, mut claim) = (p.seen, p.claim);
+    if p.close == Some(true) && p.text.is_none() && seen.is_none() && p.done.is_none() {
+        seen = Some(true);
+        claim = None;
+    }
+    if let Some(thread) = p.thread {
+        body.insert("thread".into(), thread.into());
+    }
+    if let Some(text) = p.text {
+        body.insert("text".into(), text.into());
+    }
+    let seen_as = if p.done.is_some() { "seen" } else { "done" };
+    for (name, value) in [("claim", claim), (seen_as, seen), ("done", p.done)] {
+        if let Some(value) = value {
+            body.insert(name.into(), value.into());
+        }
+    }
+    body
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -298,7 +330,6 @@ fn show(shown: &Shown, thread: &Value) {
 fn unshown(shown: &Shown, t: &Value, me: Option<&str>) -> bool {
     let last = &t["last_note"];
     (s(&t["kind"]) == "direct" || t["named"] == true)
-        && s(&t["status"]) == "open"
         && render::pending(t)
         && last["id"].is_string()
         && Some(s(&last["author"])) != me
@@ -395,10 +426,11 @@ impl Relevo {
     #[tool(
         description = "Send a note: open a thread (no `thread`) or write in one (`thread`). \
                        Fields: `text` (the note), `thread` (an existing thread's id, \"r_…\"), \
-                       `close` (true to close the thread), `claim` (true, with `thread`, to mark \
-                       the thread as this session's), `done` (true, with `thread` and no text, \
-                       to mark it handled when it needs nothing: an answer you have now read, a \
-                       thank-you). Who the note is for is written in its text: @handle for a \
+                       `claim` (true, with `thread`, to mark the thread as this session's), \
+                       `seen` (true, with `thread` and no text, to mark it seen when it needs \
+                       nothing: an answer you have now read, a thank-you, an answer that \
+                       settles what you asked); `done`, and `close` without text, deprecated, \
+                       are read as `seen`. Who the note is for is written in its text: @handle for a \
                        person (@handle/repo or @handle/repo@branch for one context), @team-name \
                        for a team, and no @ at all to post on the global board, which everyone \
                        on the server sees and nobody has to answer: use it for announcements, or \
@@ -421,11 +453,12 @@ impl Relevo {
                        that does not name your person; answer one only from your own work or \
                        your person's files. Write in the first person, as your person would (\"I \
                        changed…\"). A new thread starts with a one-line subject (its title), no \
-                       greeting and no \"Re:\". `close: true` marks it resolved (a close needs no \
-                       text): only when your person asks, or when you asked the question and it \
-                       is answered. A note stays pending for your person until they answer, close it \
-                       or mark it `done`; if it is not for you, write nothing and leave it \
-                       pending. The answer says whom the note reached: check it is who your \
+                       greeting and no \"Re:\". Threads do not close: when you asked and the \
+                       answer settles it, mark it `seen`. `seen: true` with `thread` and no text \
+                       writes nothing, and this session lets go of the thread if it held it. A note stays pending for your person \
+                       until they answer it or mark it `seen`, and is pending again when someone \
+                       writes after; if it is not for you, write nothing and leave it pending. \
+                       The answer says whom the note reached: check it is who your \
                        person meant."
     )]
     async fn send(&self, Parameters(p): Parameters<SendParams>) -> Result<String, String> {
@@ -433,33 +466,19 @@ impl Relevo {
             return Err(refusal);
         }
         let client = self.client()?;
-        let mut body = Map::new();
         let opened = p.thread.is_none();
-        if let Some(thread) = p.thread {
-            body.insert("thread".into(), thread.into());
-        }
-        if let Some(text) = p.text {
-            body.insert("text".into(), text.into());
-        }
-        if let Some(close) = p.close {
-            body.insert("close".into(), close.into());
-        }
-        if let Some(claim) = p.claim {
-            body.insert("claim".into(), claim.into());
-        }
-        let done = p.done == Some(true);
-        if let Some(d) = p.done {
-            body.insert("done".into(), d.into());
-        }
+        let seen =
+            [p.seen, p.done].contains(&Some(true)) || (p.text.is_none() && p.close == Some(true));
+        let body = send_body(p);
         let v = client.send(body).await.map_err(error)?;
         if let Some(id) = v["thread"].as_str() {
             forget(&self.pushed, id);
         }
-        Ok(if done {
-            // `done` handles only what reached this session: say so when nothing of the thread
+        Ok(if seen {
+            // `seen` handles only what reached this session: say so when nothing of the thread
             // was shown here.
             let received = lock(&self.shown).contains_key(s(&v["thread"]));
-            render::done(&v, received)
+            render::seen(&v, received)
         } else {
             render::sent(&v, opened)
         })
@@ -664,23 +683,16 @@ pub fn channel_event(thread: &Value, me: Option<&str>) -> Option<Value> {
         content.push_str(&format!(
             "\nThis is your person's own question to a team or to everyone, and these notes \
              answer it: tell your person what they say. Do not answer it yourself; write in it \
-             (send(thread=\"{id}\", …)) only to follow up for your person, or to close it."
+             (send(thread=\"{id}\", …)) only to follow up for your person."
         ));
     } else if optional {
         content.push_str(&format!(
             "\nIf your own work or your person's files answer it, reply with \
              send(thread=\"{id}\", text=…); if not, stay silent."
         ));
-    } else if s(&thread["status"]) == "closed" {
-        // Closed with a last note: to read only; writing in it, `done` included, is refused.
-        content.push_str(
-            "\nThis thread is closed: it needs nothing more and cannot be answered. Read it, and \
-             tell your person if it matters to them; to follow up, open a new thread with \
-             send(text=\"@handle …\").",
-        );
     } else if !render::pending(thread) {
         // Another of the person's sessions already handled it: nothing to leave pending or mark
-        // done.
+        // seen.
         content.push_str(&format!(
             "\nYour person has already handled this thread: it is not pending. If it is for you \
              and asks something you can answer, answer with send(thread=\"{id}\", text=…); \
@@ -690,8 +702,8 @@ pub fn channel_event(thread: &Value, me: Option<&str>) -> Option<Value> {
         content.push_str(&format!(
             "\nIf it is for you, answer with send(thread=\"{id}\", text=…), or, if it needs work \
              first, claim it with send(thread=\"{id}\", claim=true) and no text before you \
-             start, or, if it needs nothing, mark it handled with send(thread=\"{id}\", \
-             done=true) and no text; if not, stay silent and leave it pending."
+             start, or, if it needs nothing, mark it seen with send(thread=\"{id}\", \
+             seen=true) and no text; if not, stay silent and leave it pending."
         ));
     }
     Some(json!({
@@ -845,9 +857,9 @@ mod tests {
             content.contains("claim it with send(thread=\"r_1\", claim=true) and no text"),
             "{content}"
         );
-        // Or, if it needs nothing, mark it handled; if it is not for us, leave it pending.
+        // Or, if it needs nothing, mark it seen; if it is not for us, leave it pending.
         assert!(
-            content.contains("mark it handled with send(thread=\"r_1\", done=true) and no text"),
+            content.contains("mark it seen with send(thread=\"r_1\", seen=true) and no text"),
             "{content}"
         );
         assert!(content.contains("leave it pending"), "{content}");
@@ -921,7 +933,7 @@ mod tests {
     }
 
     #[test]
-    fn channel_events_offer_done_and_pending_only_while_pending_and_open() {
+    fn channel_events_offer_seen_and_pending_only_while_pending() {
         let t = json!({
             "id": "r_1", "kind": "direct", "title": "T", "from": "ana",
             "participants": ["ana", "oscar"], "status": "open",
@@ -945,24 +957,17 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("send(thread=\"r_1\", text=…)"), "{out}");
-        for wrong in ["leave it pending", "done=true", "claim=true"] {
+        for wrong in ["leave it pending", "seen=true", "claim=true", "closed"] {
             assert!(!out.contains(wrong), "{wrong}: {out}");
         }
-        // Closed with a last note: to read; writing in it, `done` included, would fail.
-        let mut closed = handled.clone();
-        closed["status"] = "closed".into();
-        let out = content(&closed);
-        assert!(
-            out.contains("This thread is closed: it needs nothing more and cannot be answered"),
-            "{out}"
-        );
-        for wrong in ["leave it pending", "done=true", "claim=true", "text=…"] {
-            assert!(!out.contains(wrong), "{wrong}: {out}");
-        }
-        // Still pending: as before.
+        // Still pending: as before, and nothing ever says closed.
         let out = content(&t);
         assert!(
-            out.contains("done=true") && out.contains("leave it pending"),
+            out.contains("seen=true") && out.contains("leave it pending"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("done=true") && !out.contains("closed"),
             "{out}"
         );
     }
@@ -991,7 +996,6 @@ mod tests {
         assert!(unshown(&shown, &named_team, me));
         for not in [
             with("kind", "team".into()),
-            with("status", "closed".into()),
             with("pending", false.into()),
             // New notes by someone else are pushed as such.
             with("new_notes", json!([t["last_note"]])),
@@ -1113,6 +1117,40 @@ mod tests {
         );
     }
 
+    /// `seen` goes as `done` through 0.x, so that a 0.4.x server, which refuses `seen`, takes it.
+    #[test]
+    fn seen_goes_on_the_wire_as_done() {
+        let body = |args: Value| {
+            let p: SendParams = serde_json::from_value(args).unwrap();
+            Value::Object(send_body(p))
+        };
+        assert_eq!(
+            body(json!({ "thread": "r_1", "seen": true })),
+            json!({ "thread": "r_1", "done": true })
+        );
+        assert_eq!(
+            body(json!({ "thread": "r_1", "done": true })),
+            json!({ "thread": "r_1", "done": true })
+        );
+        // A close never reaches the server: without text it is `seen` (sent as `done`), claiming
+        // nothing; with text it is the note alone.
+        for args in [
+            json!({ "thread": "r_1", "close": true }),
+            json!({ "thread": "r_1", "close": true, "claim": true }),
+        ] {
+            assert_eq!(body(args), json!({ "thread": "r_1", "done": true }));
+        }
+        assert_eq!(
+            body(json!({ "thread": "r_1", "text": "x", "close": true, "claim": true })),
+            json!({ "thread": "r_1", "text": "x", "claim": true })
+        );
+        // Both at once: both go, and the server refuses them.
+        assert_eq!(
+            body(json!({ "thread": "r_1", "seen": true, "done": true })),
+            json!({ "thread": "r_1", "seen": true, "done": true })
+        );
+    }
+
     #[test]
     fn instructions_carry_the_rules_and_the_channel() {
         let plain = Relevo::new(Err("x".into()), false).get_info();
@@ -1122,6 +1160,7 @@ mod tests {
         }
         assert!(!text.contains("\n9. "), "{text}");
         // Rules v7: a note not for you stays pending; one that needs nothing is marked done.
+        // Rules v9: `done` is `seen`, and threads do not close.
         // Rules v8: who a note is for is written in it.
         assert!(
             text.contains("and no @ at all to post on the global board"),
@@ -1132,7 +1171,12 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("mark it handled with `send(thread, done: true)` and no text."),
+            text.contains("mark it seen with `send(thread, seen: true)` and no text"),
+            "{text}"
+        );
+        assert!(text.contains("Threads do not close"), "{text}");
+        assert!(
+            !text.contains("done") && !text.contains("Close a thread"),
             "{text}"
         );
         // Word for word as in docs/agents.md.

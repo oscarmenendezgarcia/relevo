@@ -116,22 +116,6 @@ impl ApiError {
         Self::new(status, "TOO_LARGE", message)
     }
 
-    pub fn thread_closed() -> Self {
-        Self::new(
-            StatusCode::CONFLICT,
-            "THREAD_CLOSED",
-            "this thread is closed; open a new thread instead",
-        )
-    }
-
-    pub fn forbidden() -> Self {
-        Self::new(
-            StatusCode::FORBIDDEN,
-            "FORBIDDEN",
-            "only the person who opened a team or global thread can close it",
-        )
-    }
-
     pub fn team_limit(limit: u32) -> Self {
         Self::new(
             StatusCode::TOO_MANY_REQUESTS,

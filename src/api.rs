@@ -104,7 +104,7 @@ struct Delivery {
     claimed_by: Option<ClaimOut>,
     /// How many of their live sessions have `note`.
     seen_by: i64,
-    /// When the person handled `note` (wrote in the thread, closed it or marked it done), and
+    /// When the person handled `note` (wrote in the thread or marked it seen), and
     /// from which session; `None` while it is not handled.
     handled_at: Option<String>,
     handled_by: Option<SessionOut>,
@@ -138,9 +138,9 @@ struct ThreadOut {
     teams: Vec<String>,
     /// The person is a named participant.
     named: bool,
-    status: String,
-    /// Pending for the person: `open`, naming them, with a note by someone else they have not
-    /// handled.
+    /// Always `"open"`: threads no longer close (kept through 0.x for clients that read it).
+    status: &'static str,
+    /// Pending for the person: naming them, with a note by someone else they have not handled.
     pending: bool,
     context: Option<String>,
     claimed: Option<&'static str>,
@@ -164,24 +164,30 @@ struct SendRequest {
     to: Option<Vec<String>>,
     thread: Option<String>,
     text: Option<String>,
-    #[serde(default)]
-    close: bool,
     /// With `thread`: claims it for this session, without a note when there is no `text`.
     #[serde(default)]
     claim: bool,
-    /// With `thread` and no `text`: the person has handled the thread up to the latest note that
-    /// reached this session.
+    /// With `thread` and no `text`: the person has seen the thread up to the latest note that
+    /// reached this session, with nothing to write: it is handled. Releases this session's claim.
+    #[serde(default)]
+    seen: bool,
+    /// Deprecated (through 0.x): `seen`'s name up to 0.4.x.
     #[serde(default)]
     done: bool,
+    /// Deprecated (through 0.x): threads no longer close. Without `text`, read as `seen`; with
+    /// `text`, ignored.
+    #[serde(default)]
+    close: bool,
     key: Option<String>,
 }
 
 #[derive(Serialize)]
 struct SendResult {
     thread: String,
-    /// `None` when the send only closed the thread.
+    /// `None` when the send wrote none (a claim or a `seen` alone).
     note: Option<String>,
-    status: String,
+    /// Always `"open"` (kept through 0.x for clients that read it).
+    status: &'static str,
     /// Who holds the thread for the writer's person afterwards, as `claim` names it for the
     /// session that asks.
     claimed: Option<&'static str>,
@@ -213,8 +219,6 @@ struct ThreadRow {
     kind: String,
     title: String,
     from: String,
-    opener_id: i64,
-    status: String,
     /// The latest note that reached this session.
     delivered_seq: i64,
     last_seq: i64,
@@ -239,7 +243,7 @@ struct Candidate {
 /// The thread `?3` of person `?1` as session `?2` sees it. A session without its own delivery row
 /// has what its person has.
 const THREAD_SQL: &str = "
-SELECT t.id, t.kind, t.title, o.handle, t.opener_id, t.status,
+SELECT t.id, t.kind, t.title, o.handle,
        coalesce(s.delivered_seq, p.delivered_seq, 0), p.last_seq, p.waiting, p.context,
        p.claimed_by, p.named_seq IS NOT NULL
 FROM participants p
@@ -258,14 +262,12 @@ fn find_thread(conn: &Connection, session: &Session, id: &str) -> Result<ThreadR
                 kind: r.get(1)?,
                 title: r.get(2)?,
                 from: r.get(3)?,
-                opener_id: r.get(4)?,
-                status: r.get(5)?,
-                delivered_seq: r.get(6)?,
-                last_seq: r.get(7)?,
-                waiting: r.get(8)?,
-                context: r.get(9)?,
-                claimed_by: r.get(10)?,
-                named: r.get(11)?,
+                delivered_seq: r.get(4)?,
+                last_seq: r.get(5)?,
+                waiting: r.get(6)?,
+                context: r.get(7)?,
+                claimed_by: r.get(8)?,
+                named: r.get(9)?,
             })
         },
     )
@@ -277,34 +279,33 @@ fn find_thread(conn: &Connection, session: &Session, id: &str) -> Result<ThreadR
 /// index on `session_threads`, condition on `x`, the row read through either). `?2` is the
 /// session, `?3` its context and `?4` that context's repository when it names a branch: a thread
 /// addressed to the repository alone reaches the session on any branch. With `all`, every thread
-/// of the person; without it, a resolved (closed `team`) thread is in none. The routes do not
-/// overlap.
+/// of the person. The routes do not overlap.
 fn routes(context: Option<&str>, all: bool) -> Vec<(&'static str, &'static str, &'static str)> {
     const CLAIM: (&str, &str) = ("participants_inbox_claim", "session_new_claim");
     const CONTEXT: (&str, &str) = ("participants_inbox_context", "session_new_context");
     if all {
         return vec![("participants_inbox", "session_new", "1")];
     }
-    let mut routes = vec![(CLAIM.0, CLAIM.1, "x.resolved = 0 AND x.claimed_by = ?2")];
+    let mut routes = vec![(CLAIM.0, CLAIM.1, "x.claimed_by = ?2")];
     let Some(context) = context else {
-        routes.push((CLAIM.0, CLAIM.1, "x.resolved = 0 AND x.claimed_by IS NULL"));
+        routes.push((CLAIM.0, CLAIM.1, "x.claimed_by IS NULL"));
         return routes;
     };
     routes.push((
         CONTEXT.0,
         CONTEXT.1,
-        "x.resolved = 0 AND x.claimed_by IS NULL AND x.context IS NULL",
+        "x.claimed_by IS NULL AND x.context IS NULL",
     ));
     routes.push((
         CONTEXT.0,
         CONTEXT.1,
-        "x.resolved = 0 AND x.claimed_by IS NULL AND x.context = ?3",
+        "x.claimed_by IS NULL AND x.context = ?3",
     ));
     if context_repo(context).is_some() {
         routes.push((
             CONTEXT.0,
             CONTEXT.1,
-            "x.resolved = 0 AND x.claimed_by IS NULL AND x.context = ?4",
+            "x.claimed_by IS NULL AND x.context = ?4",
         ));
     }
     routes
@@ -421,22 +422,20 @@ fn inbox_count(conn: &Connection, session: &Session, all: bool) -> Result<usize,
 }
 
 /// Recomputes what the rows of a thread know about it (latest note, new, waiting (pending),
-/// inbox, resolved, fresh, and the copies on the sessions' rows). Runs after every change to the
-/// thread: a note, a close, a delivery, a claim, a person handling it, a person named.
+/// inbox, fresh, and the copies on the sessions' rows). Runs after every change to the thread: a
+/// note, a delivery, a claim, a person handling it, a person named.
 fn refresh(conn: &Connection, thread: &str) -> Result<(), ApiError> {
     // A thread is opened by its first note, so it always has a latest one.
-    let (last_seq, open, closed_shared): (i64, bool, bool) = conn.query_row(
-        "SELECT n.seq, t.status = 'open', t.kind != 'direct' AND t.status = 'closed'
-         FROM threads t JOIN notes n ON n.thread_id = t.id
-         WHERE t.id = ?1 ORDER BY n.seq DESC LIMIT 1",
+    let last_seq: i64 = conn.query_row(
+        "SELECT max(seq) FROM notes WHERE thread_id = ?1",
         [thread],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        |r| r.get(0),
     )?;
-    // Pending (`waiting`): open, naming the person, with a note by someone else after what they
-    // handled, and from the one that named them on (`FLOOR`). Fresh: pending, and one of their
-    // sessions has a note they have not handled. Resolved: a closed `team` or `global` thread
-    // that does not name them.
-    let pending = format!("(?3 AND named_seq IS NOT NULL AND {FLOOR} < last_other_seq)");
+    // Pending (`waiting`): naming the person, with a note by someone else after what they
+    // handled, and from the one that named them on (`FLOOR`). A thread never closes, so a note
+    // written after they handled it is pending again. Fresh: pending, and one of their sessions
+    // has a note they have not handled.
+    let pending = format!("(named_seq IS NOT NULL AND {FLOOR} < last_other_seq)");
     conn.execute(
         &format!(
             "UPDATE participants SET
@@ -444,11 +443,10 @@ fn refresh(conn: &Connection, thread: &str) -> Result<(), ApiError> {
                  has_new = coalesce(delivered_seq, 0) < last_other_seq,
                  waiting = {pending},
                  inbox = coalesce(delivered_seq, 0) < last_other_seq OR ({pending}),
-                 resolved = ?4 AND named_seq IS NULL,
                  fresh = {pending} AND {FLOOR} < coalesce(delivered_seq, 0)
              WHERE thread_id = ?1"
         ),
-        params![thread, last_seq, open, closed_shared],
+        params![thread, last_seq],
     )?;
     conn.execute(
         "UPDATE session_threads AS s SET
@@ -457,8 +455,7 @@ fn refresh(conn: &Connection, thread: &str) -> Result<(), ApiError> {
              last_seq = p.last_seq,
              claimed_by = p.claimed_by,
              context = p.context,
-             person_inbox = p.inbox,
-             resolved = p.resolved
+             person_inbox = p.inbox
          FROM participants p
          WHERE s.thread_id = ?1 AND p.thread_id = s.thread_id AND p.person_id = s.person_id",
         [thread],
@@ -684,7 +681,7 @@ fn thread_out(
         participants: participants(conn, &row.id)?,
         teams: thread_teams(conn, &row.id)?,
         named: row.named,
-        status: row.status.clone(),
+        status: "open",
         pending: row.waiting,
         context: row.context.clone(),
         claimed: claim(row.claimed_by, session),
@@ -1055,8 +1052,12 @@ async fn send(
 
 /// The whole of `send`, in one transaction so that idempotency and the limits cannot race.
 /// Returns the result and the people to wake: the other participants, when a note was written,
-/// and whoever held the thread, when it was closed.
-fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<(SendResult, Vec<i64>), ApiError> {
+/// and the writer's person, when a `seen` released this session's claim.
+fn write(
+    app: &App,
+    caller: &Caller,
+    mut req: SendRequest,
+) -> Result<(SendResult, Vec<i64>), ApiError> {
     if let Some(key) = &req.key
         && (key.is_empty() || key.chars().count() > MAX_KEY_CHARS)
     {
@@ -1073,7 +1074,6 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<(SendResult, Ve
             ));
         }
     }
-    let marks = req.close || req.claim || req.done;
     if req.to.is_some() {
         if req.thread.is_some() {
             return Err(ApiError::bad_request(
@@ -1081,24 +1081,45 @@ fn write(app: &App, caller: &Caller, req: SendRequest) -> Result<(SendResult, Ve
                  is for in its text, with @handle)",
             ));
         }
-        if marks {
+        if req.close || req.claim || req.seen || req.done {
             return Err(ApiError::bad_request(
-                "'to' opens a thread: 'close', 'claim' and 'done' go with 'thread' only",
+                "'to' opens a thread: 'claim' and 'seen' go with 'thread' only",
             ));
         }
-    } else if req.thread.is_none() && marks {
+    }
+    if req.seen && req.done {
         return Err(ApiError::bad_request(
-            "'close', 'claim' and 'done' go with 'thread' only: opening a thread claims nothing",
+            "give 'seen' or 'done', not both ('done' is the deprecated name of 'seen')",
         ));
     }
     if req.done && (req.text.is_some() || req.claim) {
         return Err(ApiError::bad_request(
-            "done goes with 'thread' alone: no 'text' and no 'claim'",
+            "done goes with 'thread' alone: no 'text' and no 'claim' ('done' is the deprecated \
+             name of 'seen')",
+        ));
+    }
+    // The deprecated `close`: threads no longer close. With `text` the note is written, and this
+    // session lets go of the thread as after `seen` (see `write_as`); without, it is read as `seen`. A 0.4 client's close never fails:
+    // with `claim` too, the claim is dropped, as a close without text never claimed.
+    if req.close && req.text.is_none() && !req.seen && !req.done {
+        req.claim = false;
+        req.seen = true;
+    }
+    req.seen |= req.done;
+    if req.seen && (req.text.is_some() || req.claim) {
+        return Err(ApiError::bad_request(
+            "seen goes with 'thread' alone: no 'text' and no 'claim'",
+        ));
+    }
+    let marks = req.claim || req.seen;
+    if req.thread.is_none() && marks {
+        return Err(ApiError::bad_request(
+            "'claim' and 'seen' go with 'thread' only: opening a thread claims nothing",
         ));
     }
     if req.text.is_none() && !(req.thread.is_some() && marks) {
         return Err(ApiError::bad_request(
-            "text is required (it may be left out only to close, claim or mark done a thread)",
+            "text is required (it may be left out only to claim a thread or mark it seen)",
         ));
     }
     // Who it is for, as far as that can be checked without the database: an unknown name is
@@ -1177,12 +1198,6 @@ fn write_as(
         }
         Some(id) => {
             let row = find_thread(tx, session, id)?;
-            if row.status == "closed" {
-                return Err(ApiError::thread_closed());
-            }
-            if req.close && row.kind != "direct" && row.opener_id != caller.person_id {
-                return Err(ApiError::forbidden());
-            }
             let names = reply_names(tx, &whom.mentions, now)?;
             if req.text.is_some() {
                 let recent: i64 = tx.query_row(
@@ -1253,41 +1268,28 @@ fn write_as(
         }
         None => None,
     };
-    // Writing in the thread, closing it or `done` handles it for the writer's person, up to the
-    // latest note that reached this session. Claiming does not: if the claiming session dies,
-    // the note is still pending.
-    if note_id.is_some() || req.close || req.done {
+    // Writing in the thread or `seen` handles it for the writer's person, up to the latest note
+    // that reached this session. Claiming does not: if the claiming session dies, the note is
+    // still pending.
+    if note_id.is_some() || req.seen {
         handle(tx, caller, session, &thread_id, now)?;
     }
     // Writing in an existing thread claims it for this session, and so does `claim` without a
     // note. Opening a thread claims nothing: the asker has nothing to take on, and the answers
-    // must reach the person's next session too. Closing without text does not claim.
+    // must reach the person's next session too.
     if req.thread.is_some() && (note_id.is_some() || req.claim) {
         take_claim(tx, caller, session, &thread_id, now)?;
     }
-
-    // A closed thread is nobody's work any more: closing releases every claim on it, for every
-    // participant (`refresh` copies that to the sessions' rows). Their other sessions may see it
-    // now (a closed direct thread with notes they have not fetched), so they are woken.
-    let mut released: Vec<i64> = Vec::new();
-    if req.close {
-        tx.execute(
-            "UPDATE threads SET status = 'closed' WHERE id = ?1",
-            [&thread_id],
-        )?;
-        tx.execute(
-            "INSERT INTO thread_closes (thread_id, person_id, closed_at) VALUES (?1, ?2, ?3)",
-            params![thread_id, caller.person_id, now],
-        )?;
-        released = tx
-            .prepare(
-                "UPDATE participants SET claimed_by = NULL, claimed_context = NULL, claimed_at = NULL
-                 WHERE thread_id = ?1 AND claimed_by IS NOT NULL
-                 RETURNING person_id",
-            )?
-            .query_map([&thread_id], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-    }
+    // `seen`: this session has nothing more to do there, so it lets go of the thread if it holds
+    // it (`refresh` copies that to the sessions' rows). So does a 0.4 client's "reply and close"
+    // (`close` with `text`), once the note is written. The person's other sessions may see it
+    // now, so they are woken. Another session's claim stays.
+    let released = (req.seen || (req.close && note_id.is_some() && req.thread.is_some()))
+        && tx.execute(
+            "UPDATE participants SET claimed_by = NULL, claimed_context = NULL, claimed_at = NULL
+             WHERE thread_id = ?1 AND person_id = ?2 AND claimed_by = ?3",
+            params![thread_id, caller.person_id, session.id],
+        )? > 0;
     refresh(tx, &thread_id)?;
     let claimed_by: Option<i64> = tx.query_row(
         "SELECT claimed_by FROM participants WHERE thread_id = ?1 AND person_id = ?2",
@@ -1299,7 +1301,7 @@ fn write_as(
     let result = SendResult {
         thread: thread_id,
         note: note_id,
-        status: if req.close { "closed" } else { "open" }.to_string(),
+        status: "open",
         claimed: claim(claimed_by, session),
         told: Told {
             kind,
@@ -1333,17 +1335,15 @@ fn write_as(
             .collect::<rusqlite::Result<_>>()?,
         None => Vec::new(),
     };
-    for person in released {
-        if !woken.contains(&person) {
-            woken.push(person);
-        }
+    if released {
+        woken.push(caller.person_id);
     }
     Ok((result, woken))
 }
 
 /// The person has handled the thread up to the latest note that reached this session (after
 /// `deliver` ran for a note it wrote caught up, so that note counts): a note that landed after
-/// the session last looked was never seen there, so writing or `done` cannot handle it. When
+/// the session last looked was never seen there, so writing or `seen` cannot handle it. When
 /// that covers a note by someone else they had not handled, it records when and from which
 /// session (its context now).
 fn handle(
@@ -1438,7 +1438,7 @@ fn replay(
 ) -> Result<Option<SendResult>, ApiError> {
     let first = tx
         .query_row(
-            "SELECT thread_id, note_id, status, claimed_by, result FROM send_keys
+            "SELECT thread_id, note_id, claimed_by, result FROM send_keys
              WHERE person_id = ?1 AND key = ?2",
             params![caller.person_id, key],
             |r| {
@@ -1446,13 +1446,14 @@ fn replay(
                     r.get::<_, String>(0)?,
                     r.get(1)?,
                     r.get(2)?,
-                    r.get(3)?,
-                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, Option<String>>(3)?,
                 ))
             },
         )
         .optional()?;
-    let Some((thread, note, status, claimed_by, told)) = first else {
+    // Its `status` is not read: a send that closed a thread under 0.4.x kept "closed", and every
+    // thread is open now.
+    let Some((thread, note, claimed_by, told)) = first else {
         return Ok(None);
     };
     let told = match told.and_then(|t| serde_json::from_str(&t).ok()) {
@@ -1470,7 +1471,7 @@ fn replay(
     Ok(Some(SendResult {
         thread,
         note,
-        status,
+        status: "open",
         claimed: claim(claimed_by, session),
         told,
     }))
@@ -1848,7 +1849,7 @@ mod tests {
                     );
                     if !all {
                         let bounded = if step.contains("session_count") {
-                            step.contains("session_id=? AND resolved=? AND claimed_by")
+                            step.contains("session_id=? AND claimed_by")
                         } else {
                             step.contains("person_id=? AND claimed_by")
                         };

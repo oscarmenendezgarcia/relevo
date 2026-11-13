@@ -194,7 +194,7 @@ export function renderThread(t: Thread, options: ThreadOptions = {}): string {
       ? `Posted by @${t.from} on the global board, to everyone on the server`
       : `Opened by @${t.from}; participants: ${t.participants.map((p) => `@${p}`).join(", ")}`;
   const named = t.kind === "direct" ? "" : namesYou(t) ? " It names your person." : " It does not name your person.";
-  const lines = [`## Thread ${t.id} (${kindLabel(t)}, ${t.status})`, title(t, me), `${opened}.${named}`];
+  const lines = [`## Thread ${t.id} (${kindLabel(t)})`, title(t, me), `${opened}.${named}`];
   if (t.context) lines.push(`Addressed to your person in context ${t.context}.`);
   // Set by the background loop: its latest note was never shown in this process. The answer that
   // lost it may have carried earlier notes too, and only the latest one comes back.
@@ -215,14 +215,14 @@ export function renderThread(t: Thread, options: ThreadOptions = {}): string {
   if (isPending(t)) {
     lines.push(
       "Pending for your person: they have not handled it yet. If it is for you and needs nothing, " +
-        `mark it handled with relevo_send { thread: "${t.id}", done: true } and no text.`,
+        `mark it seen with relevo_send { thread: "${t.id}", seen: true } and no text.`,
     );
   }
   lines.push(holder(t, me));
   // Who else in the thread holds it (`held_by`, from the inbox): `relevo_thread`'s delivery says it
   // for every participant already.
   if (!t.delivery) for (const h of t.held_by ?? []) lines.push(`${claimState(h.handle, h)}.`);
-  if (optional(t) && t.status === "open" && t.from !== me) {
+  if (optional(t) && t.from !== me) {
     lines.push(
       "It does not name your person, so answering is optional: answer only from your own work or your person's files " +
         "(repeating someone's `about` line, or guessing who might know, is not an answer); do not claim it.",
@@ -285,7 +285,7 @@ export function renderThread(t: Thread, options: ThreadOptions = {}): string {
 function renderSkipped(t: Thread, me: string | undefined): string {
   const n = t.new_notes?.length ?? 0;
   const lines = [
-    `## Thread ${t.id} (${kindLabel(t)}, ${t.status}): not shown here for length`,
+    `## Thread ${t.id} (${kindLabel(t)}): not shown here for length`,
     title(t, me),
   ];
   if (isPending(t)) lines.push("Pending for your person.");
@@ -323,7 +323,7 @@ export function renderInbox(inbox: Inbox, notice?: string | null): string {
     : hadNew
       ? `${inbox.more} more thread(s) not shown: call relevo_inbox again.`
       : `${inbox.more} more thread(s) not shown: older ones, also pending for your person. Calling relevo_inbox again shows the same threads; ` +
-        "answering, closing or marking done those above makes room.";
+        "answering or marking seen those above makes room.";
   const skipped = inbox.threads.map((t) => renderSkipped(t, me));
   let room = MAX_CHARS - out.join("\n\n").length - (more ? more.length + 2 : 0);
   // What the threads after each one take at least, listed only.
@@ -354,19 +354,14 @@ export function renderArrival(t: Thread, me?: string): string {
     // Answers to the person's own question: theirs to read, not the agent's to answer.
     intro =
       `Relevo: new in thread ${t.id}, your person's own question to a team or to everyone.${who} These notes answer it: tell your person what they say. ` +
-      `Do not answer it yourself; write in it (relevo_send { thread: "${t.id}", … }) only to follow up for your person, or to close it.`;
+      `Do not answer it yourself; write in it (relevo_send { thread: "${t.id}", … }) only to follow up for your person.`;
   } else if (optional(t)) {
     intro =
       `Relevo: new in thread ${t.id}${to}; it does not name your person, so answering is optional.${who} ` +
       `If your own work or your person's files answer it, reply with ${reply}; ` +
       "if not, stay silent: repeating someone's `about` line, or guessing who might know, is not an answer. Do not claim it.";
-  } else if (t.status === "closed") {
-    // Closed with a last note: to read only; writing in it, `done` included, is refused.
-    intro =
-      `Relevo: new in thread ${t.id}${to}, which is closed.${who} It needs nothing more and cannot be answered: read it, and tell your person if it matters to them. ` +
-      'To follow up, open a new thread with relevo_send { text: "@handle …" }.';
   } else if (!isPending(t)) {
-    // Another of the person's sessions already handled it: nothing stays pending, nothing to mark done.
+    // Another of the person's sessions already handled it: nothing stays pending, nothing to mark seen.
     intro =
       `Relevo: new in thread ${t.id}${to}.${who} Your person has already handled this thread: it is not pending. ` +
       `Read it; if it is for you and asks something you can answer, answer with ${reply}; otherwise stay silent.`;
@@ -379,7 +374,7 @@ export function renderArrival(t: Thread, me?: string): string {
       `it stays pending for your person (do not reply "not for me"). Read what you need first; if you can answer or explain from that, just answer with ${reply}: your reply takes the thread. ` +
       `If it needs work first, claim it with relevo_send { thread: "${t.id}", claim: true } and no text just before you start changing files or running something long: ` +
       "a state the others see, not a note. Never write a note that only says you are on it. " +
-      `If it is for you but needs nothing (an answer you have now read, a thank-you), mark it handled with relevo_send { thread: "${t.id}", done: true } and no text.`;
+      `If it is for you but needs nothing (an answer you have now read, a thank-you), mark it seen with relevo_send { thread: "${t.id}", seen: true } and no text.`;
     intro += share;
   }
   if (t.claimed === "other-session") intro += " Another of your person's sessions has this thread: step aside.";

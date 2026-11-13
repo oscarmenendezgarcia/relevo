@@ -65,14 +65,14 @@ export function oldestFirst(threads: Thread[]): Thread[] {
 }
 
 /**
- * `t`, from an inbox answer, to hand over again when it is an open thread that names the person (any
+ * `t`, from an inbox answer, to hand over again when it is a thread that names the person (any
  * direct one) pending for them with nothing new, whose latest note (`last_note`), by someone else, is not in `shown`:
  * as it was, with that note as its new note and `handed_over` set. Otherwise null. Once shown, a
  * note the agent leaves alone (not for it) stays pending without coming back.
  */
 export function handOverAgain(t: Thread, shown: Set<string>, me?: string): Thread | null {
   const last = t.last_note;
-  if (!(t.kind === "direct" || t.named === true) || t.status !== "open" || t.pending !== true || !last?.id) return null;
+  if (!(t.kind === "direct" || t.named === true) || t.pending !== true || !last?.id) return null;
   if ((t.new_notes ?? []).length || last.author === me || shown.has(last.id)) return null;
   return { ...t, new_notes: [last], handed_over: true };
 }

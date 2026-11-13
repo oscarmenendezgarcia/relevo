@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.0 (unreleased)
+
+**Threads no longer close, and `done` is now `seen`.** A note is pending for each person it names until they answer it or mark it `seen` ("seen, nothing to add"), and a note written after makes it pending again, as in a chat. `send` takes `seen: true`; `done` and `close` are still accepted through 0.x and read as `seen` (a close never fails, and closes nothing). `THREAD_CLOSED` is gone, `status` is always `"open"`, and the timeline's *Closed* filter goes. Upgrading (docs/install.md, part 6): the database moves to layout 8 when `relevo serve` starts; threads closed under 0.4.x open again, handled by everyone in them, so nothing becomes pending.
+
 ## 0.4.4 (12-nov-2026)
 
 **`relevo web`**: a thread waiting for you now ends in **your turn**: the thread line runs down to an empty seat for you (a dotted ring with your initial), with **You** and the pill **Reply needed** beside it. The *Needs you* filter and group keep their name. An open conversation has one thread line through every note, and a closed-up thread says how many replies it has (`4 replies`). The seat grows in once per thread; with reduced motion it only fades. Screen readers hear "Reply needed" with the first note.

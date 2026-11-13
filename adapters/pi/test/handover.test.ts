@@ -293,7 +293,6 @@ test("only a pending open direct thread with nothing new, whose latest note by s
   for (const not of [
     { ...t, kind: "team" as const },
     { ...t, kind: "global" as const, named: false },
-    { ...t, status: "closed" as const },
     { ...t, pending: false },
     { ...t, pending: undefined }, // A server before 0.3.0.
     { ...t, new_notes: [note("n_bbbbbbbbbbbb", "ana")] }, // New notes are handed over as such.

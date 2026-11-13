@@ -69,7 +69,7 @@ test("notes pending when the extension starts are handed over at once, oldest fi
   }
 });
 
-test("a thread the agent wrote in, marked done or read whole while it waited is not handed over after", async () => {
+test("a thread the agent wrote in, marked seen or read whole while it waited is not handed over after", async () => {
   const first = (await api(server, ana, "POST", "/api/send", { text: "@oscar Oldest: deploy window?" })).thread;
   await sleep(1100);
   const later: string[] = [];
@@ -82,16 +82,16 @@ test("a thread the agent wrote in, marked done or read whole while it waited is 
   try {
     await until(() => ext.seen.length === 1);
     assert.deepEqual(handed(ext), [first]);
-    // During that turn the agent deals with the three others: it answers one, marks one done, reads one whole.
+    // During that turn the agent deals with the three others: it answers one, marks one seen, reads one whole.
     assert.match(await ext.tool("relevo_send", { thread: later[0], text: "Yes: Tuesday." }, home), /^Sent note/);
-    assert.match(await ext.tool("relevo_send", { thread: later[1], done: true }, home), /^Marked thread/);
+    assert.match(await ext.tool("relevo_send", { thread: later[1], seen: true }, home), /^Marked thread/);
     assert.match(await ext.tool("relevo_thread", { id: later[2] }, home), /the runbook moved/);
     await ext.session.finishTurn();
     await sleep(1500);
     assert.deepEqual(handed(ext), [first], "nothing more handed over");
     assert.equal((await oscarDelivery(later[1])).handled_by.label, "pi laptop");
 
-    // A new note in a thread marked done makes it pending again, and it is handed over.
+    // A new note in a thread marked seen makes it pending again, and it is handed over.
     await api(server, ana, "POST", "/api/send", { thread: later[1], text: "One more thing: the logs?" });
     await until(() => ext.sent.length === 2);
     assert.equal(handed(ext)[1], later[1]);
@@ -167,8 +167,8 @@ test("a note a session leaves alone stays pending: a session started later gets 
     try {
       await until(() => c.seen.length === 1);
       assert.deepEqual(handed(c), [thread]);
-      // It needs nothing from this one either: marked done, no new session gets it.
-      await c.tool("relevo_send", { thread, done: true }, home);
+      // It needs nothing from this one either: marked seen, no new session gets it.
+      await c.tool("relevo_send", { thread, seen: true }, home);
     } finally {
       await c.emit("session_shutdown", { reason: "quit" }, c.ctx(home, "tui"));
     }

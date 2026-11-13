@@ -181,10 +181,11 @@ struct Scene {
     front: String,
     /// Dan on the board; Bob's reply names Ana.
     board: String,
-    /// Ana to Bob, closed by Bob.
-    closed_direct: String,
-    /// Carol to @backend, closed by Carol: resolved.
-    closed_team: String,
+    /// Ana to Bob, answered by Bob with a 0.4 close (which closes nothing), then marked seen by
+    /// Ana: handled.
+    seen_direct: String,
+    /// Carol to @backend, which she marked seen with a 0.4 close: open, pending for nobody.
+    seen_team: String,
 }
 
 async fn scene() -> Scene {
@@ -192,15 +193,27 @@ async fn scene() -> Scene {
         &["ana", "bob", "carol", "dan"],
         &[("backend", &["ana", "bob"]), ("front", &["carol", "dan"])],
     );
-    let closed_direct = s.open("ana", "@bob old question").await;
-    s.reply("bob", &closed_direct, "old answer").await;
+    let seen_direct = s.open("ana", "@bob old question").await;
+    s.reply("bob", &seen_direct, "old answer").await;
     s.send(
         "bob",
-        json!({ "thread": closed_direct, "close": true, "text": "closing" }),
+        json!({ "thread": seen_direct, "close": true, "text": "closing" }),
     )
     .await;
-    let closed_team = s.open("carol", "@backend anyone? (closed)").await;
-    s.send("carol", json!({ "thread": closed_team, "close": true }))
+    // Ana reads it, then marks it seen: that handles it.
+    call(
+        &s.app,
+        "GET",
+        &format!("/api/threads/{seen_direct}"),
+        Some(&s.tokens["ana"]),
+        &[("relevo-session", "agent-one")],
+        None,
+    )
+    .await;
+    s.send("ana", json!({ "thread": seen_direct, "seen": true }))
+        .await;
+    let seen_team = s.open("carol", "@backend anyone? (seen)").await;
+    s.send("carol", json!({ "thread": seen_team, "close": true }))
         .await;
     let front = s.open("carol", "@front front only").await;
     let bob_carol = s.open("bob", "@carol between us").await;
@@ -238,8 +251,8 @@ async fn scene() -> Scene {
         bob_carol,
         front,
         board,
-        closed_direct,
-        closed_team,
+        seen_direct,
+        seen_team,
     }
 }
 
@@ -263,7 +276,8 @@ async fn the_board_lists_the_global_threads_and_threads_what_is_for_the_person()
     assert_eq!(t["first_note"]["text"], "The VPN is down tomorrow");
     assert_eq!(t["last_note"]["author"], "bob");
     assert_eq!(t["handled_by_you"], false);
-    assert_eq!(t["closed_by"], Value::Null);
+    assert_eq!(t["status"], "open");
+    assert!(t.get("closed_by").is_none(), "{t}");
     assert_eq!(v["cursor"], Value::Null);
     assert_eq!(v["names"]["dan"], "DAN");
     assert_eq!(v["names"]["bob"], "BOB");
@@ -279,10 +293,16 @@ async fn the_board_lists_the_global_threads_and_threads_what_is_for_the_person()
             sc.answered_to_her.clone(),
             sc.team_q.clone(),
             sc.board.clone(),
-            sc.closed_team.clone(),
-            sc.closed_direct.clone(),
+            sc.seen_team.clone(),
+            sc.seen_direct.clone(),
         ]
     );
+    // Every thread is open; none says who closed it.
+    for t in v["threads"].as_array().unwrap() {
+        assert_eq!(t["status"], "open", "{t}");
+        assert!(t.get("closed_by").is_none(), "{t}");
+    }
+    assert_eq!(v["threads"][5]["handled_by_you"], true);
     let first = &v["threads"][0];
     assert_eq!(first["kind"], "direct");
     assert_eq!(first["participants"], json!(["bob", "ana"]));
@@ -328,32 +348,29 @@ async fn show_team_and_with_filter_the_threads_tab() {
     // Opened by someone else, and Ana wrote in it.
     let v = s.timeline("ana", "tab=threads&show=answered").await;
     assert_eq!(ids(&v), vec![sc.team_q.clone()]);
+    // Accepted for pages of 0.4.x, it lists nothing: threads no longer close.
     let v = s.timeline("ana", "tab=threads&show=closed").await;
-    assert_eq!(
-        ids(&v),
-        vec![sc.closed_team.clone(), sc.closed_direct.clone()]
-    );
-    assert_eq!(v["threads"][0]["closed_by"], "carol");
-    assert_eq!(v["threads"][1]["closed_by"], "bob");
+    assert_eq!(ids(&v), Vec::<String>::new());
+    assert_eq!(v["cursor"], Value::Null);
     let v = s.timeline("ana", "tab=threads&show=all").await;
     assert_eq!(ids(&v).len(), 6);
 
     let v = s.timeline("ana", "tab=threads&team=backend").await;
-    assert_eq!(ids(&v), vec![sc.team_q.clone(), sc.closed_team.clone()]);
+    assert_eq!(ids(&v), vec![sc.team_q.clone(), sc.seen_team.clone()]);
     // A team Ana is not in: only threads she takes part in, so none.
     let v = s.timeline("ana", "tab=threads&team=front").await;
     assert_eq!(ids(&v), Vec::<String>::new());
     let v = s
         .timeline("ana", "tab=threads&team=backend&show=closed")
         .await;
-    assert_eq!(ids(&v), vec![sc.closed_team.clone()]);
+    assert_eq!(ids(&v), Vec::<String>::new());
 
     // With Carol: the threads Carol is in (everyone is in a board thread), never Bob and Carol's
     // direct thread.
     let v = s.timeline("ana", "tab=threads&with=carol").await;
     assert_eq!(
         ids(&v),
-        vec![sc.team_q.clone(), sc.board.clone(), sc.closed_team.clone()]
+        vec![sc.team_q.clone(), sc.board.clone(), sc.seen_team.clone()]
     );
     let v = s.timeline("ana", "tab=threads&with=BOB&show=waiting").await;
     assert_eq!(
@@ -381,7 +398,7 @@ async fn counts_count_what_each_tab_show_and_team_would_list() {
     assert_eq!(v["threads"][0]["pending"], true);
     assert_eq!(
         v["counts"],
-        json!({ "board": 1, "threads": 6, "waiting": 3, "answered": 1, "closed": 2,
+        json!({ "board": 1, "threads": 6, "waiting": 3, "answered": 1,
                 "teams": { "backend": 2 } })
     );
     // The same whatever the filters.
@@ -395,7 +412,7 @@ async fn counts_count_what_each_tab_show_and_team_would_list() {
     let v = sc.s.timeline("carol", "tab=threads").await;
     assert_eq!(
         v["counts"],
-        json!({ "board": 1, "threads": 4, "waiting": 1, "answered": 0, "closed": 1,
+        json!({ "board": 1, "threads": 4, "waiting": 1, "answered": 0,
                 "teams": { "front": 1 } })
     );
     let v = sc.s.timeline("dan", "tab=board").await;
@@ -461,11 +478,14 @@ async fn every_count_is_the_length_of_its_list() {
             ("threads", "tab=threads&limit=50"),
             ("waiting", "tab=threads&show=waiting&limit=50"),
             ("answered", "tab=threads&show=answered&limit=50"),
-            ("closed", "tab=threads&show=closed&limit=50"),
         ] {
             let v = sc.s.timeline(who, query).await;
             assert_eq!(counts[count], len(&v), "{who} {query}");
         }
+        // No count for `show=closed`, which lists nothing.
+        assert!(counts.get("closed").is_none(), "{counts}");
+        let v = sc.s.timeline(who, "tab=threads&show=closed&limit=50").await;
+        assert_eq!(len(&v), 0, "{who}");
         for (team, n) in counts["teams"].as_object().unwrap() {
             let v =
                 sc.s.timeline(who, &format!("tab=threads&team={team}&limit=50"))
@@ -681,11 +701,16 @@ async fn handled_by_you_follows_the_latest_note_by_someone_else() {
     // Bob opened it and nobody else wrote: nothing for him to handle.
     let v = s.timeline("bob", "tab=threads").await;
     assert_eq!(handled(&v), false);
-    // Closed by Ana, in a direct thread anyone may close.
+    // A 0.4 close by Ana is her `seen`: nothing closes, nothing changes for Bob.
     s.send("ana", json!({ "thread": id, "close": true })).await;
     let v = s.timeline("bob", "tab=threads").await;
-    assert_eq!(v["threads"][0]["closed_by"], "ana");
-    assert_eq!(v["threads"][0]["status"], "closed");
+    assert_eq!(v["threads"][0]["status"], "open");
+    assert!(v["threads"][0].get("closed_by").is_none());
+    // Bob writes again: it is Ana's turn again, and not handled by her.
+    s.reply("bob", &id, "@ana and another thing").await;
+    let v = s.timeline("ana", "tab=threads").await;
+    assert_eq!(handled(&v), false);
+    assert_eq!(v["threads"][0]["pending"], true);
 }
 
 /// Reading the timeline changes nothing at all: no delivery, nothing handled, no claim, no
@@ -786,10 +811,10 @@ async fn a_person_invited_later_and_one_deactivated_keep_to_their_own_threads() 
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
-/// A layout-7 database made before the timeline's tables gets them when it is opened, with no
-/// migration and the same version.
+/// A layout-7 database made before the timeline's tables (by relevo 0.4.0) gets them when the
+/// server moves it to layout 8, which reads `thread_closes` only once `SCHEMA` made it.
 #[test]
-fn an_older_layout_7_database_gets_the_timeline_tables_on_open() {
+fn a_layout_7_database_without_the_timeline_tables_gets_them_when_it_migrates() {
     let dir = std::env::temp_dir().join(db::random_id("relevo-timeline-"));
     std::fs::create_dir(&dir).unwrap();
     let path = dir.join("relevo.db");
@@ -798,11 +823,12 @@ fn an_older_layout_7_database_gets_the_timeline_tables_on_open() {
         let conn = db::open(path).unwrap();
         conn.execute_batch(
             "DROP INDEX participants_timeline; DROP INDEX notes_by_thread_author;
-             DROP TABLE note_contexts; DROP TABLE thread_closes;",
+             DROP TABLE note_contexts; DROP TABLE thread_closes;
+             PRAGMA user_version = 7;",
         )
         .unwrap();
     }
-    let conn = db::open(path).unwrap();
+    let conn = db::open_migrating(path).unwrap();
     let found: i64 = conn
         .query_row(
             "SELECT count(*) FROM sqlite_master WHERE name IN ('note_contexts', 'thread_closes',
@@ -815,7 +841,7 @@ fn an_older_layout_7_database_gets_the_timeline_tables_on_open() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     drop(conn);
     std::fs::remove_dir_all(&dir).unwrap();
 }

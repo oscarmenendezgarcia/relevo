@@ -62,7 +62,8 @@ export interface Thread {
   teams?: string[];
   /** Whether it names the person: only then can it be pending for them (servers before 0.4.0 leave it out). */
   named?: boolean;
-  status: "open" | "closed";
+  /** Always "open" from 0.5.0 on: threads no longer close (a 0.4.x server may still say "closed"). */
+  status: string;
   /** Pending for the person: not handled yet (servers before 0.3.0 leave it out: nothing is pending then). */
   pending?: boolean;
   context: string | null;
@@ -98,17 +99,24 @@ export interface Inbox {
 export interface SendFields {
   thread?: string;
   text?: string;
-  close?: boolean;
   /** With `thread`: claims it for this session, as a state, without a note when there is no `text`. */
   claim?: boolean;
-  /** With `thread` and no `text`: the person has handled the thread up to the latest note this session has received, writing nothing. */
+  /**
+   * With `thread` and no `text`: the person has seen the thread up to the latest note this session has received, writing nothing;
+   * this session lets go of it if it held it.
+   */
+  seen?: boolean;
+  /** Deprecated: the name of `seen` up to 0.4.x. */
   done?: boolean;
+  /** Deprecated: threads no longer close. Without `text` the server reads it as `seen`; with `text`, it is ignored. */
+  close?: boolean;
 }
 
 export interface SendResult {
   thread: string;
   note: string | null;
-  status: "open" | "closed";
+  /** Always "open" from 0.5.0 on. */
+  status: string;
   claimed: "this-session" | "other-session" | null;
   /** The rest from 0.4.0 on: the thread's kind, whom this note's mentions named, whom it added, and how many people besides the person take part. */
   kind?: Thread["kind"];
@@ -219,9 +227,20 @@ export class Client {
 
   /** One idempotency key per call; a request that fails on the way or on the server is retried once with it. */
   async send(fields: SendFields, signal?: AbortSignal): Promise<SendResult> {
-    // Only the fields of `send` (docs/protocol.md): never the deprecated `to`.
+    // Only the fields of `send` (docs/protocol.md): never the deprecated `to`. Threads no longer close: a `close` without
+    // text is `seen` (and claims nothing, as it never did); with text it is the note alone. It never reaches the server,
+    // which up to 0.4.x would close the thread. `seen` goes on the wire as `done`, its name up to 0.4.x, which servers
+    // accept through 0.x: a 0.4.x server refuses `seen`, and this extension may be newer than its server. Given with
+    // `done` too, both go, for the server to refuse.
     const body: Record<string, unknown> = { key: randomUUID() };
-    for (const k of ["thread", "text", "close", "claim", "done"] as const) if (fields[k] !== undefined) body[k] = fields[k];
+    let { seen, claim } = fields;
+    if (fields.close === true && fields.text === undefined && seen === undefined && fields.done === undefined) {
+      seen = true;
+      claim = undefined;
+    }
+    for (const k of ["thread", "text", "done"] as const) if (fields[k] !== undefined) body[k] = fields[k];
+    if (claim !== undefined) body.claim = claim;
+    if (seen !== undefined) body[fields.done === undefined ? "done" : "seen"] = seen;
     try {
       return await this.request<SendResult>("POST", "/api/send", body, signal);
     } catch (err) {

@@ -184,27 +184,6 @@ function titleLine(text) {
   return { lines, first, line: first >= 0 ? lines[first].trim().replace(/^#+/, '').trim() : '' };
 }
 
-/// The note without its first line when the thread's title was made of it (shown above it). The
-/// server cuts a title to 80 characters: the line then starts with it.
-function withoutTitle(text, title) {
-  const { lines, first, line } = titleLine(text);
-  if (title && first >= 0 && line.startsWith(title)) return lines.slice(first + 1).join('\n');
-  return text;
-}
-
-const LEADING_MENTIONS = /^(?:@[A-Za-z0-9][A-Za-z0-9_-]{1,31}(?:\/[A-Za-z0-9._@/-]*)?[\s,:;]*)+/;
-
-/// The title as shown: without the @mentions it starts with (who it is for is in the line above
-/// it), and ending in '…' when the server cut it.
-function shownTitle(title, text) {
-  const { line } = titleLine(text);
-  const cut = line.length > title.length && line.startsWith(title);
-  let shown = title.replace(LEADING_MENTIONS, '');
-  if (!shown.trim()) shown = title;
-  else if (shown !== title) shown = shown[0].toUpperCase() + shown.slice(1);
-  return shown + (cut ? '…' : '');
-}
-
 /// The key of this tab: from the address (`#k=`) when it has one, else what this tab kept.
 function pickKey(hash, kept) {
   return new URLSearchParams(String(hash || '').replace(/^#/, '')).get('k') || kept || '';
@@ -226,12 +205,6 @@ function preview(text) {
     }
   });
   return children.length ? [{ t: 'p', children }] : [];
-}
-
-/// What a row shows of the first note: what comes after its title, without the @mentions it
-/// starts with.
-function excerpt(text, title) {
-  return withoutTitle(text, title).trim().replace(LEADING_MENTIONS, '');
 }
 
 // ---------- time ----------
@@ -321,13 +294,28 @@ function addedThreads(known, threads) {
   return threads.filter((t) => !known.has(t.id));
 }
 
-/// The first note as its row shows it. Closed up: the text after its title line, or the title
-/// when that is all there is (clamped to two lines by the page). Open: the whole note, title line
-/// included, once.
-function openerText(text, title, truncated, open) {
+/// One @mention at the start of a note (a handle, maybe with a context), and what separates it
+/// from the next.
+const LEADING_MENTION = /^@[A-Za-z0-9][A-Za-z0-9_-]{1,31}(?:\/[A-Za-z0-9._@/-]*)?[\s,:;]*/;
+/// Mentions a closed-up row shows before it says '+N' for the rest of a leading run.
+const MENTIONS_SHOWN = 3;
+
+/// A note as its row shows it. Open: the whole note. Closed up: the note from its first line on,
+/// @mentions and all, as one paragraph the page clamps to two lines, without a heading's #, and
+/// ending in '…' when the server cut it; a run of more than three @mentions it starts with shows
+/// the first three and '+N', so the two lines still say what it is about.
+function rowText(text, truncated, open) {
   if (open) return text;
-  const rest = withoutTitle(text, title);
-  return (rest.trim() ? rest : shownTitle(title, text)) + (truncated ? '…' : '');
+  const { lines, first, line } = titleLine(text);
+  if (first < 0) return truncated ? '…' : '';
+  let rest = [line].concat(lines.slice(first + 1)).join('\n');
+  const run = [];
+  for (let m; (m = rest.match(LEADING_MENTION)); rest = rest.slice(m[0].length)) run.push(m[0].trim().replace(/[,:;]+$/, ''));
+  const head = run.length > MENTIONS_SHOWN
+    ? run.slice(0, MENTIONS_SHOWN).join(' ') + ' +' + (run.length - MENTIONS_SHOWN) + (rest ? ' ' : '')
+    : null;
+  const shown = head === null ? [line].concat(lines.slice(first + 1)).join('\n') : head + rest;
+  return shown + (truncated ? '…' : '');
 }
 
 if (typeof module === 'object' && module.exports) {
@@ -337,10 +325,7 @@ if (typeof module === 'object' && module.exports) {
     toDom,
     renderNote,
     preview,
-    excerpt,
-    withoutTitle,
-    shownTitle,
-    openerText,
+    rowText,
     pickKey,
     askShown,
     focusAfter,
@@ -531,7 +516,7 @@ if (typeof document !== 'undefined') {
     return '/api/timeline?' + q.toString();
   }
 
-  /// Every page shown, asked again (so a thread far down that was closed or handled is shown so),
+  /// Every page shown, asked again (so a thread far down that was handled is shown so),
   /// and with For you's All every pending thread, whatever page it is on. An answer for a view no
   /// longer shown is dropped.
   async function refresh() {
@@ -580,7 +565,7 @@ if (typeof document !== 'undefined') {
       state.open.forEach((id) => {
         const t = all.find((x) => x.id === id);
         const was = before.get(id);
-        if (!state.convos.has(id) || (t && was && (t.notes !== was.notes || t.status !== was.status))) loadConvo(id);
+        if (!state.convos.has(id) || (t && was && t.notes !== was.notes)) loadConvo(id);
       });
     } catch (err) {
       if (gen !== state.gen) return;
@@ -659,15 +644,7 @@ if (typeof document !== 'undefined') {
 
   // ---------- drawing ----------
 
-  /// Where the thread went: "you", "@pedro", "@product", "everyone".
-  function where(t) {
-    if (t.kind === 'global') return 'everyone';
-    if (t.kind === 'team') return t.teams.map((n) => '@' + n).join(', ');
-    const others = t.participants.filter((h) => h !== t.from);
-    return others.map((h) => (h === you() ? 'you' : '@' + h)).join(', ') || 'you';
-  }
-
-  /// The answer a row shows: by someone else when the person started the thread, else the latest.
+  /// Note text as one clamped paragraph (a row's preview).
   function md(text, cls) {
     const div = el('div', cls);
     div.appendChild(toDom(preview(text), document));
@@ -690,6 +667,36 @@ if (typeof document !== 'undefined') {
     return msg;
   }
 
+  /// A note's header: the author's name (or You), `via <label>` and the time, on one line. A long
+  /// name or label is cut with an ellipsis (the label first), the whole of it on hover; the time
+  /// keeps its place.
+  function header(author, label, iso, format) {
+    const who = el('div', 'who');
+    const name = el('b', '', nameOf(author));
+    name.title = name.textContent;
+    const via = el('span', '', 'via ' + label);
+    via.title = via.textContent;
+    who.append(name, via, timeEl(iso, format));
+    return who;
+  }
+
+  /// A closed-up row's latest reply: avatar, name, time and two lines; the thread line runs on
+  /// from it to your seat when the thread waits for you.
+  function latest(n, pending) {
+    const avCol = el('div', 'av-col');
+    avCol.append(avatar(n.author));
+    if (pending) {
+      const lineEl = el('div', 'line joined');
+      lineEl.setAttribute('aria-hidden', 'true');
+      avCol.append(lineEl);
+    }
+    const body = el('div', 'msg-body');
+    body.append(header(n.author, n.via, n.created_at, short), md(rowText(n.text, n.truncated, false), 'text'));
+    const msg = el('div', 'msg latest');
+    msg.append(avCol, body);
+    return msg;
+  }
+
   /// The expanded conversation: replies only (the opener is already in the card's first .msg).
   function convo(t, full, pending) {
     const box = el('div', 'convo');
@@ -701,11 +708,11 @@ if (typeof document !== 'undefined') {
           loadConvo(t.id);
           renderFeed();
         };
-        const line = el('div', 'who', "Couldn't load the conversation.");
+        const line = el('div', 'who wrap', "Couldn't load the conversation.");
         line.append(retry);
         box.append(inColumn(line, pending));
       } else {
-        box.append(inColumn(el('div', 'who', 'Loading…'), pending));
+        box.append(inColumn(el('div', 'who wrap', 'Loading…'), pending));
       }
       return box;
     }
@@ -720,9 +727,7 @@ if (typeof document !== 'undefined') {
         avCol.append(lineEl);
       }
       const msgBody = el('div', 'msg-body');
-      const who = el('div', 'who');
-      who.append(el('b', '', nameOf(n.author)), el('span', '', 'via ' + n.via + (n.context ? ' in ' + n.context : '')), timeEl(n.created_at, noteTime));
-      msgBody.append(who);
+      msgBody.append(header(n.author, n.via + (n.context ? ' in ' + n.context : ''), n.created_at, noteTime));
       if (n.text.trim()) msgBody.append(renderNote(n.text, document));
       const msg = el('div', 'msg');
       msg.append(avCol, msgBody);
@@ -739,7 +744,7 @@ if (typeof document !== 'undefined') {
     const open = state.open.has(t.id);
     const full = open ? state.convos.get(t.id) : null;
     const first = (full && full.notes && full.notes[0]) ? full.notes[0] : t.first_note;
-    const cls = 'card' + (t.status === 'closed' ? ' closed' : '') + (open ? ' open' : '');
+    const cls = 'card' + (open ? ' open' : '');
     const a = el('article', cls);
     a.dataset.id = t.id;
     a.setAttribute('role', 'button');
@@ -752,41 +757,47 @@ if (typeof document !== 'undefined') {
     const avCol = el('div', 'av-col');
     avCol.append(avatar(t.from));
     if (hasReplies || t.pending) {
-      // Joined to what comes next when something is drawn below: the replies, or your seat
-      const lineEl = el('div', t.pending || (open && full) ? 'line joined' : 'line');
+      // Joined to what comes next: the latest reply (closed up), the replies (open), your seat
+      const lineEl = el('div', t.pending || !open || full ? 'line joined' : 'line');
       lineEl.setAttribute('aria-hidden', 'true');
       avCol.append(lineEl);
     }
     const msgBody = el('div', 'msg-body');
-    const who = el('div', 'who');
-    who.append(el('b', '', nameOf(t.from)), el('span', '', 'via ' + first.via), el('span', 'tag', where(t)));
-    who.append(timeEl((t.last_note || first).created_at, short));
+    // Open, the first note is one note of the conversation: its time and context as the replies'.
+    const label = first.via + (open && first.context ? ' in ' + first.context : '');
+    const who = header(t.from, label, first.created_at, open ? noteTime : short);
     msgBody.append(who);
-    const shown = openerText(first.text, t.title, first.truncated, open);
+    const shown = rowText(first.text, first.truncated, open);
+    let textEl;
     if (open) {
-      const noteEl = renderNote(shown, document);
-      noteEl.classList.add('text');
-      msgBody.append(noteEl);
+      textEl = renderNote(shown, document);
+      textEl.classList.add('text');
     } else {
-      msgBody.append(md(shown, 'text'));
+      textEl = md(shown, 'text');
     }
-    // Closed up, say how many replies the line passes over; open, they are shown instead
-    if (hasReplies) {
-      const n = t.notes - 1;
-      msgBody.append(el('div', 'replies', n.toLocaleString('en') + (n === 1 ? ' reply' : ' replies')));
+    msgBody.append(textEl);
+    // The row's name, for screen readers: who opened it, what it says and its status, not the
+    // whole row (the latest reply, an open conversation). The status comes right after the text.
+    const base = 'row-' + t.id;
+    who.firstChild.id = base + '-from';
+    textEl.id = base + '-text';
+    const names = [who.firstChild.id, textEl.id];
+    if (t.pending) {
+      const sr = el('span', 'sr', ' Reply needed' + (t.kind === 'global' ? ', mentioned you' : '') + '.');
+      sr.id = base + '-status';
+      msgBody.append(sr);
+      names.push(sr.id);
     }
-    // Closed label — inside the opener, so the thread line runs past it unbroken
-    if (t.status === 'closed') {
-      const chips = el('div', 'chips');
-      chips.append(el('span', 'label closed-label', 'Closed'));
-      msgBody.append(chips);
-    }
-    // The status for screen readers, early in the row's name: the seat below comes after every
-    // reply when the thread is open, and a long name is cut before it
-    if (t.pending) msgBody.append(el('span', 'sr', ' Reply needed' + (t.kind === 'global' ? ', mentioned you' : '') + '.'));
+    a.setAttribute('aria-labelledby', names.join(' '));
+    // Closed up, the latest reply is shown below: say how many more the line passes over
+    const more = t.notes - 2;
+    if (more > 0) msgBody.append(el('div', 'replies', more.toLocaleString('en') + (more === 1 ? ' more reply' : ' more replies')));
     const openerMsg = el('div', 'msg');
     openerMsg.append(avCol, msgBody);
     a.append(openerMsg);
+
+    // Closed up: the latest reply, what the thread is at now
+    if (hasReplies && !open && t.last_note) a.append(latest(t.last_note, t.pending));
 
     // Expanded conversation — only when there are replies
     if (hasReplies) a.append(convo(t, full, t.pending));
@@ -872,7 +883,6 @@ if (typeof document !== 'undefined') {
     ['all', 'All', 'threads'],
     ['waiting', 'Needs you', 'waiting'],
     ['answered', 'Answered', 'answered'],
-    ['closed', 'Closed', 'closed'],
   ];
 
   /// The view's name, for the heading of a list with no groups (read by screen readers only).
@@ -952,8 +962,10 @@ if (typeof document !== 'undefined') {
       $(id).tabIndex = on ? 0 : -1;
       if (on) $('feed').setAttribute('aria-labelledby', id);
     }
+    // An amber dot, no number, when something waits for the person: seen from Everyone too
     const n = state.data ? state.data.counts.waiting : 0;
-    $('for-you-n').textContent = n > 0 ? String(n) : '';
+    $('for-you-dot').hidden = n === 0;
+    $('for-you-sr').textContent = n > 0 ? ', ' + n + ' need you' : '';
   }
 
   /// For you's filters, drawn again only when they change; the one focused keeps the focus.

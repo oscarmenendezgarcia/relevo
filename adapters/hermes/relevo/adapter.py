@@ -37,7 +37,7 @@ _SILENCE = "[SILENT]"
 _KEPT_OUT = "kept out of the Relevo thread: only a turn's final reply becomes a note"
 _SEEN_LIMIT = 2048
 _ERROR_KINDS = {
-    "NOT_FOUND": "not_found", "THREAD_CLOSED": "forbidden", "FORBIDDEN": "forbidden",
+    "NOT_FOUND": "not_found",
     "TOO_LARGE": "too_long", "THREAD_BUSY": "rate_limited", "RATE_LIMITED": "rate_limited",
 }
 
@@ -519,7 +519,7 @@ class RelevoAdapter(BasePlatformAdapter):
         way its chat never had it. Once handed over, a note the agent leaves alone ([SILENT], not for
         it) stays pending for the person and does not come back in this process."""
         last = thread.get("last_note")
-        if (not client.names_you(thread) or thread.get("status") != "open" or thread.get("pending") is not True
+        if (not client.names_you(thread) or thread.get("pending") is not True
                 or thread.get("new_notes") or not isinstance(last, dict) or not last.get("id")):
             return None
         if last.get("author") == self._me or str(last["id"]) in self._seen:

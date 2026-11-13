@@ -687,7 +687,7 @@ async fn a_reply_cannot_mention_a_team_and_a_failed_send_writes_nothing() {
         .send("ana", json!({ "thread": thread, "text": "@backend?" }))
         .await;
     assert!(message(&v).contains("open a new thread"), "{v}");
-    // Not the note, not the people it would have added, not the close.
+    // Not the note, nor the people it would have added (the close, ignored with text, either).
     let after = s.thread("ana", &thread).await;
     assert_eq!(after["participants"], before["participants"]);
     assert_eq!(after["notes"], before["notes"]);
@@ -728,7 +728,7 @@ async fn replays_return_the_first_result_whom_it_reached_included() {
 }
 
 #[tokio::test]
-async fn only_the_opener_closes_a_team_or_global_thread() {
+async fn anyone_in_a_team_or_global_thread_may_close_it_which_closes_nothing() {
     let s = server(&["ana", "bob", "carl"], &[("backend", &["bob", "carl"])]);
     for text in [
         "@backend deploy?",
@@ -736,29 +736,35 @@ async fn only_the_opener_closes_a_team_or_global_thread() {
         "@backend @carl deploy?",
     ] {
         let thread = s.open("ana", text).await;
+        // Up to 0.4.x only the opener could: now a close never fails for lack of right. With
+        // text, the note is written.
         for who in ["bob", "carl"] {
-            let (status, v) = s
-                .send(
+            let v = s
+                .ok(
                     who,
                     json!({ "thread": thread, "text": "Done.", "close": true }),
                 )
                 .await;
-            assert_eq!(status, StatusCode::FORBIDDEN, "{text}");
-            assert_eq!(code(&v), "FORBIDDEN");
-            assert!(message(&v).contains("opened"), "{v}");
+            assert_eq!(v["status"], "open", "{text}");
+            assert!(v["note"].is_string(), "{v}");
         }
-        s.ok("ana", json!({ "thread": thread, "close": true }))
-            .await;
+        for who in ["bob", "carl", "ana"] {
+            let v = s.ok(who, json!({ "thread": thread, "close": true })).await;
+            assert_eq!(v["status"], "open", "{text}");
+            assert_eq!(v["note"], Value::Null, "{v}");
+        }
+        assert_eq!(
+            s.thread("ana", &thread).await["notes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
     }
-    // A direct thread: anyone in it.
-    let thread = s.open("ana", "@bob @carl deploy?").await;
-    s.ok("carl", json!({ "thread": thread, "close": true }))
-        .await;
 }
 
 #[tokio::test]
-async fn a_closed_team_thread_leaves_who_it_does_not_name_but_shows_its_last_note_to_who_it_names()
-{
+async fn a_team_thread_its_opener_closes_stays_open_and_pending_for_who_it_names() {
     let s = server(&["ana", "bob", "carl"], &[("backend", &["bob", "carl"])]);
     let thread = s.open("ana", "@backend @carl deploy?").await;
     s.ok(
@@ -766,13 +772,22 @@ async fn a_closed_team_thread_leaves_who_it_does_not_name_but_shows_its_last_not
         json!({ "thread": thread, "text": "Never mind, done.", "close": true }),
     )
     .await;
-    // Bob, reached through the team: resolved, gone, even unread.
+    // Bob, reached through the team: new until fetched, never pending.
+    let t = listed(&s.inbox("bob").await, &thread).cloned().unwrap();
+    assert_eq!(t["pending"], false);
+    assert_eq!(t["status"], "open");
     assert!(listed(&s.inbox("bob").await, &thread).is_none());
-    // Carl, named: as a closed direct thread, it shows until he fetched it, pending no more.
+    // Carl, named: pending until he answers or marks it seen, even once fetched.
     let inbox = s.inbox("carl").await;
     let t = listed(&inbox, &thread).unwrap();
-    assert_eq!(t["pending"], false);
+    assert_eq!(t["pending"], true);
     assert_eq!(t["new_notes"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        listed(&s.inbox("carl").await, &thread).unwrap()["pending"],
+        true
+    );
+    s.ok("carl", json!({ "thread": thread, "seen": true }))
+        .await;
     assert!(listed(&s.inbox("carl").await, &thread).is_none());
 }
 
