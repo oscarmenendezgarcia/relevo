@@ -5,7 +5,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
-use crate::db::{SYSTEM_HANDLE, random_id};
+use crate::db::{SYSTEM_PERSON_SQL, random_id};
 
 /// This build's CHANGELOG, whose section for its version is posted.
 pub const CHANGELOG: &str = include_str!("../CHANGELOG.md");
@@ -225,7 +225,7 @@ pub fn announce(
         let Some(section) = release_section(changelog, version) else {
             return Ok(Outcome::NotReleased);
         };
-        match system_person(&tx, now)? {
+        match system_person(&tx)? {
             None => Outcome::NameTaken,
             Some((person, token)) => {
                 Outcome::Posted(post_note(&tx, person, &token, version, &section, now)?)
@@ -241,51 +241,19 @@ pub fn announce(
     Ok(outcome)
 }
 
-/// The person `relevo` and the token its notes record, made the first time: inactive (so it is in
-/// no people list, no new thread, and names nobody), with one revoked token whose hash no secret
-/// has. `None` when a person took the handle before it was reserved.
-fn system_person(tx: &Connection, now: i64) -> Result<Option<(i64, String)>> {
-    let made: Option<i64> = tx
+/// The server's own person and the token its notes record (`db::make_system_person`); `None`
+/// when someone had the name `relevo` before 0.5.0 reserved it, so there is none.
+fn system_person(tx: &Connection) -> Result<Option<(i64, String)>> {
+    Ok(tx
         .query_row(
-            "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'system_person'",
+            &format!(
+                "SELECT p.id, t.id FROM people p JOIN tokens t ON t.person_id = p.id
+                 WHERE p.id = {SYSTEM_PERSON_SQL} ORDER BY t.created_at LIMIT 1"
+            ),
             [],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .optional()?;
-    if let Some(person) = made {
-        let token: String = tx.query_row(
-            "SELECT id FROM tokens WHERE person_id = ?1 ORDER BY created_at LIMIT 1",
-            [person],
-            |r| r.get(0),
-        )?;
-        return Ok(Some((person, token)));
-    }
-    let taken: bool = tx.query_row(
-        "SELECT EXISTS (SELECT 1 FROM people WHERE handle = ?1)",
-        [SYSTEM_HANDLE],
-        |r| r.get(0),
-    )?;
-    if taken {
-        return Ok(None);
-    }
-    tx.execute(
-        "INSERT INTO people (handle, name, about, active, created_at)
-         VALUES (?1, 'Relevo', 'the release notes of each version', 0, ?2)",
-        params![SYSTEM_HANDLE, now],
-    )?;
-    let person = tx.last_insert_rowid();
-    let token = random_id("t_");
-    // A SHA-256 is 64 hex digits: this hash is no secret's.
-    tx.execute(
-        "INSERT INTO tokens (id, person_id, label, hash, created_at, revoked_at)
-         VALUES (?1, ?2, 'release notes', ?3, ?4, ?4)",
-        params![token, person, format!("system:{token}"), now],
-    )?;
-    tx.execute(
-        "INSERT INTO meta (key, value) VALUES ('system_person', ?1)",
-        [person.to_string()],
-    )?;
-    Ok(Some((person, token)))
+        .optional()?)
 }
 
 /// Opens a `global` thread by `person` with the note, as `send` opens one with no mention:

@@ -22,6 +22,7 @@ If someone writes later, it is pending again, as in a chat.
 **Upgrading the server**
 - The database moves to layout 8 when `relevo serve` starts: threads closed under 0.4.x open again, with nothing pending (docs/install.md, part 6).
 - `relevo serve --no-release-notes` (or `RELEVO_RELEASE_NOTES=0`) turns the board notes off.
+- The handle `relevo` is now the server's own: nobody can be invited under it (someone who already has it keeps it).
 
 ## 0.4.4 (12-nov-2026)
 

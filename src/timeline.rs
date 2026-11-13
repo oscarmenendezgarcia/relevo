@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 use crate::App;
 use crate::auth::Reader;
-use crate::db::rfc3339;
+use crate::db::{SYSTEM_PERSON_SQL, rfc3339};
 use crate::error::ApiError;
 
 /// `first_note`, `last_note` and `last_other_note` are cut to this many characters.
@@ -137,6 +137,9 @@ pub struct NoteOut {
     created_at: String,
     text: String,
     truncated: bool,
+    /// Written by the server's own person: the release notes (left out otherwise).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    system: bool,
 }
 
 /// `notes`: how many, in a page; every note, in one thread.
@@ -296,7 +299,8 @@ fn note_sql(cut: bool, filter: &str) -> String {
         "n.text".to_string()
     };
     format!(
-        "SELECT n.seq, n.id, a.handle, n.via, c.context, n.created_at, {text}
+        "SELECT n.seq, n.id, a.handle, n.via, c.context, n.created_at, {text},
+                n.author_id IS {SYSTEM_PERSON_SQL}
          FROM notes n JOIN people a ON a.id = n.author_id
          LEFT JOIN note_contexts c ON c.seq = n.seq
          {filter}"
@@ -320,6 +324,7 @@ fn note(r: &rusqlite::Row, cut: bool) -> rusqlite::Result<(i64, NoteOut)> {
             created_at: rfc3339(r.get(5)?),
             text,
             truncated,
+            system: r.get(7)?,
         },
     ))
 }
