@@ -422,6 +422,14 @@ if (typeof document !== 'undefined') {
   }
 
   function avatar(handle) {
+    // The server's own person, who posts the release notes: the Relevo mark.
+    if (handle === 'relevo') {
+      const mark = el('img', 'av system');
+      mark.src = '/mark.svg';
+      mark.alt = '';
+      mark.setAttribute('aria-hidden', 'true');
+      return mark;
+    }
     const name = state.names[handle] || handle;
     const a = el('div', 'av ' + colour(handle), initial(name));
     a.setAttribute('aria-hidden', 'true');

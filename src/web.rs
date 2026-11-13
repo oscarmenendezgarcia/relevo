@@ -691,6 +691,15 @@ mod tests {
         assert!(rule(".card.open .text {").contains("color: var(--text)"));
     }
 
+    /// A note by the server's own person (`relevo`, the release notes) shows the Relevo mark, the
+    /// page's own image, as its avatar.
+    #[test]
+    fn relevos_notes_show_the_mark() {
+        assert!(SCRIPT.contains("if (handle === 'relevo') {"));
+        assert!(SCRIPT.contains("mark.src = '/mark.svg';"));
+        assert!(rule(".av.system {").contains("background: none"));
+    }
+
     /// The body of `selector`'s rule of the stylesheet, as in `.banner {`.
     fn rule(selector: &str) -> String {
         let head = STYLE

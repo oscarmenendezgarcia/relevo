@@ -71,6 +71,8 @@ section + section { margin-top: 32px; }
   width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center;
   font-size: 12px; font-weight: 700; color: #0b0c0f; flex-shrink: 0; background: var(--c);
 }
+/* The server's own person (the release notes): the Relevo mark, as it is */
+.av.system { background: none; }
 .c0 { --c: #93c5fd; } .c1 { --c: #f9a8d4; } .c2 { --c: #86efac; }
 .c3 { --c: #c4b5fd; } .c4 { --c: #fcd34d; } .c5 { --c: #fdba74; }
 .c6 { --c: #67e8f9; } .c7 { --c: #fca5a5; }
