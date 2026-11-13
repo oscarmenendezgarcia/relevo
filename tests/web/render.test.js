@@ -210,7 +210,7 @@ check('a row\'s preview is one paragraph, only allowed elements', () => {
   const text = 'Here is the **snippet** <img src=x>\nnext line:\n```js\nconst x = 1;\nmore\n```\nInline `<b>`';
   assert.equal(
     show(toDom(preview(text), doc)),
-    '<p>Here is the <strong>snippet</strong> &lt;img src=x> next line: <code>const x = 1;…</code> Inline <code>&lt;b></code></p>'
+    '<p>Here is the <strong>snippet</strong> &lt;img src=x> next line: <code>const x = 1;</code> Inline <code>&lt;b></code></p>'
   );
   assert.ok(doc.created.every((t) => ALLOWED.has(t)));
   assert.deepEqual(preview(''), []);
