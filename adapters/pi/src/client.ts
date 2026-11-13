@@ -227,12 +227,20 @@ export class Client {
 
   /** One idempotency key per call; a request that fails on the way or on the server is retried once with it. */
   async send(fields: SendFields, signal?: AbortSignal): Promise<SendResult> {
-    // Only the fields of `send` (docs/protocol.md): never the deprecated `to`. `seen` goes on the wire as `done`, its name up
-    // to 0.4.x, which servers accept through 0.x: a 0.4.x server refuses `seen`, and this extension may be newer than its
-    // server. Given with `done` too, both go, for the server to refuse. `done` and `close` go as they came.
+    // Only the fields of `send` (docs/protocol.md): never the deprecated `to`. Threads no longer close: a `close` without
+    // text is `seen` (and claims nothing, as it never did); with text it is the note alone. It never reaches the server,
+    // which up to 0.4.x would close the thread. `seen` goes on the wire as `done`, its name up to 0.4.x, which servers
+    // accept through 0.x: a 0.4.x server refuses `seen`, and this extension may be newer than its server. Given with
+    // `done` too, both go, for the server to refuse.
     const body: Record<string, unknown> = { key: randomUUID() };
-    for (const k of ["thread", "text", "claim", "done", "close"] as const) if (fields[k] !== undefined) body[k] = fields[k];
-    if (fields.seen !== undefined) body[fields.done === undefined ? "done" : "seen"] = fields.seen;
+    let { seen, claim } = fields;
+    if (fields.close === true && fields.text === undefined && seen === undefined && fields.done === undefined) {
+      seen = true;
+      claim = undefined;
+    }
+    for (const k of ["thread", "text", "done"] as const) if (fields[k] !== undefined) body[k] = fields[k];
+    if (claim !== undefined) body.claim = claim;
+    if (seen !== undefined) body[fields.done === undefined ? "done" : "seen"] = seen;
     try {
       return await this.request<SendResult>("POST", "/api/send", body, signal);
     } catch (err) {

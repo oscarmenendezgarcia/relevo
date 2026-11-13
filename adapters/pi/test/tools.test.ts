@@ -441,13 +441,19 @@ test("send retries a failed request once with the same key", async () => {
     assert.match(seen, /^Marked thread r_aaaaaaaaaaaa seen/);
     const { key: _key, ...wire } = bodies[3];
     assert.deepEqual(wire, { thread: "r_aaaaaaaaaaaa", done: true });
-    // The deprecated names go as they came; both `seen` and `done` go as they are, for the server to refuse.
-    await ext.tool("relevo_send", { thread: "r_aaaaaaaaaaaa", close: true }, work);
-    assert.equal(bodies[4].close, true);
-    assert.equal(bodies[4].done, undefined);
+    // A close never reaches the server (a 0.4.x one would close the thread): without text it is `seen`, sent as `done`,
+    // claiming nothing; with text it is the note alone. Both `seen` and `done` go as they are, for the server to refuse.
+    for (const args of [{ close: true }, { close: true, claim: true }]) {
+      assert.match(await ext.tool("relevo_send", { thread: "r_aaaaaaaaaaaa", ...args }, work), /^Marked thread r_aaaaaaaaaaaa seen/);
+      const { key: _k, ...sent } = bodies[bodies.length - 1];
+      assert.deepEqual(sent, { thread: "r_aaaaaaaaaaaa", done: true });
+    }
+    await ext.tool("relevo_send", { thread: "r_aaaaaaaaaaaa", text: "Bye.", close: true }, work);
+    const { key: _k2, ...note } = bodies[bodies.length - 1];
+    assert.deepEqual(note, { thread: "r_aaaaaaaaaaaa", text: "Bye." });
     await ext.tool("relevo_send", { thread: "r_aaaaaaaaaaaa", seen: true, done: true }, work);
-    assert.equal(bodies[5].seen, true);
-    assert.equal(bodies[5].done, true);
+    assert.equal(bodies[bodies.length - 1].seen, true);
+    assert.equal(bodies[bodies.length - 1].done, true);
   } finally {
     fake.close();
   }
