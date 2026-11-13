@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import type { Note, Thread } from "../src/client.ts";
-import { neutralize, renderArrival, renderInbox, renderThread, untrusted } from "../src/render.ts";
+import { RELEASE_NOTES, neutralize, renderArrival, renderInbox, renderThread, untrusted } from "../src/render.ts";
 import { loadExtension } from "./mock-pi.ts";
 import { api, startServer, type TestServer } from "./server.ts";
 
@@ -481,4 +481,20 @@ test("the inbox says who else holds a thread (held_by), as relevo mcp does", () 
     ],
   };
   assert.equal(renderThread(whole, { me: "oscar" }).match(/@ana's Claude Code \(general\) has it/g)?.length, 1);
+});
+
+test("a note by relevo, the server's own person, says it is the release notes and needs no answer", () => {
+  const t: Thread = {
+    ...arrivalThread("global"),
+    from: "relevo",
+    new_notes: [
+      { id: "n_1", author: "relevo", via: "release notes", created_at: "t", text: "Relevo 0.5.0\n\nNews.", truncated: false },
+      { id: "n_2", author: "ana", via: "pi", created_at: "t", text: "Nice.", truncated: false },
+    ],
+  };
+  const out = renderThread(t, { me: "oscar" });
+  assert.equal(out.split(RELEASE_NOTES).length - 1, 1, out);
+  assert.ok(out.includes(`News.\n</untrusted>\n${RELEASE_NOTES}`), out);
+  assert.equal(RELEASE_NOTES, "These are the release notes of the Relevo server's new version: they need no answer.");
+  assert.ok(!renderThread(arrivalThread("global"), { me: "oscar" }).includes(RELEASE_NOTES));
 });

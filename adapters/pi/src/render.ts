@@ -123,10 +123,14 @@ function cut(n: Note): string {
   return n.truncated ? `\n[Cut at 4,000 characters: read it whole with relevo_thread.]` : "";
 }
 
+/** The line after a note by the server's own person (`relevo`), who posts each new version's release notes. */
+export const RELEASE_NOTES = "These are the release notes of the Relevo server's new version: they need no answer.";
+
 function renderNote(n: Note, me: string | undefined): string {
   const you = n.author === me ? " (you)" : "";
   const head = `--- note ${n.id} by @${n.author}${you} via "${n.via}", ${n.created_at}`;
-  return `${head}\n${body(n.author, n.text, me)}${cut(n)}`;
+  const release = n.author === "relevo" ? `\n${RELEASE_NOTES}` : "";
+  return `${head}\n${body(n.author, n.text, me)}${cut(n)}${release}`;
 }
 
 /** A pending thread's latest note (`last_note`), which may have reached another session of the person. */

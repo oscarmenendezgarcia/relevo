@@ -553,13 +553,19 @@ def _wrap(author: Any, me: Optional[str], attrs: str, body: str, sep: str = "\n"
     return f'<{tag} from="@{_attr(author or "?")}" {attrs}>{sep}{body}{sep}</{tag}>'
 
 
+# The line after a note by the server's own person (`relevo`), who posts each new version's
+# release notes on the global board.
+RELEASE_NOTES = "These are the release notes of the Relevo server's new version: they need no answer."
+
+
 def render_note(note: dict, me: Optional[str]) -> str:
     body = _defang(note.get("text") or "")
     if note.get("truncated"):
         body += "\n[cut at 4,000 characters: read it whole with relevo_thread]"
     attrs = (f'via="{_attr(note.get("via"))}" at="{_attr(note.get("created_at"))}" '
              f'note="{_attr(note.get("id"))}"')
-    return _wrap(note.get("author"), me, attrs, body)
+    wrapped = _wrap(note.get("author"), me, attrs, body)
+    return f"{wrapped}\n{RELEASE_NOTES}" if note.get("author") == "relevo" else wrapped
 
 
 def _handles(names: list) -> str:
