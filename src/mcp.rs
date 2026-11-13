@@ -162,12 +162,18 @@ fn unknown_fields(unknown: &Map<String, Value>) -> Option<String> {
     })
 }
 
-/// The body of `send`'s request. `seen` goes on the wire as `done`, its name up to 0.4.x, which
-/// servers accept through 0.x (docs/protocol.md): a 0.4.x server refuses `seen`, and a client may
-/// be newer than its server. Given with `done` too, both go, for the server to refuse. `done` and
-/// `close` go as they came: the server reads them as `seen` (a close with text is a note).
+/// The body of `send`'s request. Threads no longer close: a `close` without text is `seen` (and
+/// claims nothing, as it never did); with text it is the note alone. It never reaches the server,
+/// which up to 0.4.x would close the thread. `seen` goes on the wire as `done`, its name up to
+/// 0.4.x, which servers accept through 0.x (docs/protocol.md): a 0.4.x server refuses `seen`, and
+/// a client may be newer than its server. Given with `done` too, both go, for the server to refuse.
 fn send_body(p: SendParams) -> Map<String, Value> {
     let mut body = Map::new();
+    let (mut seen, mut claim) = (p.seen, p.claim);
+    if p.close == Some(true) && p.text.is_none() && seen.is_none() && p.done.is_none() {
+        seen = Some(true);
+        claim = None;
+    }
     if let Some(thread) = p.thread {
         body.insert("thread".into(), thread.into());
     }
@@ -175,12 +181,7 @@ fn send_body(p: SendParams) -> Map<String, Value> {
         body.insert("text".into(), text.into());
     }
     let seen_as = if p.done.is_some() { "seen" } else { "done" };
-    for (name, value) in [
-        ("claim", p.claim),
-        (seen_as, p.seen),
-        ("done", p.done),
-        ("close", p.close),
-    ] {
+    for (name, value) in [("claim", claim), (seen_as, seen), ("done", p.done)] {
         if let Some(value) = value {
             body.insert(name.into(), value.into());
         }
@@ -1127,14 +1128,21 @@ mod tests {
             body(json!({ "thread": "r_1", "seen": true })),
             json!({ "thread": "r_1", "done": true })
         );
-        // The deprecated names go as they came.
         assert_eq!(
             body(json!({ "thread": "r_1", "done": true })),
             json!({ "thread": "r_1", "done": true })
         );
+        // A close never reaches the server: without text it is `seen` (sent as `done`), claiming
+        // nothing; with text it is the note alone.
+        for args in [
+            json!({ "thread": "r_1", "close": true }),
+            json!({ "thread": "r_1", "close": true, "claim": true }),
+        ] {
+            assert_eq!(body(args), json!({ "thread": "r_1", "done": true }));
+        }
         assert_eq!(
             body(json!({ "thread": "r_1", "text": "x", "close": true, "claim": true })),
-            json!({ "thread": "r_1", "text": "x", "close": true, "claim": true })
+            json!({ "thread": "r_1", "text": "x", "claim": true })
         );
         // Both at once: both go, and the server refuses them.
         assert_eq!(
