@@ -13,8 +13,11 @@ const FENCE = /^ {0,3}(`{3,}|~{3,})/;
 const NOT_BEFORE_MENTION = /[A-Za-z0-9._\-+/@`]/;
 const MENTION = /^@([A-Za-z0-9][A-Za-z0-9_-]{1,31})(\/[A-Za-z0-9._@/-]*)?/;
 const TRAILING = /[.,;:!?)\-/']+$/;
+// A list item: `-`, `*` or `•`, a space, its text.
+const ITEM = /^ {0,3}[-*•] +(\S.*)$/;
 
-/// A note as a list of blocks: { t: 'p', children } and { t: 'pre', text }.
+/// A note as a list of blocks: { t: 'p', children }, { t: 'pre', text } and { t: 'ul', children }
+/// (consecutive lines starting with `- `, `* ` or `• `, each a { t: 'li', children }).
 function parseNote(text) {
   const lines = String(text).replace(/\r\n?/g, '\n').split('\n');
   const blocks = [];
@@ -33,6 +36,15 @@ function parseNote(text) {
       i++;
       while (i < lines.length && !close.test(lines[i])) code.push(lines[i++]);
       blocks.push({ t: 'pre', text: code.join('\n') });
+      continue;
+    }
+    const item = ITEM.exec(lines[i]);
+    if (item) {
+      endPara();
+      const items = [];
+      for (let m; i < lines.length && (m = ITEM.exec(lines[i])); i++) items.push({ t: 'li', children: parseInline(m[1]) });
+      i--;
+      blocks.push({ t: 'ul', children: items });
       continue;
     }
     if (lines[i].trim() === '') endPara();
@@ -139,7 +151,7 @@ function closingStar(s, from) {
   return -1;
 }
 
-const TAGS = { p: 'p', pre: 'pre', code: 'code', strong: 'strong', em: 'em', mention: 'span', br: 'br' };
+const TAGS = { p: 'p', pre: 'pre', ul: 'ul', li: 'li', code: 'code', strong: 'strong', em: 'em', mention: 'span', br: 'br' };
 
 /// The DOM of a parsed note, built in `doc` with createElement and text nodes only.
 function toDom(blocks, doc) {
@@ -200,6 +212,12 @@ function preview(text) {
     if (b.t === 'pre') {
       const lines = b.text.split('\n');
       children.push({ t: 'code', text: lines[0] + (lines.length > 1 ? '…' : '') });
+    } else if (b.t === 'ul') {
+      b.children.forEach((li, n) => {
+        if (n) children.push({ t: 'text', text: ' ' });
+        children.push({ t: 'text', text: '• ' });
+        li.children.forEach((c) => children.push(flat(c)));
+      });
     } else {
       b.children.forEach((c) => children.push(flat(c)));
     }

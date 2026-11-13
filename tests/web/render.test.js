@@ -68,7 +68,7 @@ function render(text) {
   return { html: show(toDom(parseNote(text), doc)), tags: doc.created };
 }
 
-const ALLOWED = new Set(['p', 'br', 'code', 'pre', 'strong', 'em', 'span']);
+const ALLOWED = new Set(['p', 'br', 'code', 'pre', 'ul', 'li', 'strong', 'em', 'span']);
 let count = 0;
 function check(name, f) {
   f();
@@ -168,6 +168,20 @@ check('a row: the note from its first line, once, closed up or open', () => {
   assert.equal(rowText('@a1 @b2 @c3 @d4', false, false), '@a1 @b2 @c3 +1');
   // A mention later in the text is left alone.
   assert.equal(rowText('hi @ana @luis @pedro @sam', false, false), 'hi @ana @luis @pedro @sam');
+});
+
+check('lists: lines starting with - * or • are items, inline marks kept', () => {
+  const doc = fakeDocument();
+  const text = 'Changes:\n- one **bold**\n* two `code` <b>\n• three @ana\nafter';
+  assert.equal(
+    show(toDom(parseNote(text), doc)),
+    '<p>Changes:</p><ul><li>one <strong>bold</strong></li><li>two <code>code</code> &lt;b></li><li>three <span.mention>@ana</span></li></ul><p>after</p>'
+  );
+  assert.ok(doc.created.every((t) => ALLOWED.has(t)));
+  // Not an item: no space after the dash, a negative number, a dash inside a line.
+  assert.equal(show(toDom(parseNote('-1 degrees\nnot - an item'), fakeDocument())), '<p>-1 degrees<br></br>not - an item</p>');
+  // In a row's preview, items become one line with bullets.
+  assert.equal(show(toDom(preview('Notes\n- a\n- b'), fakeDocument())), '<p>Notes • a • b</p>');
 });
 
 check('the key: from the address, else what the tab kept', () => {

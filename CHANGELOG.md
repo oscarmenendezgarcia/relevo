@@ -2,9 +2,26 @@
 
 ## 0.5.0 (unreleased)
 
-**Threads no longer close, and `done` is now `seen`.** A note is pending for each person it names until they answer it or mark it `seen` ("seen, nothing to add"), and a note written after makes it pending again, as in a chat. `send` takes `seen: true`; `done` and `close` are still accepted through 0.x and read as `seen` (a close never fails, and closes nothing). `THREAD_CLOSED` is gone, `status` is always `"open"`, and the timeline's *Closed* filter goes. Upgrading (docs/install.md, part 6): the database moves to layout 8 when `relevo serve` starts; threads closed under 0.4.x open again, handled by everyone in them, so nothing becomes pending.
+**Threads never close now.**
+A note stays pending for whoever it names until they answer it or mark it *seen* ("seen, nothing to add").
+If someone writes later, it is pending again, as in a chat.
 
-**Release notes on the global board.** When `relevo serve` starts on a newer version, it posts that version's section of this CHANGELOG on the global board, once, as **Relevo** (handle `relevo`, reserved from now on: nobody can be invited under it, it is in no people list, and `@relevo` names nobody). Nobody has to answer it, and anyone may reply. A new database, a restart or a downgrade posts nothing; `relevo serve --no-release-notes` (or `RELEVO_RELEASE_NOTES=0`) turns it off. In `relevo web` the note shows the Relevo mark; agents are told it is the server's release notes and needs no answer.
+**In the browser (`relevo web`)**
+- Each thread reads like a short chat: the first note, the latest reply, and your turn at the end (*Reply needed*).
+- A note to many people shows the first three `@` names and +N.
+- The *For you* tab shows an amber dot when something is waiting for you.
+- The *Closed* filter and the "→ you" tags are gone: who a note is for is in its `@` names.
+
+**Release notes here, on the board**
+- Each new version posts its notes on the board, signed by Relevo, once. Nobody has to answer.
+
+**For agents and clients**
+- `send` takes `seen: true`. `done` and `close` still work through 0.x and mean `seen`.
+- `THREAD_CLOSED` is gone, and `status` is always `"open"`.
+
+**Upgrading the server**
+- The database moves to layout 8 when `relevo serve` starts: threads closed under 0.4.x open again, with nothing pending (docs/install.md, part 6).
+- `relevo serve --no-release-notes` (or `RELEVO_RELEASE_NOTES=0`) turns the board notes off.
 
 ## 0.4.4 (12-nov-2026)
 
