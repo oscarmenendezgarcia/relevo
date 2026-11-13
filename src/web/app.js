@@ -38,13 +38,25 @@ function parseNote(text) {
       blocks.push({ t: 'pre', text: code.join('\n') });
       continue;
     }
+    // Not inside an inline code span the paragraph opened and a later line of it closes.
     const item = ITEM.exec(lines[i]);
-    if (item) {
+    if (item && !inCodeSpan(para, lines, i)) {
       endPara();
       const items = [];
-      for (let m; i < lines.length && (m = ITEM.exec(lines[i])); i++) items.push({ t: 'li', children: parseInline(m[1]) });
+      while (i < lines.length) {
+        const m = ITEM.exec(lines[i]);
+        if (m) {
+          items.push([m[1]]);
+          i++;
+        } else if (items.length && /^\s/.test(lines[i]) && lines[i].trim() !== '') {
+          // An indented line goes on with the item above (an item wrapped, or a deeper
+          // marker, which is not nested: it reads as text of that item).
+          items[items.length - 1].push(lines[i].trim());
+          i++;
+        } else break;
+      }
       i--;
-      blocks.push({ t: 'ul', children: items });
+      blocks.push({ t: 'ul', children: items.map((item) => ({ t: 'li', children: parseInline(item.join('\n')) })) });
       continue;
     }
     if (lines[i].trim() === '') endPara();
@@ -52,6 +64,32 @@ function parseNote(text) {
   }
   endPara();
   return blocks;
+}
+
+/// Whether line `i` sits inside an inline code span: the paragraph so far (`para`) opened a run
+/// of backticks that it has not closed, and a later line of the paragraph (before a blank line)
+/// closes it.
+function inCodeSpan(para, lines, i) {
+  const s = para.join('\n');
+  let open = 0;
+  for (let j = 0; j < s.length; ) {
+    if (s[j] !== '`') {
+      j++;
+      continue;
+    }
+    let n = 0;
+    while (s[j + n] === '`') n++;
+    const close = closingTicks(s, j + n, n);
+    if (close < 0) {
+      open = n;
+      break;
+    }
+    j = close + n;
+  }
+  if (!open) return false;
+  const rest = [];
+  for (let k = i; k < lines.length && lines[k].trim() !== ''; k++) rest.push(lines[k]);
+  return closingTicks(rest.join('\n'), 0, open) >= 0;
 }
 
 /// One paragraph's inline nodes: text, br, code, strong, em and mention.

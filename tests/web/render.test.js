@@ -184,6 +184,24 @@ check('lists: lines starting with - * or • are items, inline marks kept', () =
   assert.equal(show(toDom(preview('Notes\n- a\n- b'), fakeDocument())), '<p>Notes • a • b</p>');
 });
 
+check('lists: not inside an open code span; wrapped items; deeper markers read as text', () => {
+  const html = (text) => show(toDom(parseNote(text), fakeDocument()));
+  // A `- ` line inside an inline code span the paragraph opened and a later line closes: code.
+  assert.equal(html('Run `make\n- all` now'), '<p>Run <code>make - all</code> now</p>');
+  // A backtick nothing closes is text: the item is an item.
+  assert.equal(html('Run `make\n- all'), '<p>Run `make</p><ul><li>all</li></ul>');
+  // A span closed on its own line opens nothing.
+  assert.equal(html('Run `make` then\n- all'), '<p>Run <code>make</code> then</p><ul><li>all</li></ul>');
+  // An item wrapped onto an indented line goes on in that item.
+  assert.equal(html('- one long\n  item\n- two'), '<ul><li>one long<br></br>item</li><li>two</li></ul>');
+  // A deeper marker is no nesting: an indented one is its own item, a far-indented one text of
+  // the item above. Nothing is lost or garbled.
+  assert.equal(html('- one\n  - sub\n- two'), '<ul><li>one</li><li>sub</li><li>two</li></ul>');
+  assert.equal(html('- one\n    - deep\n- two'), '<ul><li>one<br></br>- deep</li><li>two</li></ul>');
+  // A blank line ends the list.
+  assert.equal(html('- one\n\n  later'), '<ul><li>one</li></ul><p>  later</p>');
+});
+
 check('the key: from the address, else what the tab kept', () => {
   assert.equal(pickKey('#k=abc', 'old'), 'abc');
   assert.equal(pickKey('', 'old'), 'old');
