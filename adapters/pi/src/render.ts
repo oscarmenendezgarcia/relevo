@@ -129,7 +129,8 @@ export const RELEASE_NOTES = "These are the release notes of the Relevo server's
 function renderNote(n: Note, me: string | undefined): string {
   const you = n.author === me ? " (you)" : "";
   const head = `--- note ${n.id} by @${n.author}${you} via "${n.via}", ${n.created_at}`;
-  const release = n.author === "relevo" ? `\n${RELEASE_NOTES}` : "";
+  // By the server's flag, never by the author's handle: a person may have had `relevo`.
+  const release = n.system === true ? `\n${RELEASE_NOTES}` : "";
   return `${head}\n${body(n.author, n.text, me)}${cut(n)}${release}`;
 }
 

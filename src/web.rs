@@ -691,11 +691,14 @@ mod tests {
         assert!(rule(".card.open .text {").contains("color: var(--text)"));
     }
 
-    /// A note by the server's own person (`relevo`, the release notes) shows the Relevo mark, the
-    /// page's own image, as its avatar.
+    /// A note the server marks as its own (`system`, the release notes) shows the Relevo mark, the
+    /// page's own image, as its avatar: by the flag, never by the author's handle.
     #[test]
     fn relevos_notes_show_the_mark() {
-        assert!(SCRIPT.contains("if (handle === 'relevo') {"));
+        assert!(SCRIPT.contains("function avatar(handle, system) {\n    if (system) {"));
+        assert!(!SCRIPT.contains("=== 'relevo'"));
+        assert!(SCRIPT.contains("avatar(t.from, first.system)"));
+        assert_eq!(SCRIPT.matches("avatar(n.author, n.system)").count(), 2);
         assert!(SCRIPT.contains("mark.src = '/mark.svg';"));
         assert!(rule(".av.system {").contains("background: none"));
     }

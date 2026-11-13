@@ -443,7 +443,8 @@ fn note_text(out: &mut String, id: &str, n: &Value, me: Option<&str>) {
         out.push_str(&untrusted(author, s(&n["text"])));
     }
     out.push('\n');
-    if author == crate::db::SYSTEM_HANDLE {
+    // By the server's flag, never by the author's handle: a person may have had `relevo`.
+    if n["system"] == true {
         let _ = writeln!(out, "{RELEASE_NOTES}");
     }
     if n["truncated"] == true {
@@ -840,7 +841,7 @@ mod tests {
         t["pending"] = false.into();
         t["new_notes"] = json!([
             { "id": "n_1", "author": "relevo", "via": "release notes", "created_at": "t",
-              "text": "Relevo 0.5.0\n\nNews.", "truncated": false },
+              "text": "Relevo 0.5.0\n\nNews.", "truncated": false, "system": true },
             { "id": "n_2", "author": "ana", "via": "Claude Code", "created_at": "t",
               "text": "Nice.", "truncated": false }
         ]);
@@ -851,6 +852,10 @@ mod tests {
             "{out}"
         );
         assert!(!thread(&sample(), Some("oscar")).contains(RELEASE_NOTES));
+        // A person who had the handle `relevo` writes as anyone: no line without the flag.
+        let mut legacy = t.clone();
+        legacy["new_notes"][0]["system"] = Value::Null;
+        assert!(!thread(&legacy, Some("oscar")).contains(RELEASE_NOTES));
     }
 
     #[test]

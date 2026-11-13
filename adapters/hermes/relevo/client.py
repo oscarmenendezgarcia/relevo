@@ -565,7 +565,8 @@ def render_note(note: dict, me: Optional[str]) -> str:
     attrs = (f'via="{_attr(note.get("via"))}" at="{_attr(note.get("created_at"))}" '
              f'note="{_attr(note.get("id"))}"')
     wrapped = _wrap(note.get("author"), me, attrs, body)
-    return f"{wrapped}\n{RELEASE_NOTES}" if note.get("author") == "relevo" else wrapped
+    # By the server's flag, never by the author's handle: a person may have had `relevo`.
+    return f"{wrapped}\n{RELEASE_NOTES}" if note.get("system") is True else wrapped
 
 
 def _handles(names: list) -> str:

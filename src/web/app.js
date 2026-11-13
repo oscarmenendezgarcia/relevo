@@ -439,9 +439,10 @@ if (typeof document !== 'undefined') {
     return ((first ? first.segment : Array.from(trimmed)[0]) || '?').toUpperCase();
   }
 
-  function avatar(handle) {
-    // The server's own person, who posts the release notes: the Relevo mark.
-    if (handle === 'relevo') {
+  /// A note's avatar: an initial in a colour from the handle, or, for a note the server marks as
+  /// its own (`system`: the release notes), the Relevo mark.
+  function avatar(handle, system) {
+    if (system) {
       const mark = el('img', 'av system');
       mark.src = '/mark.svg';
       mark.alt = '';
@@ -710,7 +711,7 @@ if (typeof document !== 'undefined') {
   /// from it to your seat when the thread waits for you.
   function latest(n, pending) {
     const avCol = el('div', 'av-col');
-    avCol.append(avatar(n.author));
+    avCol.append(avatar(n.author, n.system));
     if (pending) {
       const lineEl = el('div', 'line joined');
       lineEl.setAttribute('aria-hidden', 'true');
@@ -745,7 +746,7 @@ if (typeof document !== 'undefined') {
     full.notes.forEach((n, i) => {
       if (i === 0) return; // opener shown in the card's first .msg
       const avCol = el('div', 'av-col');
-      avCol.append(avatar(n.author));
+      avCol.append(avatar(n.author, n.system));
       // The thread line runs on from each reply to the next, and from the last to your seat
       if (pending || i < full.notes.length - 1) {
         const lineEl = el('div', 'line joined');
@@ -781,7 +782,7 @@ if (typeof document !== 'undefined') {
     // Opener message
     const hasReplies = t.notes > 1;
     const avCol = el('div', 'av-col');
-    avCol.append(avatar(t.from));
+    avCol.append(avatar(t.from, first.system));
     if (hasReplies || t.pending) {
       // Joined to what comes next: the latest reply (closed up), the replies (open), your seat
       const lineEl = el('div', t.pending || !open || full ? 'line joined' : 'line');

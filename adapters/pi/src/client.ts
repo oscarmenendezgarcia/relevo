@@ -28,6 +28,8 @@ export interface Note {
   created_at: string;
   text: string;
   truncated: boolean;
+  /** A note by the server's own person: the release notes (servers before 0.5.0, and other notes, leave it out). */
+  system?: boolean;
 }
 
 export interface SessionRef {

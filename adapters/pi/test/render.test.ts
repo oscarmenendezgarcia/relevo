@@ -488,7 +488,7 @@ test("a note by relevo, the server's own person, says it is the release notes an
     ...arrivalThread("global"),
     from: "relevo",
     new_notes: [
-      { id: "n_1", author: "relevo", via: "release notes", created_at: "t", text: "Relevo 0.5.0\n\nNews.", truncated: false },
+      { id: "n_1", author: "relevo", via: "release notes", created_at: "t", text: "Relevo 0.5.0\n\nNews.", truncated: false, system: true },
       { id: "n_2", author: "ana", via: "pi", created_at: "t", text: "Nice.", truncated: false },
     ],
   };
@@ -497,4 +497,7 @@ test("a note by relevo, the server's own person, says it is the release notes an
   assert.ok(out.includes(`News.\n</untrusted>\n${RELEASE_NOTES}`), out);
   assert.equal(RELEASE_NOTES, "These are the release notes of the Relevo server's new version: they need no answer.");
   assert.ok(!renderThread(arrivalThread("global"), { me: "oscar" }).includes(RELEASE_NOTES));
+  // A person who had the handle `relevo` writes as anyone: no line without the server's flag.
+  const legacy = { ...t, new_notes: t.new_notes!.map((n) => ({ ...n, system: undefined })) };
+  assert.ok(!renderThread(legacy, { me: "oscar" }).includes(RELEASE_NOTES));
 });

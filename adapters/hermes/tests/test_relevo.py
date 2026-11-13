@@ -1128,12 +1128,15 @@ class Tools(Base):
 
     def test_a_note_by_relevo_says_it_is_the_release_notes_and_needs_no_answer(self):
         note = {"id": "n_1", "author": "relevo", "via": "release notes", "created_at": "t",
-                "text": "Relevo 0.5.0\n\nNews."}
+                "text": "Relevo 0.5.0\n\nNews.", "system": True}
         out = client.render_note(note, "oscar")
         self.assertTrue(out.endswith("\n" + client.RELEASE_NOTES), out)
         self.assertEqual(client.RELEASE_NOTES,
                          "These are the release notes of the Relevo server's new version: they need no answer.")
-        self.assertNotIn(client.RELEASE_NOTES, client.render_note({**note, "author": "ana"}, "oscar"))
+        self.assertNotIn(client.RELEASE_NOTES, client.render_note({**note, "author": "ana", "system": None}, "oscar"))
+        # A person who had the handle `relevo` writes as anyone: no line without the server's flag.
+        legacy = {k: v for k, v in note.items() if k != "system"}
+        self.assertNotIn(client.RELEASE_NOTES, client.render_note(legacy, "oscar"))
 
     def test_more_threads_than_shown(self):
         session = {"label": "Hermes", "context": None, "you": "oscar"}
