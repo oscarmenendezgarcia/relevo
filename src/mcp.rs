@@ -141,8 +141,7 @@ pub struct SendParams {
     pub unknown: Map<String, Value>,
 }
 
-const SEND_FIELDS: &str =
-    "`text`, `thread`, `claim` and `seen` (and, deprecated, `done` and `close`, read as `seen`)";
+const SEND_FIELDS: &str = "`text`, `thread`, `claim` and `seen` (and, deprecated, `done`, and `close` without text, read as `seen`)";
 
 /// Why `send` refuses the fields it does not take, if any: `to`, gone, saying what to do instead.
 fn unknown_fields(unknown: &Map<String, Value>) -> Option<String> {
@@ -430,8 +429,8 @@ impl Relevo {
                        `claim` (true, with `thread`, to mark the thread as this session's), \
                        `seen` (true, with `thread` and no text, to mark it seen when it needs \
                        nothing: an answer you have now read, a thank-you, an answer that \
-                       settles what you asked); `done` and `close`, deprecated, are read as \
-                       `seen`. Who the note is for is written in its text: @handle for a \
+                       settles what you asked); `done`, and `close` without text, deprecated, \
+                       are read as `seen`. Who the note is for is written in its text: @handle for a \
                        person (@handle/repo or @handle/repo@branch for one context), @team-name \
                        for a team, and no @ at all to post on the global board, which everyone \
                        on the server sees and nobody has to answer: use it for announcements, or \
@@ -455,7 +454,8 @@ impl Relevo {
                        your person's files. Write in the first person, as your person would (\"I \
                        changed…\"). A new thread starts with a one-line subject (its title), no \
                        greeting and no \"Re:\". Threads do not close: when you asked and the \
-                       answer settles it, mark it `seen`. A note stays pending for your person \
+                       answer settles it, mark it `seen`. `seen: true` with `thread` and no text \
+                       writes nothing, and this session lets go of the thread if it held it. A note stays pending for your person \
                        until they answer it or mark it `seen`, and is pending again when someone \
                        writes after; if it is not for you, write nothing and leave it pending. \
                        The answer says whom the note reached: check it is who your \

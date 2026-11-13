@@ -669,7 +669,7 @@ async fn send_reads_whom_from_the_text_and_names_its_fields() {
     }
     // `done` and `close` only as deprecated names of `seen`: threads do not close.
     assert!(
-        about.contains("`done` and `close`, deprecated, are read as `seen`"),
+        about.contains("`done`, and `close` without text, deprecated, are read as `seen`"),
         "{about}"
     );
     assert!(about.contains("Threads do not close"), "{about}");
@@ -791,14 +791,15 @@ async fn send_reads_whom_from_the_text_and_names_its_fields() {
                 err,
                 "send has no `to`: write who the note is for in `text`, with @handle for a \
                  person, @team-name for a team, or no @ at all for the global board. Its fields \
-                 are `text`, `thread`, `claim` and `seen` (and, deprecated, `done` and `close`, \
-                 read as `seen`). Nothing was sent.",
+                 are `text`, `thread`, `claim` and `seen` (and, deprecated, `done`, and `close` \
+                 without text, read as `seen`). Nothing was sent.",
             );
         } else {
             assert_eq!(
                 err,
                 "send has no `message`: its fields are `text`, `thread`, `claim` and `seen` \
-                 (and, deprecated, `done` and `close`, read as `seen`). Nothing was sent."
+                 (and, deprecated, `done`, and `close` without text, read as `seen`). Nothing was \
+                 sent."
             );
         }
     }

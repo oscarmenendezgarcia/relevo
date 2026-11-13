@@ -235,7 +235,7 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
             handles(&t["participants"])
         ),
     };
-    let _ = write!(out, "{what}; {}", s(&t["status"]));
+    out.push_str(&what);
     if let Some(c) = t["context"].as_str() {
         let _ = write!(out, "; addressed to you in {c}");
     }
@@ -535,20 +535,28 @@ pub fn seen(v: &Value, received: bool) -> String {
         format!(
             "Marked thread {id} seen, up to the notes this session has received: those are no \
              longer pending for your person. Any note this session has not received yet stays \
-             pending, and a new one by someone else makes it pending again. Nothing was written, \
-             and this session does not hold the thread."
+             pending, and a new one by someone else makes it pending again. Nothing was written."
         )
     } else {
         format!(
             "No note of thread {id} has reached this session, so `seen` may have handled nothing: \
              a note this session has not received stays pending for your person. Read it first \
              with thread(id=\"{id}\"), then mark it seen if it needs nothing. Nothing was \
-             written, and this session does not hold the thread."
+             written."
         )
     };
-    if v["claimed"] == "other-session" {
-        out.push_str(" Another of your person's sessions still holds it.");
-    }
+    // Who holds it, as the server says: a server before 0.5.0 keeps this session's claim.
+    out.push_str(match v["claimed"].as_str() {
+        Some("this-session") => {
+            " This session still holds the thread (a server before 0.5.0 keeps the claim when \
+             marking seen)."
+        }
+        Some("other-session") => {
+            " This session does not hold the thread. Another of your person's sessions still \
+             holds it."
+        }
+        _ => " This session does not hold the thread.",
+    });
     out
 }
 
@@ -603,7 +611,7 @@ pub fn sent(v: &Value, opened: bool) -> String {
     let id = s(&v["thread"]);
     let whom = whom(v, opened);
     let mut out = match v["note"].as_str() {
-        Some(note) => format!("{whom}Written: note {note} in thread {id}, which is open."),
+        Some(note) => format!("{whom}Written: note {note} in thread {id}."),
         // A claim without text: a state, nothing written.
         None => {
             return match v["claimed"].as_str() {
@@ -701,7 +709,8 @@ mod tests {
         let out = thread(&t, Some("oscar"));
         assert!(
             out.contains(
-                "team: @backend, opened by @ana, between @ana, @oscar; it does not name you; open"
+                "team: @backend, opened by @ana, between @ana, @oscar; it does not name you; \
+                 addressed"
             ),
             "{out}"
         );
@@ -725,7 +734,7 @@ mod tests {
         assert!(
             out.contains(
                 "global board, posted by @ana to everyone on the server; it does not \
-                          name you; open"
+                          name you; addressed"
             ),
             "{out}"
         );
@@ -735,7 +744,7 @@ mod tests {
         named["named"] = true.into();
         named["pending"] = true.into();
         let out = thread(&named, Some("oscar"));
-        assert!(out.contains("; it names you; open"), "{out}");
+        assert!(out.contains("; it names you; addressed"), "{out}");
         assert!(!out.contains("answering is optional"), "{out}");
         assert!(out.contains("Pending for your person"), "{out}");
         assert!(out.contains("claim=true"), "{out}");
@@ -745,7 +754,7 @@ mod tests {
         old["pending"] = false.into();
         let out = thread(&old, Some("oscar"));
         assert!(
-            out.contains("team question from @ana to everyone; open"),
+            out.contains("team question from @ana to everyone; addressed"),
             "{out}"
         );
         assert!(out.contains("answering is optional"), "{out}");
@@ -821,7 +830,7 @@ mod tests {
             "{out}"
         );
         assert!(
-            out.contains("direct, opened by @ana, between @ana, @oscar; open"),
+            out.contains("direct, opened by @ana, between @ana, @oscar; addressed to you in"),
             "{out}"
         );
         assert!(out.contains("addressed to you in pagos-api"), "{out}");
@@ -953,13 +962,30 @@ mod tests {
         );
         assert!(out.contains("pending again"), "{out}");
         assert!(
-            out.contains("Nothing was written, and this session does not hold the thread."),
+            out.contains("Nothing was written. This session does not hold the thread."),
             "{out}"
         );
         assert!(!out.contains("still holds"), "{out}");
         let held =
             json!({ "thread": "r_1", "note": null, "status": "open", "claimed": "other-session" });
-        assert!(seen(&held, true).contains("Another of your person's sessions still holds it."));
+        assert!(seen(&held, true).ends_with(
+            "This session does not hold the thread. Another of your person's sessions still holds \
+             it."
+        ));
+        // A server before 0.5.0 keeps this session's claim when marking seen: said as it is.
+        let kept =
+            json!({ "thread": "r_1", "note": null, "status": "open", "claimed": "this-session" });
+        for received in [true, false] {
+            let out = seen(&kept, received);
+            assert!(
+                out.ends_with(
+                    "This session still holds the thread (a server before 0.5.0 keeps the claim \
+                     when marking seen)."
+                ),
+                "{out}"
+            );
+            assert!(!out.contains("does not hold"), "{out}");
+        }
         // From a session that received nothing of the thread: it says it may have handled
         // nothing, and to read it first.
         let out = seen(&v, false);
@@ -1136,8 +1162,8 @@ mod tests {
         let out = sent(&opened("team", json!(["ana"]), json!(["backend"]), 7), true);
         assert!(
             out.starts_with(
-                "Sent to @ana and @backend (7 people). Written: note n_1 in thread r_1, which is \
-                 open. Nobody of yours holds the thread."
+                "Sent to @ana and @backend (7 people). Written: note n_1 in thread r_1. Nobody \
+                 of yours holds the thread."
             ),
             "{out}"
         );
