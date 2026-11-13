@@ -98,13 +98,7 @@ section + section { margin-top: 32px; }
 .msg.latest { margin-top: 12px; }
 .card.open .msg.latest { display: none; }
 
-/* Closed threads */
-.closed .av { opacity: .62; }
-.closed .msg:first-child .who b { color: var(--body); }
-.closed .msg:first-child .text { color: var(--faint); }
-
 /* The two kinds of mark: the status pill, and labels */
-.chips { display: flex; gap: 6px; margin-top: 6px; align-items: center; }
 /* Your turn: the thread line runs on to an empty seat for you, a dotted ring with your initial,
    as if you were about to write; your name and the pill beside it */
 /* 13px: with the ring's -1px margin, the line stops 4px short of it, as at every avatar */
@@ -135,10 +129,6 @@ section + section { margin-top: 32px; }
 }
 .status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--pill-dot); }
 .label { color: var(--faint); font-size: 13px; }
-.label.closed-label {
-  text-transform: uppercase; letter-spacing: .06em; font-size: 10.5px; font-weight: 600;
-  border: 1px solid var(--line); padding: 0 5px; border-radius: 3px;
-}
 
 /* Expanded conversation: hidden until the card is open */
 .convo { display: none; }

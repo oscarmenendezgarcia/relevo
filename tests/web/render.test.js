@@ -288,7 +288,8 @@ checkAsync('a refresh asks again every page shown, past the first 50', async () 
   got = await askShown(s.ask, 40, '21');
   assert.deepEqual(s.asked, [[null, 40]]);
   assert.equal(got.cursor, '21');
-  // Thread 55 was closed far down without a note: it is in the answer as it is now.
+  // Thread 55 changed far down without a new note (marked seen, say): it is in the answer as it
+  // is now.
   assert.ok(got.threads.some((t) => t.id === 't55'));
   // An answer no longer wanted stops it.
   got = await askShown(async () => null, 60, null);

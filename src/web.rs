@@ -625,6 +625,36 @@ mod tests {
         );
     }
 
+    /// Threads no longer close (docs/web.md): the filters are All, Needs you, Answered and the
+    /// teams, no row is marked or greyed out as closed, and nothing reads `closed_by` or
+    /// `counts.closed`.
+    #[test]
+    fn nothing_on_the_page_is_closed() {
+        assert!(
+            SCRIPT.contains(
+                "const SHOWS = [\n    ['all', 'All', 'threads'],\n    ['waiting', 'Needs you', \
+                 'waiting'],\n    ['answered', 'Answered', 'answered'],\n  ];"
+            ),
+            "the filters"
+        );
+        for (name, file) in [
+            ("index.html", INDEX),
+            ("app.js", SCRIPT),
+            ("app.css", STYLE),
+        ] {
+            for gone in [
+                "'Closed'",
+                "'closed'",
+                "closed_by",
+                "closed-label",
+                ".closed",
+                "chips",
+            ] {
+                assert!(!file.contains(gone), "{name} has {gone}");
+            }
+        }
+    }
+
     /// The body of `selector`'s rule of the stylesheet, as in `.banner {`.
     fn rule(selector: &str) -> String {
         let head = STYLE

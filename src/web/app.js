@@ -502,7 +502,7 @@ if (typeof document !== 'undefined') {
     return '/api/timeline?' + q.toString();
   }
 
-  /// Every page shown, asked again (so a thread far down that was closed or handled is shown so),
+  /// Every page shown, asked again (so a thread far down that was handled is shown so),
   /// and with For you's All every pending thread, whatever page it is on. An answer for a view no
   /// longer shown is dropped.
   async function refresh() {
@@ -551,7 +551,7 @@ if (typeof document !== 'undefined') {
       state.open.forEach((id) => {
         const t = all.find((x) => x.id === id);
         const was = before.get(id);
-        if (!state.convos.has(id) || (t && was && (t.notes !== was.notes || t.status !== was.status))) loadConvo(id);
+        if (!state.convos.has(id) || (t && was && t.notes !== was.notes)) loadConvo(id);
       });
     } catch (err) {
       if (gen !== state.gen) return;
@@ -721,7 +721,7 @@ if (typeof document !== 'undefined') {
     const open = state.open.has(t.id);
     const full = open ? state.convos.get(t.id) : null;
     const first = (full && full.notes && full.notes[0]) ? full.notes[0] : t.first_note;
-    const cls = 'card' + (t.status === 'closed' ? ' closed' : '') + (open ? ' open' : '');
+    const cls = 'card' + (open ? ' open' : '');
     const a = el('article', cls);
     a.dataset.id = t.id;
     a.setAttribute('role', 'button');
@@ -755,12 +755,6 @@ if (typeof document !== 'undefined') {
     // Closed up, the latest reply is shown below: say how many more the line passes over
     const more = t.notes - 2;
     if (more > 0) msgBody.append(el('div', 'replies', more.toLocaleString('en') + (more === 1 ? ' more reply' : ' more replies')));
-    // Closed label — inside the opener, so the thread line runs past it unbroken
-    if (t.status === 'closed') {
-      const chips = el('div', 'chips');
-      chips.append(el('span', 'label closed-label', 'Closed'));
-      msgBody.append(chips);
-    }
     // The status for screen readers, early in the row's name: the seat below comes after every
     // reply when the thread is open, and a long name is cut before it
     if (t.pending) msgBody.append(el('span', 'sr', ' Reply needed' + (t.kind === 'global' ? ', mentioned you' : '') + '.'));
@@ -855,7 +849,6 @@ if (typeof document !== 'undefined') {
     ['all', 'All', 'threads'],
     ['waiting', 'Needs you', 'waiting'],
     ['answered', 'Answered', 'answered'],
-    ['closed', 'Closed', 'closed'],
   ];
 
   /// The view's name, for the heading of a list with no groups (read by screen readers only).
