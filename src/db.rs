@@ -11,6 +11,9 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 const SCHEMA: &str = "
+-- `threads.status` is always 'open' since layout 8 (relevo 0.5): threads no longer close. The
+-- column, its check and the `resolved` columns below stay, unused, so that layout 7 moves to 8
+-- without making those tables again (see `MIGRATE_FROM_7`).
 CREATE TABLE IF NOT EXISTS people (
     id         INTEGER PRIMARY KEY,
     handle     TEXT NOT NULL UNIQUE,
@@ -62,14 +65,14 @@ CREATE INDEX IF NOT EXISTS threads_by_opener ON threads(opener_id, kind, created
 -- `delivered_at`, `_label` and `_context` say when the latest one by someone else first did, and
 -- which session (its label and context then). `last_seq` is the thread's latest note, `last_other_seq` the
 -- latest one not theirs; `has_new` (no session of theirs has that one),
--- `waiting` (pending: open, the person named, with a note not theirs after `handled_seq` and from
--- the one that named them on), `inbox` (`has_new` or `waiting`), `resolved` (a closed `team` or
--- `global` thread that does not name them: it shows only with `all`) and `fresh` (pending,
--- with a note past `handled_seq` that reached one of their sessions: a new session of theirs gets
--- its own row, starting at `handled_seq`) are kept by `api::refresh` after every change to the
--- thread. `handled_seq` is how far the person has handled the thread (by writing in it, closing it
--- or `done`); `handled_at`, `_label` and `_context` say when they last handled a note by someone
--- else, and from which session (its label and context then). `named_seq` says the thread names
+-- `waiting` (pending: the person named, with a note not theirs after `handled_seq` and from the
+-- one that named them on), `inbox` (`has_new` or `waiting`) and `fresh` (pending, with a note
+-- past `handled_seq` that reached one of their sessions: a new session of theirs gets its own
+-- row, starting at `handled_seq`) are kept by `api::refresh` after every change to the thread.
+-- `resolved` is unused since layout 8 (it marked a closed `team` thread), and always 0.
+-- `handled_seq` is how far the person has handled the thread (by writing in it, or `seen`; up to
+-- 0.4.x by closing it too); `handled_at`, `_label` and `_context` say when they last handled a
+-- note by someone else, and from which session (its label and context then). `named_seq` says the thread names
 -- the person with their own `@`: 0 when it did from the start (every participant of a `direct`
 -- thread, and the people named in the note that opened a `team` or `global` one), the note that
 -- named them when a later one did, `NULL` while it does not (reached through a team or the global
@@ -131,26 +134,22 @@ CREATE INDEX IF NOT EXISTS participants_by_claim
 -- The inbox of a session is the union of a few index ranges, each already in inbox order, so it
 -- reads at most a page from each and stops, however many threads are flagged (see `api::page`):
 -- every thread of the person (`all`), those claimed by the session or unclaimed (general), those
--- unclaimed with no context or the session's context. Only `all` reads resolved threads.
+-- unclaimed with no context or the session's context.
 CREATE INDEX IF NOT EXISTS participants_inbox
     ON participants(person_id, has_new, waiting, last_seq) WHERE inbox = 1;
 CREATE INDEX IF NOT EXISTS participants_inbox_claim
-    ON participants(person_id, claimed_by, has_new, waiting, last_seq)
-    WHERE inbox = 1 AND resolved = 0;
+    ON participants(person_id, claimed_by, has_new, waiting, last_seq) WHERE inbox = 1;
 CREATE INDEX IF NOT EXISTS participants_inbox_context
-    ON participants(person_id, claimed_by, context, has_new, waiting, last_seq)
-    WHERE inbox = 1 AND resolved = 0;
+    ON participants(person_id, claimed_by, context, has_new, waiting, last_seq) WHERE inbox = 1;
 CREATE INDEX IF NOT EXISTS session_new
     ON session_threads(session_id, waiting, last_seq) WHERE has_new = 1;
 CREATE INDEX IF NOT EXISTS session_new_claim
-    ON session_threads(session_id, claimed_by, waiting, last_seq)
-    WHERE has_new = 1 AND resolved = 0;
+    ON session_threads(session_id, claimed_by, waiting, last_seq) WHERE has_new = 1;
 CREATE INDEX IF NOT EXISTS session_new_context
-    ON session_threads(session_id, claimed_by, context, waiting, last_seq)
-    WHERE has_new = 1 AND resolved = 0;
+    ON session_threads(session_id, claimed_by, context, waiting, last_seq) WHERE has_new = 1;
 -- For `more`: the threads new only for the session, by route (see `api::count_sql`).
 CREATE INDEX IF NOT EXISTS session_count
-    ON session_threads(session_id, resolved, claimed_by, context)
+    ON session_threads(session_id, claimed_by, context)
     WHERE has_new = 1 AND person_inbox = 0;
 CREATE TABLE IF NOT EXISTS notes (
     seq        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -205,7 +204,8 @@ CREATE TABLE IF NOT EXISTS thread_teams (
 -- columns, so that layout 7 keeps its version: every layout-7 database gets them when it is
 -- opened, with no migration. The context of the session that wrote a note, when it had one (a
 -- note with no row was written by a general session, or before these tables); who closed a
--- thread, and when (a thread closed before them has no row).
+-- thread under 0.4.x, and when (a thread closed before them has no row): read by nothing since
+-- layout 8, when threads no longer close, except to say when its migration handled it.
 CREATE TABLE IF NOT EXISTS note_contexts (
     seq     INTEGER PRIMARY KEY REFERENCES notes(seq),
     context TEXT NOT NULL
@@ -232,10 +232,11 @@ pub const SESSION_LIFETIME_SECS: i64 = 7 * 24 * 3600;
 pub const CLAIM_LAPSE_SECS: i64 = 15 * 60;
 
 /// The layout of `SCHEMA`, kept in SQLite's `user_version`. A database of layout 5 (relevo 0.1.0
-/// to 0.2.x) or 6 (relevo 0.3.x) is migrated in place (`MIGRATE_FROM_5`, then `MIGRATE_FROM_6`),
-/// by `relevo serve` only; any other layout is refused, never half-updated (`CREATE TABLE IF NOT
-/// EXISTS` would skip the old tables and fail on their missing columns).
-const SCHEMA_VERSION: i64 = 7;
+/// to 0.2.x), 6 (relevo 0.3.x) or 7 (relevo 0.4.x) is migrated in place (`MIGRATE_FROM_5`,
+/// `MIGRATE_FROM_6`, `MIGRATE_FROM_7`, then `OPEN_CLOSED`), by `relevo serve` only; any other
+/// layout is refused, never half-updated (`CREATE TABLE IF NOT EXISTS` would skip the old tables
+/// and fail on their missing columns).
+const SCHEMA_VERSION: i64 = 8;
 
 /// Layout 5 to 6: the handled state of each participant, from what layout 5 recorded as handling.
 /// A thread that was `waiting` there (open, direct, its latest note not theirs) waited for their
@@ -305,14 +306,57 @@ DROP TABLE threads;
 ALTER TABLE threads_7 RENAME TO threads;
 ";
 
-/// Opens (or creates) the database and applies the schema. A database of layout 5 or 6 is
+/// Layout 7 to 8, before `SCHEMA`: threads no longer close, so the inbox's indexes no longer leave
+/// out resolved threads (a closed `team` or `global` thread that does not name the person). They
+/// go, and `SCHEMA` makes them again without that condition. The `resolved` columns and
+/// `threads.status` stay, unused: dropping a column would make those tables again, for nothing.
+const MIGRATE_FROM_7: &str = "
+DROP INDEX IF EXISTS participants_inbox_claim;
+DROP INDEX IF EXISTS participants_inbox_context;
+DROP INDEX IF EXISTS session_new_claim;
+DROP INDEX IF EXISTS session_new_context;
+DROP INDEX IF EXISTS session_count;
+";
+
+/// Layout 7 to 8, after `SCHEMA` (which brings `thread_closes` to a database that did not have it
+/// yet): every closed thread opens, handled by each of its named participants up to its latest
+/// note, so nothing becomes pending. Where that covers a note by someone else they had not
+/// handled, or one layout 6 counted as handled without saying when (`MIGRATE_FROM_5`),
+/// `handled_at` is when the thread was closed (or, closed before `thread_closes` kept it, its
+/// latest note), from no known session. The flags `api::refresh` keeps need no change: a
+/// closed thread was pending for nobody, and a handled one is pending for nobody either. `has_new`
+/// stays as it was: a note that reached none of a person's sessions is still new for them.
+const OPEN_CLOSED: &str = "
+UPDATE participants SET
+    handled_at = CASE WHEN c.covers THEN coalesce(c.closed_at, c.last_at) ELSE handled_at END,
+    handled_label = CASE WHEN c.covers THEN NULL ELSE handled_label END,
+    handled_context = CASE WHEN c.covers THEN NULL ELSE handled_context END,
+    handled_seq = c.last_seq
+FROM (SELECT q.thread_id, q.person_id,
+             EXISTS (SELECT 1 FROM notes n
+                     WHERE n.thread_id = q.thread_id AND n.author_id != q.person_id
+                       AND (n.seq > coalesce(q.handled_seq, 0) OR q.handled_at IS NULL))
+                 AS covers,
+             (SELECT tc.closed_at FROM thread_closes tc WHERE tc.thread_id = q.thread_id)
+                 AS closed_at,
+             (SELECT max(n.created_at) FROM notes n WHERE n.thread_id = q.thread_id) AS last_at,
+             (SELECT max(n.seq) FROM notes n WHERE n.thread_id = q.thread_id) AS last_seq
+      FROM participants q JOIN threads t ON t.id = q.thread_id
+      WHERE t.status = 'closed' AND q.named_seq IS NOT NULL) AS c
+WHERE participants.thread_id = c.thread_id AND participants.person_id = c.person_id;
+UPDATE participants SET resolved = 0 WHERE resolved != 0;
+UPDATE session_threads SET resolved = 0 WHERE resolved != 0;
+UPDATE threads SET status = 'open' WHERE status = 'closed';
+";
+
+/// Opens (or creates) the database and applies the schema. A database of layout 5, 6 or 7 is
 /// refused: only `relevo serve` migrates it (`open_migrating`), so that an admin command never
 /// changes the layout behind the owner's back, before a backup. `":memory:"` works for tests.
 pub fn open(path: &str) -> Result<Connection> {
     open_with(path, false)
 }
 
-/// `open`, migrating a database of layout 5 or 6 in place: for `relevo serve`.
+/// `open`, migrating a database of layout 5, 6 or 7 in place: for `relevo serve`.
 pub fn open_migrating(path: &str) -> Result<Connection> {
     open_with(path, true)
 }
@@ -336,47 +380,67 @@ fn open_with(path: &str, migrate: bool) -> Result<Connection> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     // Said here, logged once the transaction has committed: a migration that did not happen must
     // not be announced as if it had.
-    let mut from_5 = false;
-    let mut from_6 = false;
+    let mut from = None;
     match layout(&tx, path)? {
         layout if refuses(layout) => bail!(no_migration(path, layout)),
-        Layout::Migrates(from) => {
-            if from == 5 {
+        Layout::Migrates(old) => {
+            if old == 5 {
                 tx.execute_batch(MIGRATE_FROM_5)
                     .with_context(|| format!("migrating database {path} from layout 5"))?;
-                from_5 = true;
             }
-            tx.execute_batch(MIGRATE_FROM_6)
-                .with_context(|| format!("migrating database {path} from layout 6"))?;
-            let broken = broken_thread_refs(&tx)?;
-            if !broken.is_empty() {
-                let rows: Vec<String> = broken
-                    .iter()
-                    .map(|(table, rowid, parent)| {
-                        format!("{table} rowid {rowid} refers to {parent}")
-                    })
-                    .collect();
-                bail!(
-                    "migrating database {path} from layout 6: {} broken references: {}",
-                    broken.len(),
-                    rows.join("; ")
-                );
+            if old <= 6 {
+                tx.execute_batch(MIGRATE_FROM_6)
+                    .with_context(|| format!("migrating database {path} from layout 6"))?;
+                let broken = broken_thread_refs(&tx)?;
+                if !broken.is_empty() {
+                    let rows: Vec<String> = broken
+                        .iter()
+                        .map(|(table, rowid, parent)| {
+                            format!("{table} rowid {rowid} refers to {parent}")
+                        })
+                        .collect();
+                    bail!(
+                        "migrating database {path} from layout 6: {} broken references: {}",
+                        broken.len(),
+                        rows.join("; ")
+                    );
+                }
             }
-            from_6 = true;
+            tx.execute_batch(MIGRATE_FROM_7)
+                .with_context(|| format!("migrating database {path} from layout 7"))?;
+            from = Some(old);
         }
         Layout::New | Layout::Current => {}
     }
     tx.execute_batch(SCHEMA)?;
+    // How many closed threads layout 8 opens.
+    let mut opened = 0;
+    if from.is_some() {
+        opened = tx.query_row(
+            "SELECT count(*) FROM threads WHERE status = 'closed'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )?;
+        tx.execute_batch(OPEN_CLOSED)
+            .with_context(|| format!("migrating database {path} from layout 7"))?;
+    }
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
-    if from_5 {
+    if from == Some(5) {
         tracing::info!(db = path, "migrated the database from layout 5 to 6");
     }
-    if from_6 {
+    if from.is_some_and(|old| old <= 6) {
         tracing::info!(
             db = path,
-            "migrated the database from layout 6 to {SCHEMA_VERSION}: team threads are \
-             global ones now"
+            "migrated the database from layout 6 to 7: team threads are global ones now"
+        );
+    }
+    if from.is_some() {
+        tracing::info!(
+            db = path,
+            opened,
+            "migrated the database from layout 7 to {SCHEMA_VERSION}: threads no longer close; \
+             opened {opened} closed threads, handled by everyone they name"
         );
     }
     conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -412,7 +476,7 @@ fn broken_thread_refs(tx: &Connection) -> Result<Vec<(String, i64, String)>> {
     Ok(out)
 }
 
-/// Why a command other than `serve` refuses a database of layout 5 or 6.
+/// Why a command other than `serve` refuses a database of layout 5, 6 or 7.
 fn no_migration(path: &str, layout: Layout) -> String {
     format!(
         "database {path} has the layout of {}, which only `relevo serve` migrates (in place, \
@@ -430,7 +494,8 @@ pub enum Layout {
     New,
     /// This version's layout.
     Current,
-    /// Layout 5 (relevo 0.1.0 to 0.2.x) or 6 (relevo 0.3.x): `relevo serve` migrates it.
+    /// Layout 5 (relevo 0.1.0 to 0.2.x), 6 (relevo 0.3.x) or 7 (relevo 0.4.x): `relevo serve`
+    /// migrates it.
     Migrates(i64),
 }
 
@@ -439,7 +504,8 @@ impl Layout {
     pub fn made_by(self) -> &'static str {
         match self {
             Layout::Migrates(5) => "relevo 0.1.0 to 0.2.x",
-            Layout::Migrates(_) => "relevo 0.3.x",
+            Layout::Migrates(6) => "relevo 0.3.x",
+            Layout::Migrates(_) => "relevo 0.4.x",
             Layout::New | Layout::Current => "this relevo",
         }
     }
@@ -454,7 +520,7 @@ fn layout(conn: &Connection, path: &str) -> Result<Layout> {
     if version > SCHEMA_VERSION {
         bail!("database {path} was made by a newer version of relevo; use that one");
     }
-    if version == 5 || version == 6 {
+    if (5..=7).contains(&version) {
         return Ok(Layout::Migrates(version));
     }
     let tables: i64 = conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))?;

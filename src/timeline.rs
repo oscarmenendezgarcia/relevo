@@ -36,6 +36,7 @@ enum Show {
     All,
     Waiting,
     Answered,
+    /// Accepted through 0.x, for pages of 0.4.x: threads no longer close, so it lists nothing.
     Closed,
 }
 
@@ -79,7 +80,7 @@ fn parse_params(
                     "closed" => Show::Closed,
                     _ => {
                         return Err(ApiError::bad_request(
-                            "'show' must be all, waiting, answered or closed",
+                            "'show' must be all, waiting or answered",
                         ));
                     }
                 })
@@ -155,7 +156,8 @@ pub struct ThreadOut {
     /// Empty for a `global` thread: it would list everyone.
     participants: Vec<String>,
     teams: Vec<String>,
-    status: String,
+    /// Always `"open"`: threads no longer close (kept through 0.x for clients that read it).
+    status: &'static str,
     named: bool,
     pending: bool,
     notes: Notes,
@@ -169,7 +171,6 @@ pub struct ThreadOut {
     #[serde(skip_serializing_if = "Option::is_none")]
     last_other_note: Option<Option<NoteOut>>,
     handled_by_you: bool,
-    closed_by: Option<String>,
     cursor: String,
     /// In one thread: the name of everyone it names.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -182,14 +183,12 @@ struct Row {
     kind: String,
     title: String,
     from: String,
-    status: String,
     named: bool,
     pending: bool,
     last_seq: i64,
     first_seq: i64,
     notes: i64,
     handled: bool,
-    closed_by: Option<String>,
     /// The latest note by someone else than the person; 0 when nobody else has written.
     last_other_seq: i64,
 }
@@ -198,21 +197,16 @@ struct Row {
 
 /// A thread of person `?1` (`p` is their participant row). The first and latest notes come by
 /// their keys, `notes` counts the entries of `notes_by_thread`. `handled_by_you` as in `thread`'s
-/// delivery: the person has handled the latest note by someone else. `closed_by` is whoever
-/// closed it; a `team` or `global` thread only its opener may close.
+/// delivery: the person has handled the latest note by someone else.
 const ROW_SQL: &str = "
-SELECT t.id, t.kind, t.title, o.handle, t.status, p.named_seq IS NOT NULL, p.waiting, p.last_seq,
+SELECT t.id, t.kind, t.title, o.handle, p.named_seq IS NOT NULL, p.waiting, p.last_seq,
        (SELECT min(n.seq) FROM notes n WHERE n.thread_id = t.id),
        (SELECT count(*) FROM notes n WHERE n.thread_id = t.id),
        p.last_other_seq > 0 AND coalesce(p.handled_seq, 0) >= p.last_other_seq,
-       CASE WHEN t.status = 'closed'
-            THEN coalesce(c.handle, CASE WHEN t.kind != 'direct' THEN o.handle END) END,
        p.last_other_seq
 FROM participants p INDEXED BY participants_timeline
 JOIN threads t ON t.id = p.thread_id
-JOIN people o ON o.id = t.opener_id
-LEFT JOIN thread_closes tc ON tc.thread_id = t.id
-LEFT JOIN people c ON c.id = tc.person_id";
+JOIN people o ON o.id = t.opener_id";
 
 /// What `tab=threads` lists: the person's (`p`) `direct` and `team` threads, and the `global`
 /// threads that name them.
@@ -228,15 +222,13 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Row> {
         kind: r.get(1)?,
         title: r.get(2)?,
         from: r.get(3)?,
-        status: r.get(4)?,
-        named: r.get(5)?,
-        pending: r.get(6)?,
-        last_seq: r.get(7)?,
-        first_seq: r.get(8)?,
-        notes: r.get(9)?,
-        handled: r.get(10)?,
-        closed_by: r.get(11)?,
-        last_other_seq: r.get(12)?,
+        named: r.get(4)?,
+        pending: r.get(5)?,
+        last_seq: r.get(6)?,
+        first_seq: r.get(7)?,
+        notes: r.get(8)?,
+        handled: r.get(9)?,
+        last_other_seq: r.get(10)?,
     })
 }
 
@@ -252,7 +244,7 @@ fn page_sql(params: &Params) -> String {
         Show::All => "1",
         Show::Waiting => "p.waiting = 1",
         Show::Answered => ANSWERED,
-        Show::Closed => "t.status = 'closed'",
+        Show::Closed => "0",
     };
     format!(
         "{ROW_SQL}
@@ -273,8 +265,7 @@ fn counts_sql() -> String {
         "SELECT coalesce(sum(t.kind = 'global'), 0),
                 coalesce(sum({FOR_YOU}), 0),
                 coalesce(sum({FOR_YOU} AND p.waiting), 0),
-                coalesce(sum({FOR_YOU} AND {ANSWERED}), 0),
-                coalesce(sum({FOR_YOU} AND t.status = 'closed'), 0)
+                coalesce(sum({FOR_YOU} AND {ANSWERED}), 0)
          FROM participants p JOIN threads t ON t.id = p.thread_id
          WHERE p.person_id = ?1"
     )
@@ -428,7 +419,7 @@ fn thread_out(r: Row) -> ThreadOut {
         from: r.from,
         participants: Vec::new(),
         teams: Vec::new(),
-        status: r.status,
+        status: "open",
         named: r.named,
         pending: r.pending,
         notes: Notes::Count(r.notes),
@@ -436,7 +427,6 @@ fn thread_out(r: Row) -> ThreadOut {
         last_note: None,
         last_other_note: None,
         handled_by_you: r.handled,
-        closed_by: r.closed_by,
         cursor: r.last_seq.to_string(),
         names: None,
     }
@@ -458,11 +448,9 @@ fn names(
     .collect())
 }
 
-/// Every handle a thread names: its opener, who closed it, its participants and the authors of
-/// its notes.
+/// Every handle a thread names: its opener, its participants and the authors of its notes.
 fn handles_of(t: &ThreadOut, into: &mut BTreeSet<String>) {
     into.insert(t.from.clone());
-    into.extend(t.closed_by.iter().cloned());
     into.extend(t.participants.iter().cloned());
     let last = t.last_note.as_ref().and_then(Option::as_ref);
     let other = t.last_other_note.as_ref().and_then(Option::as_ref);
@@ -522,9 +510,9 @@ pub async fn list(
     let cursor = more.then(|| rows.last().map(|r| r.last_seq.to_string()));
     let threads = threads_out(&conn, rows)?;
 
-    let (board, threads_count, waiting, answered, closed): (i64, i64, i64, i64, i64) = conn
-        .query_row(&counts_sql(), [me], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+    let (board, threads_count, waiting, answered): (i64, i64, i64, i64) =
+        conn.query_row(&counts_sql(), [me], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })?;
     let teams: Vec<String> = conn
         .prepare(
@@ -564,7 +552,6 @@ pub async fn list(
             "threads": threads_count,
             "waiting": waiting,
             "answered": answered,
-            "closed": closed,
             "teams": team_counts,
         },
         "people": people,
@@ -627,7 +614,8 @@ mod tests {
     #[test]
     fn a_page_reads_the_persons_threads_in_order() {
         for tab in [Tab::Board, Tab::Threads] {
-            for show in [Show::All, Show::Waiting, Show::Answered, Show::Closed] {
+            // (`Show::Closed` lists nothing, whatever the plan.)
+            for show in [Show::All, Show::Waiting, Show::Answered] {
                 let params = Params {
                     tab,
                     show,

@@ -130,9 +130,9 @@ fn start(conn: &Connection, id: i64, person: i64) -> Result<(), ApiError> {
 /// exist cannot leave a new session of this person started nowhere.
 const START_SQL: &str = "
 INSERT INTO session_threads (session_id, thread_id, person_id, delivered_seq, has_new, waiting,
-                             last_seq, claimed_by, context, person_inbox, resolved)
+                             last_seq, claimed_by, context, person_inbox)
 SELECT ?1, thread_id, person_id, max(coalesce(handled_seq, 0), named_seq - 1), 1,
-       waiting, last_seq, claimed_by, context, inbox, resolved
+       waiting, last_seq, claimed_by, context, inbox
 FROM participants INDEXED BY participants_fresh
 WHERE person_id = ?2 AND fresh = 1 AND named_seq IS NOT NULL";
 

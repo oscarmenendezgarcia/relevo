@@ -1,6 +1,7 @@
-//! Databases of layout 5, made by relevo 0.2.1 itself (`tests/fixtures/make-layout5.sh`), and of
-//! layout 6, made by relevo 0.3.0 (`tests/fixtures/make-layout6.sh`), migrated in place when this
-//! version first opens them, then used through the HTTP router.
+//! Databases of layout 5, made by relevo 0.2.1 itself (`tests/fixtures/make-layout5.sh`), of
+//! layout 6, made by relevo 0.3.0 (`tests/fixtures/make-layout6.sh`), and of layout 7, made by
+//! relevo 0.4.4 (`tests/fixtures/make-layout7.sh`), migrated in place when this version first
+//! opens them, then used through the HTTP router.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,6 +17,8 @@ const LAYOUT5: &str = include_str!("fixtures/layout5.sql");
 const FIXTURE: &str = include_str!("fixtures/layout5-tokens.json");
 const LAYOUT6: &str = include_str!("fixtures/layout6.sql");
 const FIXTURE6: &str = include_str!("fixtures/layout6-tokens.json");
+const LAYOUT7: &str = include_str!("fixtures/layout7.sql");
+const FIXTURE7: &str = include_str!("fixtures/layout7-tokens.json");
 
 /// A directory of its own, removed when the test ends.
 struct TempDir(PathBuf);
@@ -46,6 +49,11 @@ fn layout5(path: &str) -> i64 {
 /// The layout 6 database, as a file, and when its sessions were last seen.
 fn layout6(path: &str) -> i64 {
     made_by(path, LAYOUT6, 6)
+}
+
+/// The layout 7 database, as a file, and when its sessions were last seen.
+fn layout7(path: &str) -> i64 {
+    made_by(path, LAYOUT7, 7)
 }
 
 fn made_by(path: &str, dump: &str, layout: i64) -> i64 {
@@ -173,7 +181,7 @@ async fn a_layout_5_database_migrates_and_what_waited_for_a_reply_stays_pending(
         Clock::fixed(seen + 60),
         5,
     );
-    assert_eq!(user_version(&path), 7);
+    assert_eq!(user_version(&path), 8);
     let f = Fixture {
         app,
         v: serde_json::from_str(FIXTURE).unwrap(),
@@ -203,11 +211,18 @@ async fn a_layout_5_database_migrates_and_what_waited_for_a_reply_stays_pending(
     assert_eq!(bob["note"], Value::Null);
     let th = term2.thread(&f.thread("blind")).await;
     assert_eq!(th["pending"], false);
-    // Closed by Ana after Bob read it: never pending, and nobody of Bob's handled it.
+    // Closed by Ana after Bob read it: open now, and handled by Bob up to its latest note (when
+    // that was written: layout 5 did not keep when it was closed), from no known session, so
+    // never pending.
     let th = ana.thread(&f.thread("closed")).await;
+    assert_eq!(th["status"], "open");
     let bob = delivery_of(&th, "bob");
     assert!(bob["delivered_at"].is_string(), "{bob}");
-    assert_eq!(bob["handled_at"], Value::Null);
+    assert_eq!(
+        bob["handled_at"],
+        th["notes"].as_array().unwrap().last().unwrap()["created_at"]
+    );
+    assert_eq!(bob["handled_by"], Value::Null);
     assert_eq!(term1.thread(&f.thread("closed")).await["pending"], false);
     // Claimed and read, not answered: still pending, and still claimed.
     let th = f
@@ -315,7 +330,7 @@ async fn a_layout_5_database_migrates_and_what_waited_for_a_reply_stays_pending(
         )
         .unwrap();
     assert_eq!(pending, 4);
-    assert_eq!(user_version(&path), 7);
+    assert_eq!(user_version(&path), 8);
 }
 
 /// The columns of every table and the definition of every index, as `db::open` leaves them.
@@ -369,7 +384,11 @@ fn a_migrated_database_has_the_layout_of_a_new_one() {
     let new = dir.0.join("new.db");
     let new = new.to_str().unwrap();
     db::open(new).unwrap();
-    for (name, make) in [("5.db", layout5 as fn(&str) -> i64), ("6.db", layout6)] {
+    for (name, make) in [
+        ("5.db", layout5 as fn(&str) -> i64),
+        ("6.db", layout6),
+        ("7.db", layout7),
+    ] {
         let migrated = dir.0.join(name);
         let migrated = migrated.to_str().unwrap();
         make(migrated);
@@ -439,7 +458,7 @@ fn a_broken_reference_elsewhere_does_not_stop_the_migration() {
     .unwrap();
     drop(conn);
     db::open_migrating(&path).unwrap();
-    assert_eq!(user_version(&path), 7);
+    assert_eq!(user_version(&path), 8);
     // Still broken: the check the migration makes is over the tables that refer to threads.
     let conn = rusqlite::Connection::open(&path).unwrap();
     let broken: i64 = conn
@@ -456,7 +475,7 @@ fn a_broken_reference_elsewhere_does_not_stop_the_migration() {
 fn other_layouts_are_refused_and_left_as_they_are() {
     for (version, says) in [
         (4, "older version of relevo"),
-        (8, "newer version of relevo"),
+        (9, "newer version of relevo"),
     ] {
         let dir = TempDir::new();
         let path = dir.db();
@@ -498,6 +517,7 @@ fn only_serve_migrates_and_checking_writes_nothing() {
     for (version, make, made_by) in [
         (5, layout5 as fn(&str) -> i64, "relevo 0.1.0 to 0.2.x"),
         (6, layout6, "relevo 0.3.x"),
+        (7, layout7, "relevo 0.4.x"),
     ] {
         let path = dir.0.join(format!("{version}.db"));
         let path = path.to_str().unwrap();
@@ -532,7 +552,7 @@ fn only_serve_migrates_and_checking_writes_nothing() {
         // The server migrates it; then everything opens it, and checking says so, also while it
         // is open (read-only, through its -wal and -shm).
         let conn = db::open_migrating(path).unwrap();
-        assert_eq!(user_version(path), 7);
+        assert_eq!(user_version(path), 8);
         assert_eq!(db::check(path).unwrap(), db::Layout::Current);
         db::open(path).unwrap();
         drop(conn);
@@ -550,14 +570,15 @@ fn only_serve_migrates_and_checking_writes_nothing() {
 }
 
 /// What `api::refresh` keeps on each participant row, and on each session's: none of it may
-/// change when layout 6 becomes 7.
+/// change when layout 6 becomes 7, nor when a layout without a closed thread a participant is
+/// named in becomes 8. (`resolved`, unused since layout 8, is left out.)
 fn flags(path: &str) -> Vec<String> {
     let conn = rusqlite::Connection::open(path).unwrap();
     let mut out: Vec<String> = conn
         .prepare(
             "SELECT thread_id || ' ' || person_id || ': ' || coalesce(delivered_seq, '-') || ' '
                     || last_seq || ' ' || last_other_seq || ' ' || has_new || waiting || inbox
-                    || resolved || fresh || ' ' || coalesce(handled_seq, '-') || ' '
+                    || fresh || ' ' || coalesce(handled_seq, '-') || ' '
                     || coalesce(handled_at, '-') || ' ' || coalesce(claimed_by, '-')
              FROM participants ORDER BY thread_id, person_id",
         )
@@ -569,7 +590,7 @@ fn flags(path: &str) -> Vec<String> {
     let sessions: Vec<String> = conn
         .prepare(
             "SELECT session_id || ' ' || thread_id || ': ' || delivered_seq || ' ' || has_new
-                    || waiting || person_inbox || resolved || ' ' || coalesce(claimed_by, '-')
+                    || waiting || person_inbox || ' ' || coalesce(claimed_by, '-')
              FROM session_threads ORDER BY session_id, thread_id",
         )
         .unwrap()
@@ -592,7 +613,7 @@ async fn a_layout_6_database_migrates_its_team_questions_to_the_global_board() {
         Clock::fixed(seen + 60),
         5,
     );
-    assert_eq!(user_version(&path), 7);
+    assert_eq!(user_version(&path), 8);
     // Delivery, handled and claims stay as they were, and so does what is pending.
     assert_eq!(flags(&path), before);
     let f = Fixture {
@@ -627,8 +648,9 @@ async fn a_layout_6_database_migrates_its_team_questions_to_the_global_board() {
         assert_eq!(th["named"], true, "{name}");
     }
 
-    // Bob's inbox, as before: what waited for him still does; the question to everyone that
-    // reached him asks nothing of him, and the one Ana closed is resolved.
+    // Bob's inbox, as before: what waited for him still does, and the question to everyone that
+    // reached him asks nothing of him. The one Ana closed is open now: her last note, which he
+    // never fetched, is new for him, and pending for nobody.
     let v = bob.inbox().await;
     let mut pending: Vec<&str> = v["threads"]
         .as_array()
@@ -642,7 +664,10 @@ async fn a_layout_6_database_migrates_its_team_questions_to_the_global_board() {
     expected.sort();
     assert_eq!(pending, expected, "{v}");
     assert!(listed(&v, &f.thread("unread_team")).is_none(), "{v}");
-    assert!(listed(&v, &f.thread("resolved")).is_none(), "{v}");
+    let resolved = listed(&v, &f.thread("resolved")).unwrap();
+    assert_eq!(resolved["pending"], false);
+    assert_eq!(resolved["status"], "open");
+    assert_eq!(resolved["new_notes"].as_array().unwrap().len(), 1);
     assert!(listed(&v, &f.thread("done")).is_none(), "{v}");
     assert_eq!(v["teams"], json!([]));
     assert_eq!(v["team"][0]["teams"], json!([]));
@@ -656,17 +681,13 @@ async fn a_layout_6_database_migrates_its_team_questions_to_the_global_board() {
     assert_eq!(replay["reached"], 1);
     assert_eq!(replay["added"], json!([]));
 
-    // Only Ana, who asked, closes her question to everyone.
-    let (status, v) = carl
-        .call(
-            "POST",
-            "/api/send",
-            Some(json!({ "thread": f.thread("team"), "close": true })),
-        )
-        .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{v}");
-    ana.send(json!({ "thread": f.thread("team"), "close": true }))
-        .await;
+    // Anyone in her question to everyone may close it now, which closes nothing.
+    for who in [&carl, &ana] {
+        let v = who
+            .send(json!({ "thread": f.thread("team"), "close": true }))
+            .await;
+        assert_eq!(v["status"], "open");
+    }
 
     // And the new layout works on it: a team, and a note to it.
     {
@@ -684,4 +705,131 @@ async fn a_layout_6_database_migrates_its_team_questions_to_the_global_board() {
     let th = listed(&v, sent["thread"].as_str().unwrap()).unwrap();
     assert_eq!(th["teams"], json!(["billing"]));
     assert_eq!(th["pending"], false);
+}
+
+#[tokio::test]
+async fn a_layout_7_database_migrates_and_its_closed_threads_open_with_nothing_pending() {
+    let dir = TempDir::new();
+    let path = dir.db();
+    let seen = layout7(&path);
+    let waiting = |path: &str| -> i64 {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM participants WHERE waiting = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    let before = waiting(&path);
+    let app = App::new(
+        db::open_migrating(&path).unwrap(),
+        Clock::fixed(seen + 60),
+        5,
+    );
+    assert_eq!(user_version(&path), 8);
+    // Nothing became pending, and no thread is closed.
+    assert_eq!(waiting(&path), before);
+    let closed: i64 = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM threads WHERE status != 'open'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(closed, 0);
+    let f = Fixture {
+        app,
+        v: serde_json::from_str(FIXTURE7).unwrap(),
+    };
+    let ana = f.agent("ana", "ana-cc-0001", "pagos-api");
+    let bob = f.agent("bob", "bob-term-01", "pagos-api");
+    let carl = f.agent("carl", "carl-hermes1", "");
+    let closed_direct = f.thread("closed_direct");
+    let closed_team = f.thread("closed_team");
+    let closed_board = f.thread("closed_board");
+
+    // Each closed thread is open, and pending for nobody it names.
+    for (name, who) in [
+        ("closed_direct", &ana),
+        ("closed_direct", &bob),
+        ("closed_team", &ana),
+        ("closed_team", &bob),
+        ("closed_team", &carl),
+        ("closed_board", &bob),
+        ("closed_board", &carl),
+    ] {
+        let th = who.thread(&f.thread(name)).await;
+        assert_eq!(th["status"], "open", "{name}");
+        assert_eq!(th["pending"], false, "{name}");
+    }
+    // Ana closed her direct thread before Bob's answer reached her: she has it handled, as of
+    // when she closed it, from no known session.
+    let th = bob.thread(&closed_direct).await;
+    let ana_d = delivery_of(&th, "ana");
+    assert!(ana_d["handled_at"].is_string(), "{ana_d}");
+    assert_eq!(ana_d["handled_by"], Value::Null);
+    // Carl, named in the team thread and never reached: handled too.
+    let carl_d = delivery_of(&ana.thread(&closed_team).await, "carl");
+    assert!(carl_d["handled_at"].is_string(), "{carl_d}");
+
+    // What waited for Bob still does, and nothing else does for anyone.
+    let pending = |v: &Value| -> Vec<String> {
+        let mut ids: Vec<String> = v["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| t["pending"] == true)
+            .map(|t| t["id"].as_str().unwrap().to_string())
+            .collect();
+        ids.sort();
+        ids
+    };
+    let mut expected = vec![f.thread("fetched"), f.thread("unread")];
+    expected.sort();
+    assert_eq!(pending(&bob.inbox().await), expected);
+    assert_eq!(pending(&ana.inbox().await), Vec::<String>::new());
+    assert_eq!(pending(&carl.inbox().await), Vec::<String>::new());
+    // Nor for a new session of anyone's.
+    for who in ["ana", "carl"] {
+        let v = f.agent(who, "new-session-1", "").inbox().await;
+        assert_eq!(pending(&v), Vec::<String>::new(), "{who}");
+    }
+    // A key used to close replays as open.
+    let v = ana
+        .send(json!({ "thread": closed_direct, "close": true, "key": "k-close" }))
+        .await;
+    assert_eq!(v["status"], "open");
+    assert_eq!(v["note"], Value::Null);
+
+    // Writing works in every one of them: a note makes it pending for whom it names.
+    let v = bob
+        .send(json!({ "thread": closed_direct, "text": "Done, it is out." }))
+        .await;
+    assert_eq!(v["status"], "open");
+    assert_eq!(
+        listed(&ana.inbox().await, &closed_direct).unwrap()["pending"],
+        true
+    );
+    ana.send(json!({ "thread": closed_direct, "seen": true }))
+        .await;
+    assert!(listed(&ana.inbox().await, &closed_direct).is_none());
+    ana.send(json!({ "thread": closed_team, "text": "Down again." }))
+        .await;
+    let v = carl.inbox().await;
+    assert_eq!(listed(&v, &closed_team).unwrap()["pending"], true);
+    // Bob, reached through the team, is not named: new for him, not pending.
+    let v = bob.inbox().await;
+    assert_eq!(listed(&v, &closed_team).unwrap()["pending"], false);
+    bob.send(json!({ "thread": closed_board, "text": "Still me tonight." }))
+        .await;
+    assert_eq!(
+        bob.thread(&closed_board).await["notes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
 }
