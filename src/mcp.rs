@@ -162,6 +162,32 @@ fn unknown_fields(unknown: &Map<String, Value>) -> Option<String> {
     })
 }
 
+/// The body of `send`'s request. `seen` goes on the wire as `done`, its name up to 0.4.x, which
+/// servers accept through 0.x (docs/protocol.md): a 0.4.x server refuses `seen`, and a client may
+/// be newer than its server. Given with `done` too, both go, for the server to refuse. `done` and
+/// `close` go as they came: the server reads them as `seen` (a close with text is a note).
+fn send_body(p: SendParams) -> Map<String, Value> {
+    let mut body = Map::new();
+    if let Some(thread) = p.thread {
+        body.insert("thread".into(), thread.into());
+    }
+    if let Some(text) = p.text {
+        body.insert("text".into(), text.into());
+    }
+    let seen_as = if p.done.is_some() { "seen" } else { "done" };
+    for (name, value) in [
+        ("claim", p.claim),
+        (seen_as, p.seen),
+        ("done", p.done),
+        ("close", p.close),
+    ] {
+        if let Some(value) = value {
+            body.insert(name.into(), value.into());
+        }
+    }
+    body
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub struct InboxParams {
     /// Also the threads held by your person's other sessions or addressed to their other
@@ -439,29 +465,10 @@ impl Relevo {
             return Err(refusal);
         }
         let client = self.client()?;
-        let mut body = Map::new();
         let opened = p.thread.is_none();
-        if let Some(thread) = p.thread {
-            body.insert("thread".into(), thread.into());
-        }
-        if let Some(text) = p.text {
-            body.insert("text".into(), text.into());
-        }
-        // `done` and `close` are sent as they came: the server reads them as `seen` (a close with
-        // text is a note), and refuses what does not go together.
-        let without_text = !body.contains_key("text");
         let seen =
-            [p.seen, p.done].contains(&Some(true)) || (without_text && p.close == Some(true));
-        for (name, value) in [
-            ("claim", p.claim),
-            ("seen", p.seen),
-            ("done", p.done),
-            ("close", p.close),
-        ] {
-            if let Some(value) = value {
-                body.insert(name.into(), value.into());
-            }
-        }
+            [p.seen, p.done].contains(&Some(true)) || (p.text.is_none() && p.close == Some(true));
+        let body = send_body(p);
         let v = client.send(body).await.map_err(error)?;
         if let Some(id) = v["thread"].as_str() {
             forget(&self.pushed, id);
@@ -1106,6 +1113,33 @@ mod tests {
         assert_eq!(
             v["threads"][1]["new_notes"],
             json!([n_2, note("n_3", "t3")])
+        );
+    }
+
+    /// `seen` goes as `done` through 0.x, so that a 0.4.x server, which refuses `seen`, takes it.
+    #[test]
+    fn seen_goes_on_the_wire_as_done() {
+        let body = |args: Value| {
+            let p: SendParams = serde_json::from_value(args).unwrap();
+            Value::Object(send_body(p))
+        };
+        assert_eq!(
+            body(json!({ "thread": "r_1", "seen": true })),
+            json!({ "thread": "r_1", "done": true })
+        );
+        // The deprecated names go as they came.
+        assert_eq!(
+            body(json!({ "thread": "r_1", "done": true })),
+            json!({ "thread": "r_1", "done": true })
+        );
+        assert_eq!(
+            body(json!({ "thread": "r_1", "text": "x", "close": true, "claim": true })),
+            json!({ "thread": "r_1", "text": "x", "close": true, "claim": true })
+        );
+        // Both at once: both go, and the server refuses them.
+        assert_eq!(
+            body(json!({ "thread": "r_1", "seen": true, "done": true })),
+            json!({ "thread": "r_1", "seen": true, "done": true })
         );
     }
 
