@@ -130,7 +130,7 @@ async fn an_upgrade_posts_the_versions_notes_once_on_the_board() {
     assert_eq!(th["named"], false);
     assert_eq!(th["pending"], false);
     assert_eq!(th["new_notes"][0]["author"], "relevo");
-    assert_eq!(th["new_notes"][0]["via"], "Relevo");
+    assert_eq!(th["new_notes"][0]["via"], "release notes");
     assert_eq!(th["new_notes"][0]["text"], "Relevo 0.5.0\n\nSmaller.");
     let again = s.get("ana", "/api/inbox").await;
     assert!(again["threads"].as_array().unwrap().is_empty(), "{again}");

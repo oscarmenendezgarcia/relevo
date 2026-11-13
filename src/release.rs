@@ -188,7 +188,7 @@ fn system_person(tx: &Connection, now: i64) -> Result<Option<(i64, String)>> {
     // A SHA-256 is 64 hex digits: this hash is no secret's.
     tx.execute(
         "INSERT INTO tokens (id, person_id, label, hash, created_at, revoked_at)
-         VALUES (?1, ?2, 'Relevo', ?3, ?4, ?4)",
+         VALUES (?1, ?2, 'release notes', ?3, ?4, ?4)",
         params![token, person, format!("system:{token}"), now],
     )?;
     tx.execute(
@@ -225,7 +225,7 @@ fn post_note(
     )?;
     tx.execute(
         "INSERT INTO notes (id, thread_id, author_id, token_id, via, text, created_at)
-         VALUES (?1, ?2, ?3, ?4, 'Relevo', ?5, ?6)",
+         VALUES (?1, ?2, ?3, ?4, 'release notes', ?5, ?6)",
         params![
             random_id("n_"),
             id,
