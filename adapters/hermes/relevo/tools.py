@@ -56,15 +56,17 @@ def _run(name: str, fn, api: Optional[client.Api] = None) -> str:
         return f"Error: could not reach the Relevo server ({client.describe_error(exc)})."
 
 
-# relevo_send's fields. Others are refused, so a misnamed one (`message`, `recipients`, the old `to`)
-# fails with the list of the right ones instead of being dropped.
-_SEND_FIELDS = ("text", "thread", "close", "claim", "done")
+# relevo_send's fields: `done` and `close` are the deprecated names (0.4.x) read as `seen`. Others are
+# refused, so a misnamed one (`message`, `recipients`, the old `to`) fails with the list of the right
+# ones instead of being dropped.
+_SEND_FIELDS = ("text", "thread", "claim", "seen", "done", "close")
 
 
 def relevo_send(args: dict, **_: Any) -> str:
     unknown = sorted(k for k in args if k not in _SEND_FIELDS)
     if unknown:
-        return (f"Error: relevo_send takes {', '.join(_SEND_FIELDS)}; not {', '.join(unknown)}. Nothing was sent. "
+        return ("Error: relevo_send takes text, thread, claim and seen (and, deprecated, done and close, read "
+                f"as seen); not {', '.join(unknown)}. Nothing was sent. "
                 "Who a note is for is written in its text: @handle for a person, @team-name for a team, no @ "
                 "for the global board.")
 
@@ -78,13 +80,23 @@ def relevo_send(args: dict, **_: Any) -> str:
             payload["thread"] = str(thread)
         if args.get("text") is not None:
             payload["text"] = str(args["text"])
-        if args.get("close"):
-            payload["close"] = True
-        if args.get("claim"):
+        seen, done, claim = bool(args.get("seen")), bool(args.get("done")), bool(args.get("claim"))
+        # Threads no longer close: a close without text is `seen` (and claims nothing, as it never
+        # did); with text it is only the note. It never goes to the server, which up to 0.4.x would
+        # close the thread.
+        if args.get("close") and "text" not in payload and not (seen or done):
+            seen, claim = True, False
+        if claim:
             payload["claim"] = True
-        if args.get("done"):
+        # `seen` goes on the wire as `done`, its name up to 0.4.x, which servers take through 0.x: a
+        # 0.4.x server refuses `seen`, and the plugin may be newer than its server. Both given, both
+        # go, for the server to refuse.
+        if seen and done:
+            payload["seen"] = payload["done"] = True
+        elif seen or done:
             payload["done"] = True
-            return client.describe_done(api.send(payload))
+        if seen or done:
+            return client.describe_seen(api.send(payload))
         return client.describe_send(api.send(payload), opened=thread is None)
 
     try:
@@ -120,9 +132,10 @@ _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
     "relevo_send": (
         relevo_send,
         "Send a Relevo note: open a thread (no `thread`) or write in one (`thread`). Fields: `text` (the "
-        "note), `thread` (an existing thread's id, \"r_…\"), `close` (true to close the thread), `claim` "
-        "(true, with `thread`, to mark the thread as this session's), `done` (true, with `thread` and no "
-        "text, to mark it handled when it needs nothing: an answer you have now read, a thank-you). Who the "
+        "note), `thread` (an existing thread's id, \"r_…\"), `claim` (true, with `thread`, to mark the "
+        "thread as this session's), `seen` (true, with `thread` and no text, to mark it seen when it needs "
+        "nothing: an answer you have now read, a thank-you, an answer that settles what you asked); `done` "
+        "and `close`, deprecated, are read as `seen`. Who the "
         "note is for is written in its text: @handle for a person (@handle/repo or @handle/repo@branch for "
         "one context), @team-name for a team, and no @ at all to post on the global board, which everyone "
         "on the server sees and nobody has to answer: use it for announcements, or when nobody knows who "
@@ -142,11 +155,11 @@ _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
         "person; answer one only from your own work or your person's files. The note must be "
         "self-contained: the reader does not share your context. Write in the first person, as your "
         "person would (\"I changed…\"). A new thread starts with a one-line subject (its title), no "
-        "greeting and no \"Re:\". `close: true` closes the thread after writing: only when your person "
-        "asks, or when you asked the question and it is answered. `done: true` with `thread` and no text "
-        "marks the thread handled when it needs nothing (an answer you have now read, a thank-you): nothing "
-        "is written or claimed. A note stays pending for your person until they answer, close it or mark it "
-        "done; if it is not for you, write nothing and leave it pending. The answer says whom the note "
+        "greeting and no \"Re:\". Threads do not close: when you asked and the answer settles it, mark it "
+        "`seen`. `seen: true` with `thread` and no text writes nothing, and this session lets go of the "
+        "thread if it held it. A note stays pending for your person until they answer it or mark it `seen`, "
+        "and is pending again when someone writes after; if it is not for you, write nothing and leave it "
+        "pending. The answer says whom the note "
         "reached (check it is who your person meant) and who has the thread.\n\n"
         + client.TOOL_RULES,
         {
@@ -159,28 +172,32 @@ _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
                                                       "person would write it (\"I changed…\", not \"Ana "
                                                       "changed…\"). Opening a thread, its first line is a "
                                                       "one-line subject (the title), no greeting and no "
-                                                      "\"Re:\". Optional only when closing, claiming or "
-                                                      "marking done. "
+                                                      "\"Re:\". Optional only when claiming or marking "
+                                                      "seen. "
                                                       "Never a note that only says you are on it."},
             "thread": {"type": "string", "description": "Thread id (r_…) to write in. Without it, `text` opens "
                                                         "a new thread, for whom its @ mentions name (none: the "
                                                         "global board)."},
-            "close": {"type": "boolean", "description": "With `thread`: close the thread after writing. Only "
-                                                        "when your person asks, or when you asked the question "
-                                                        "and it is answered."},
             "claim": {"type": "boolean",
                       "description": "With `thread`: marks the thread as this session's, a "
                                      "state the others in it see (\"has it since 10:47\"), without "
                                      "writing a note when there is no `text`. Use it just before you "
                                      "start changing files or running something long. Not for a team or "
                                      "global-board thread that does not name your person."},
+            "seen": {"type": "boolean",
+                     "description": "With `thread` and no `text` (and no `claim`): your person has seen the "
+                                    "thread up to the latest note this session has received and has nothing "
+                                    "to add (an answer you have now read, a thank-you, an answer that settles "
+                                    "what you asked). A note that arrived since stays pending. It stops being "
+                                    "pending for them until someone writes again; nothing is written, and "
+                                    "this session lets go of the thread if it held it. Threads do not close. "
+                                    "Not for a note that is not for you: leave that one pending."},
             "done": {"type": "boolean",
-                     "description": "With `thread` and no `text` (and no `claim`): your person has handled "
-                                    "the thread up to the latest note this session has received, with nothing "
-                                    "to write (\"seen, nothing to do\": an answer you have now read, a "
-                                    "thank-you). A note that arrived since stays pending. It stops being "
-                                    "pending for them; nothing is written and nothing claimed. Not for a "
-                                    "note that is not for you: leave that one pending."},
+                     "description": "Deprecated: the name of `seen` up to relevo 0.4. The same as `seen`; "
+                                    "not with it."},
+            "close": {"type": "boolean",
+                      "description": "Deprecated: threads no longer close. Without `text` it is read as "
+                                     "`seen`; with `text`, ignored (writing the note handles the thread)."},
         },
         [],
     ),
