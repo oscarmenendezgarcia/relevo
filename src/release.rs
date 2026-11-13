@@ -21,13 +21,15 @@ pub enum Outcome {
     /// This version, or a newer one, was announced already (a restart, a downgrade, or a
     /// database made by this version).
     Announced,
-    /// The CHANGELOG has no section for this version (a build between releases): nothing posted
-    /// and nothing recorded, so the release that has one still posts it.
-    NoSection,
+    /// This build is not a release: the CHANGELOG's first section is another version's, or is
+    /// marked "(unreleased)", or there is none (a build between releases). Nothing posted, and
+    /// nothing recorded, so the release itself still posts its notes.
+    NotReleased,
     /// Turned off (`--no-release-notes`): recorded, not posted.
     Off,
-    /// A person took the handle `relevo` before it was reserved: recorded, not posted.
-    HandleTaken,
+    /// A person or a team had the name `relevo` before 0.5.0 reserved it, so the server has no
+    /// person of its own: recorded, not posted.
+    NameTaken,
 }
 
 /// Whether the release notes are on: not with `--no-release-notes`, nor with
@@ -42,37 +44,118 @@ pub fn enabled(no_flag: bool, env: Option<&str>) -> bool {
     !no_flag && !off
 }
 
-/// The section of `changelog` for `version`: what follows its `## <version>` heading (alone, or
-/// followed by a space and a date), up to the next `## ` heading, trimmed. `None` when there is
-/// none, or it is empty.
+/// The `## ` headings of `changelog` and the lines under each, outside fenced code (a `## ` line
+/// inside a fence is part of the section). Line ends are `\n` or `\r\n`.
+fn sections(changelog: &str) -> Vec<(&str, Vec<&str>)> {
+    let mut out: Vec<(&str, Vec<&str>)> = Vec::new();
+    let mut fence: Option<(char, usize)> = None;
+    for line in changelog.lines() {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let marker = line.trim_start_matches(' ');
+        let indent = line.len() - marker.len();
+        let run = |c: char| marker.chars().take_while(|&m| m == c).count();
+        match fence {
+            Some((c, n)) => {
+                if indent <= 3 && run(c) >= n && marker.trim_start_matches(c).trim().is_empty() {
+                    fence = None;
+                }
+            }
+            None if indent <= 3 && (run('`') >= 3 || run('~') >= 3) => {
+                let c = marker.chars().next().unwrap_or('`');
+                fence = Some((c, run(c)));
+            }
+            None => {
+                if let Some(heading) = line.strip_prefix("## ") {
+                    out.push((heading, Vec::new()));
+                    continue;
+                }
+            }
+        }
+        if let Some((_, body)) = out.last_mut() {
+            body.push(line);
+        }
+    }
+    out
+}
+
+/// Whether a heading is `version`'s: the version alone, or followed by a space and more (a date).
+fn heading_of(heading: &str, version: &str) -> bool {
+    heading
+        .strip_prefix(version)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+}
+
+/// The section of `changelog` for `version`: what follows its `## <version>` heading, up to the
+/// next `## ` heading (or the end), trimmed. `None` when there is none, or it is empty.
 pub fn section(changelog: &str, version: &str) -> Option<String> {
-    let mut lines = changelog.lines();
-    lines.find(|line| {
-        line.strip_prefix("## ")
-            .and_then(|rest| rest.strip_prefix(version))
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
-    })?;
-    let body: Vec<&str> = lines.take_while(|line| !line.starts_with("## ")).collect();
+    let (_, body) = sections(changelog)
+        .into_iter()
+        .find(|(heading, _)| heading_of(heading, version))?;
     let body = body.join("\n").trim().to_string();
     (!body.is_empty()).then_some(body)
 }
 
-/// `major.minor.patch`, with an optional `-pre` that comes before the release itself.
-fn parse(version: &str) -> Option<(u64, u64, u64, bool)> {
-    let (core, pre) = match version.trim().split_once('-') {
-        Some((core, _)) => (core, true),
-        None => (version.trim(), false),
+/// The notes this build posts: its version's section, only when it is the CHANGELOG's first
+/// section and is not marked "(unreleased)". A build between releases (its version's section is
+/// below a newer one still being written) has none.
+pub fn release_section(changelog: &str, version: &str) -> Option<String> {
+    let (heading, _) = sections(changelog).into_iter().next()?;
+    if !heading_of(heading, version) || heading.to_lowercase().contains("(unreleased)") {
+        return None;
+    }
+    section(changelog, version)
+}
+
+/// A pre-release identifier: numeric ones come before the others, and compare as numbers.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Ident {
+    Number(u64),
+    Text(String),
+}
+
+/// A version as semver orders it: `major.minor.patch`, whether it is a release (no
+/// pre-release: a release comes after its pre-releases), then its pre-release identifiers.
+type Order = ((u64, u64, u64), bool, Vec<Ident>);
+
+/// A version's `Order`; build metadata (`+…`) is left out, as semver says.
+fn parse(version: &str) -> Option<Order> {
+    let version = version.trim();
+    let version = version.split_once('+').map_or(version, |(v, _)| v);
+    let (core, pre) = match version.split_once('-') {
+        Some((core, pre)) => (core, Some(pre)),
+        None => (version, None),
     };
     let mut parts = core.split('.').map(|p| p.parse::<u64>().ok());
     let v = (parts.next()??, parts.next()??, parts.next()??);
     if parts.next().is_some() {
         return None;
     }
-    Some((v.0, v.1, v.2, !pre))
+    let idents = match pre {
+        None => Vec::new(),
+        Some(pre) => pre
+            .split('.')
+            .map(|i| {
+                if i.is_empty() {
+                    None
+                } else if i.bytes().all(|b| b.is_ascii_digit()) {
+                    i.parse().ok().map(Ident::Number)
+                } else {
+                    Some(Ident::Text(i.to_string()))
+                }
+            })
+            .collect::<Option<_>>()?,
+    };
+    Some((v, pre.is_none(), idents))
 }
 
-/// Whether `a` is a newer version than `b` (semver order, without build metadata). A version that
-/// cannot be read is newer than nothing.
+/// Whether `version` can be read as a semver version.
+pub fn readable(version: &str) -> bool {
+    parse(version).is_some()
+}
+
+/// Whether `a` is a newer version than `b`, in semver order: a release after its pre-releases,
+/// pre-releases by their identifiers, build metadata ignored. A version that cannot be read is
+/// newer than nothing.
 pub fn newer(a: &str, b: &str) -> bool {
     match (parse(a), parse(b)) {
         (Some(a), Some(b)) => a > b,
@@ -126,17 +209,24 @@ pub fn announce(
             r.get(0)
         })
         .optional()?;
-    if announced.is_some_and(|last| !newer(version, &last)) {
-        return Ok(Outcome::Announced);
+    match &announced {
+        // Written by a version that cannot be read: taken as older, and written over.
+        Some(last) if !readable(last) => tracing::info!(
+            announced = %last,
+            "the version the database announced last cannot be read: taken as older"
+        ),
+        Some(last) if !newer(version, last) => return Ok(Outcome::Announced),
+        _ => {}
     }
-    let Some(section) = section(changelog, version) else {
-        return Ok(Outcome::NoSection);
-    };
     let outcome = if !post {
+        // Off: recorded, so turning them on later posts no older version's notes.
         Outcome::Off
     } else {
+        let Some(section) = release_section(changelog, version) else {
+            return Ok(Outcome::NotReleased);
+        };
         match system_person(&tx, now)? {
-            None => Outcome::HandleTaken,
+            None => Outcome::NameTaken,
             Some((person, token)) => {
                 Outcome::Posted(post_note(&tx, person, &token, version, &section, now)?)
             }
@@ -261,6 +351,56 @@ mod tests {
         assert!(!newer("0.4.4", "0.4.4"));
         assert!(!newer("0.4.3", "0.4.4"));
         assert!(!newer("x", "0.4.4"));
+        // Build metadata is left out; pre-release identifiers compare one by one, numbers as
+        // numbers and before words.
+        assert!(!newer("0.5.0+build.7", "0.5.0"));
+        assert!(!newer("0.5.0", "0.5.0+other"));
+        assert!(newer("1.0.0-rc.2", "1.0.0-rc.1"));
+        assert!(newer("1.0.0-rc.10", "1.0.0-rc.9"));
+        assert!(newer("1.0.0-rc.1", "1.0.0-beta.11"));
+        assert!(newer("1.0.0-alpha.beta", "1.0.0-alpha.1"));
+        assert!(newer("1.0.0-alpha.1", "1.0.0-alpha"));
+        assert!(!readable("0.5"));
+        assert!(!readable("1.0.0-"));
+        assert!(!readable("garbage"));
+        assert!(readable("1.0.0-rc.1+sha.5114f85"));
+    }
+
+    #[test]
+    fn only_a_dated_first_section_is_a_release() {
+        let dev =
+            "# Changelog\n\n## 0.5.0 (unreleased)\n\nNext.\n\n## 0.4.4 (12-nov-2026)\n\nNow.\n";
+        // A 0.4.4 build between releases: its section is not the first.
+        assert_eq!(release_section(dev, "0.4.4"), None);
+        // A build of 0.5.0 before its release: still "(unreleased)".
+        assert_eq!(release_section(dev, "0.5.0"), None);
+        let release = dev.replace("(unreleased)", "(14-nov-2026)");
+        assert_eq!(release_section(&release, "0.5.0").unwrap(), "Next.");
+        assert_eq!(release_section(&release, "0.4.4"), None);
+        // A heading with the version alone is a release too.
+        assert_eq!(release_section("## 0.6.0\n\nIt.", "0.6.0").unwrap(), "It.");
+        assert_eq!(release_section("No sections.", "0.6.0"), None);
+    }
+
+    #[test]
+    fn a_heading_inside_fenced_code_is_text_and_crlf_lines_read_the_same() {
+        let log = "## 0.6.0 (14-nov-2026)\n\nRun:\n\n```\n## not a heading\n```\n\n~~~~md\n## nor this\n~~~\n~~~~\nEnd.\n\n## 0.5.0 (1-nov-2026)\n\nOld.";
+        let body = section(log, "0.6.0").unwrap();
+        assert!(
+            body.contains("## not a heading") && body.contains("## nor this"),
+            "{body}"
+        );
+        assert!(body.ends_with("End."), "{body}");
+        assert_eq!(section(log, "0.5.0").unwrap(), "Old.");
+        let crlf = log.replace('\n', "\r\n");
+        assert_eq!(section(&crlf, "0.6.0").unwrap(), body);
+        assert_eq!(release_section(&crlf, "0.6.0").unwrap(), body);
+        assert!(!body.contains('\r'));
+        // The last section runs to the end.
+        assert_eq!(
+            section("## 0.6.0\n\nA.\n\nB.\n", "0.6.0").unwrap(),
+            "A.\n\nB."
+        );
     }
 
     #[test]

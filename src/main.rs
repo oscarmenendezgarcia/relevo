@@ -445,15 +445,17 @@ fn release_notes(conn: &rusqlite::Connection, no_release_notes: bool, now: i64) 
             tracing::info!(%thread, "posted the release notes of relevo {version} on the global board")
         }
         Ok(Outcome::Announced) => {}
-        Ok(Outcome::NoSection) => tracing::info!(
-            "the CHANGELOG has no section for relevo {version}: no release notes posted"
+        Ok(Outcome::NotReleased) => tracing::info!(
+            "relevo {version} is not a release (the CHANGELOG's first section is not its own, \
+             dated): no release notes posted"
         ),
         Ok(Outcome::Off) => tracing::info!(
             "release notes are off: relevo {version} is recorded as announced, nothing posted"
         ),
-        Ok(Outcome::HandleTaken) => tracing::warn!(
-            "a person has the handle 'relevo', which this version keeps for the server's own \
-             release notes: relevo {version} is recorded as announced, nothing posted"
+        Ok(Outcome::NameTaken) => tracing::warn!(
+            "a person or a team has the name 'relevo', which this version keeps for the \
+             server's own release notes: relevo {version} is recorded as announced, nothing \
+             posted"
         ),
         Err(e) => tracing::warn!("could not post the release notes of relevo {version}: {e:#}"),
     }
@@ -562,7 +564,6 @@ async fn main() -> Result<()> {
             dist,
             no_release_notes,
         } => {
-            release_notes(&conn, no_release_notes, now);
             let tls = server_tls(
                 &db_file,
                 tls,
@@ -579,6 +580,8 @@ async fn main() -> Result<()> {
             let listener = tokio::net::TcpListener::bind(addr).await?;
             let scheme = if tls.is_some() { "https" } else { "http" };
             tracing::info!(%addr, db = %db_file, %scheme, "relevo listening");
+            // Posted once the server can serve: bound, with its TLS set up.
+            release_notes(&app.db(), no_release_notes, db::now_unix());
             if tls.is_none() && !addr.ip().is_loopback() {
                 tracing::warn!(
                     %addr,

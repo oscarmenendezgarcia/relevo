@@ -14,7 +14,12 @@ use tower::ServiceExt;
 
 const T0: i64 = 1_794_134_460;
 
-const LOG: &str = "# Changelog\n\n## 0.6.0 (unreleased)\n\n**Big thing.** It works.\n\n## 0.5.0 (13-nov-2026)\n\nSmaller.\n\n## 0.4.4 (12-nov-2026)\n\nOld.\n";
+/// The CHANGELOG of the release `top`: its section first, and dated.
+fn log(top: &str) -> String {
+    format!(
+        "# Changelog\n\n## {top} (13-nov-2026)\n\nNotes of {top}.\n\n## 0.4.4 (12-nov-2026)\n\nOld.\n"
+    )
+}
 
 struct Server {
     app: Arc<App>,
@@ -46,7 +51,11 @@ fn server(handles: &[&str], announced: Option<&str>) -> Server {
 
 impl Server {
     fn announce(&self, version: &str, post: bool) -> Outcome {
-        release::announce(&self.app.db(), version, LOG, post, T0 + 30).unwrap()
+        self.announce_with(version, &log(version), post)
+    }
+
+    fn announce_with(&self, version: &str, changelog: &str, post: bool) -> Outcome {
+        release::announce(&self.app.db(), version, changelog, post, T0 + 30).unwrap()
     }
 
     fn announced(&self) -> Option<String> {
@@ -131,7 +140,10 @@ async fn an_upgrade_posts_the_versions_notes_once_on_the_board() {
     assert_eq!(th["pending"], false);
     assert_eq!(th["new_notes"][0]["author"], "relevo");
     assert_eq!(th["new_notes"][0]["via"], "release notes");
-    assert_eq!(th["new_notes"][0]["text"], "Relevo 0.5.0\n\nSmaller.");
+    assert_eq!(
+        th["new_notes"][0]["text"],
+        "Relevo 0.5.0\n\nNotes of 0.5.0."
+    );
     let again = s.get("ana", "/api/inbox").await;
     assert!(again["threads"].as_array().unwrap().is_empty(), "{again}");
     // Anyone may reply, as on any board thread; it names nobody, so nothing becomes pending.
@@ -219,13 +231,30 @@ async fn turned_off_it_records_the_version_without_posting() {
 }
 
 #[tokio::test]
-async fn a_version_without_a_section_posts_and_records_nothing() {
+async fn a_build_that_is_not_a_release_posts_and_records_nothing() {
     let s = server(&["ana"], Some("0.4.4"));
-    assert_eq!(s.announce("0.5.1", true), Outcome::NoSection);
+    // Between releases: a 0.5.0 binary while the CHANGELOG is topped by 0.6.0, still being
+    // written; and a 0.6.0 build before its release.
+    let dev = "# Changelog\n\n## 0.6.0 (unreleased)\n\nNext.\n\n## 0.5.0 (13-nov-2026)\n\nNow.\n";
+    assert_eq!(s.announce_with("0.5.0", dev, true), Outcome::NotReleased);
+    assert_eq!(s.announce_with("0.6.0", dev, true), Outcome::NotReleased);
+    // No section at all.
+    assert_eq!(s.announce_with("0.5.1", dev, true), Outcome::NotReleased);
     assert_eq!(s.announced().as_deref(), Some("0.4.4"));
     assert_eq!(s.board_threads(), 0);
-    // The release that has one posts it.
+    // The release itself posts.
+    let released = dev.replace("(unreleased)", "(20-nov-2026)");
+    assert!(matches!(
+        s.announce_with("0.6.0", &released, true),
+        Outcome::Posted(_)
+    ));
+}
+
+#[tokio::test]
+async fn an_unreadable_announced_version_is_taken_as_older_and_written_over() {
+    let s = server(&["ana"], Some("not a version"));
     assert!(matches!(s.announce("0.5.0", true), Outcome::Posted(_)));
+    assert_eq!(s.announced().as_deref(), Some("0.5.0"));
 }
 
 #[tokio::test]
@@ -254,7 +283,7 @@ fn several_processes_starting_at_once_post_once() {
             let path = path.clone();
             std::thread::spawn(move || {
                 let conn = db::open(&path).unwrap();
-                release::announce(&conn, "0.5.0", LOG, true, T0).unwrap()
+                release::announce(&conn, "0.5.0", &log("0.5.0"), true, T0).unwrap()
             })
         })
         .collect();
@@ -359,7 +388,7 @@ async fn a_person_who_took_the_handle_before_keeps_it_and_nothing_is_posted() {
             [],
         )
         .unwrap();
-    assert_eq!(s.announce("0.5.0", true), Outcome::HandleTaken);
+    assert_eq!(s.announce("0.5.0", true), Outcome::NameTaken);
     assert_eq!(s.announced().as_deref(), Some("0.5.0"));
     assert_eq!(s.board_threads(), 0);
 }

@@ -446,23 +446,34 @@ async fn a_layout_7_database_gets_the_meta_table_and_this_versions_release_notes
     let seen = layout7(&path);
     let conn = db::open_migrating(&path).unwrap();
     // The table is there, and has announced nothing: this start is an upgrade.
-    let announced: i64 = conn
-        .query_row("SELECT count(*) FROM meta", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(announced, 0);
-    let version = env!("CARGO_PKG_VERSION");
-    let outcome =
-        relevo::release::announce(&conn, version, relevo::release::CHANGELOG, true, seen + 30)
-            .unwrap();
-    let relevo::release::Outcome::Posted(thread) = outcome else {
-        panic!("{outcome:?}");
+    let announced = |conn: &rusqlite::Connection| -> Option<String> {
+        conn.query_row("SELECT value FROM meta WHERE key = 'announced'", [], |r| {
+            r.get(0)
+        })
+        .ok()
     };
-    // Once: a restart posts nothing.
+    assert_eq!(announced(&conn), None);
+    use relevo::release::{CHANGELOG, Outcome, announce, release_section};
+    // This build posts its notes only if it is a release: its version's section dated, and first
+    // in the CHANGELOG. A build between releases posts and records nothing.
+    let version = env!("CARGO_PKG_VERSION");
+    let outcome = announce(&conn, version, CHANGELOG, true, seen + 30).unwrap();
+    if release_section(CHANGELOG, version).is_none() {
+        assert_eq!(outcome, Outcome::NotReleased);
+        assert_eq!(announced(&conn), None);
+    }
+    // The release posts them, once: a restart posts nothing.
+    let release = "# Changelog\n\n## 9.0.0 (14-nov-2026)\n\nThreads never close.\n";
+    let Outcome::Posted(thread) = announce(&conn, "9.0.0", release, true, seen + 30).unwrap()
+    else {
+        panic!("not posted");
+    };
     assert_eq!(
-        relevo::release::announce(&conn, version, relevo::release::CHANGELOG, true, seen + 40)
-            .unwrap(),
-        relevo::release::Outcome::Announced
+        announce(&conn, "9.0.0", release, true, seen + 40).unwrap(),
+        Outcome::Announced
     );
+    assert_eq!(announced(&conn).as_deref(), Some("9.0.0"));
+    let version = "9.0.0";
     // Everyone of the old database takes part, and nobody has it pending.
     let f = Fixture {
         app: App::new(conn, Clock::fixed(seen + 60), 5),
