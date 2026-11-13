@@ -570,8 +570,8 @@ fn only_serve_migrates_and_checking_writes_nothing() {
 }
 
 /// What `api::refresh` keeps on each participant row, and on each session's: none of it may
-/// change when layout 6 becomes 7, nor when a layout without a closed thread a participant is
-/// named in becomes 8. (`resolved`, unused since layout 8, is left out.)
+/// change when layout 6 becomes 7, nor, outside the threads that were closed, when it becomes 8.
+/// (`resolved`, unused since layout 8, is left out.)
 fn flags(path: &str) -> Vec<String> {
     let conn = rusqlite::Connection::open(path).unwrap();
     let mut out: Vec<String> = conn
@@ -607,7 +607,15 @@ async fn a_layout_6_database_migrates_its_team_questions_to_the_global_board() {
     let dir = TempDir::new();
     let path = dir.db();
     let seen = layout6(&path);
-    let before = flags(&path);
+    // Layout 8 marks what was closed as reached by everyone: those rows move, on purpose.
+    let open = |rows: Vec<String>| -> Vec<String> {
+        let closed = serde_json::from_str::<Value>(FIXTURE6).unwrap()["threads"]["resolved"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        rows.into_iter().filter(|r| !r.contains(&closed)).collect()
+    };
+    let before = open(flags(&path));
     let app = App::new(
         db::open_migrating(&path).unwrap(),
         Clock::fixed(seen + 60),
@@ -615,7 +623,7 @@ async fn a_layout_6_database_migrates_its_team_questions_to_the_global_board() {
     );
     assert_eq!(user_version(&path), 8);
     // Delivery, handled and claims stay as they were, and so does what is pending.
-    assert_eq!(flags(&path), before);
+    assert_eq!(open(flags(&path)), before);
     let f = Fixture {
         app,
         v: serde_json::from_str(FIXTURE6).unwrap(),
@@ -649,8 +657,8 @@ async fn a_layout_6_database_migrates_its_team_questions_to_the_global_board() {
     }
 
     // Bob's inbox, as before: what waited for him still does, and the question to everyone that
-    // reached him asks nothing of him. The one Ana closed is open now: her last note, which he
-    // never fetched, is new for him, and pending for nobody.
+    // reached him asks nothing of him. The one Ana closed is open now, and reached him whole: her
+    // last note, which he never fetched, does not come back.
     let v = bob.inbox().await;
     let mut pending: Vec<&str> = v["threads"]
         .as_array()
@@ -664,10 +672,7 @@ async fn a_layout_6_database_migrates_its_team_questions_to_the_global_board() {
     expected.sort();
     assert_eq!(pending, expected, "{v}");
     assert!(listed(&v, &f.thread("unread_team")).is_none(), "{v}");
-    let resolved = listed(&v, &f.thread("resolved")).unwrap();
-    assert_eq!(resolved["pending"], false);
-    assert_eq!(resolved["status"], "open");
-    assert_eq!(resolved["new_notes"].as_array().unwrap().len(), 1);
+    assert!(listed(&v, &f.thread("resolved")).is_none(), "{v}");
     assert!(listed(&v, &f.thread("done")).is_none(), "{v}");
     assert_eq!(v["teams"], json!([]));
     assert_eq!(v["team"][0]["teams"], json!([]));
@@ -723,6 +728,20 @@ async fn a_layout_7_database_migrates_and_its_closed_threads_open_with_nothing_p
             .unwrap()
     };
     let before = waiting(&path);
+    // Notes nobody fetched in what was closed: Bob, reached through the team and not named, never
+    // fetched Ana's last note there, nor Ana Bob's answer in her direct thread.
+    let unfetched = |path: &str| -> i64 {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM participants p JOIN threads t ON t.id = p.thread_id
+                 WHERE t.status = 'closed' AND coalesce(p.delivered_seq, 0) < p.last_other_seq",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert!(unfetched(&path) >= 2);
     let app = App::new(
         db::open_migrating(&path).unwrap(),
         Clock::fixed(seen + 60),
@@ -750,6 +769,27 @@ async fn a_layout_7_database_migrates_and_its_closed_threads_open_with_nothing_p
     let closed_direct = f.thread("closed_direct");
     let closed_team = f.thread("closed_team");
     let closed_board = f.thread("closed_board");
+
+    // Nothing of what was closed comes back as new: not to Bob's session, which never fetched the
+    // last note of the team thread that does not name him, nor to Ana's, nor to a new session.
+    for (who, agent) in [("bob", &bob), ("ana", &ana), ("carl", &carl)] {
+        let v = agent.inbox().await;
+        for name in ["closed_direct", "closed_team", "closed_board"] {
+            assert!(listed(&v, &f.thread(name)).is_none(), "{who} {name}: {v}");
+        }
+        let v = f.agent(who, "after-upgrade", "").inbox().await;
+        for name in ["closed_direct", "closed_team", "closed_board"] {
+            assert!(listed(&v, &f.thread(name)).is_none(), "{who} {name}: {v}");
+        }
+    }
+    // Bob's delivery says the note reached him, from no known session.
+    let bob_d = delivery_of(&ana.thread(&closed_team).await, "bob");
+    assert_eq!(
+        bob_d["note"],
+        ana.thread(&closed_team).await["notes"][1]["id"]
+    );
+    assert_eq!(bob_d["by"], Value::Null);
+    assert_eq!(bob_d["named"], false);
 
     // Each closed thread is open, and pending for nobody it names.
     for (name, who) in [

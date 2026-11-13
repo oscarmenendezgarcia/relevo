@@ -323,9 +323,12 @@ DROP INDEX IF EXISTS session_count;
 /// note, so nothing becomes pending. Where that covers a note by someone else they had not
 /// handled, or one layout 6 counted as handled without saying when (`MIGRATE_FROM_5`),
 /// `handled_at` is when the thread was closed (or, closed before `thread_closes` kept it, its
-/// latest note), from no known session. The flags `api::refresh` keeps need no change: a
-/// closed thread was pending for nobody, and a handled one is pending for nobody either. `has_new`
-/// stays as it was: a note that reached none of a person's sessions is still new for them.
+/// latest note), from no known session. Its latest note also reaches every participant, named or
+/// not, and every session of theirs, as if each had fetched it: a closed thread asked nothing
+/// more, so it must not come back to anyone's inbox as new (0.4.x left a closed `team` or
+/// `global` thread out of the inbox of whom it did not name, notes unfetched or not). Where that
+/// covers a note by someone else, `delivered_at` is likewise when it was closed, from no known
+/// session. So none of these threads is new, waiting, or in an inbox, for anyone.
 const OPEN_CLOSED: &str = "
 UPDATE participants SET
     handled_at = CASE WHEN c.covers THEN coalesce(c.closed_at, c.last_at) ELSE handled_at END,
@@ -344,6 +347,28 @@ FROM (SELECT q.thread_id, q.person_id,
       FROM participants q JOIN threads t ON t.id = q.thread_id
       WHERE t.status = 'closed' AND q.named_seq IS NOT NULL) AS c
 WHERE participants.thread_id = c.thread_id AND participants.person_id = c.person_id;
+UPDATE participants SET
+    delivered_at = CASE WHEN c.by_others THEN coalesce(c.closed_at, c.last_at)
+                        ELSE delivered_at END,
+    delivered_label = CASE WHEN c.by_others THEN NULL ELSE delivered_label END,
+    delivered_context = CASE WHEN c.by_others THEN NULL ELSE delivered_context END,
+    delivered_seq = c.last_seq,
+    has_new = 0, waiting = 0, inbox = 0, fresh = 0
+FROM (SELECT q.thread_id, q.person_id,
+             EXISTS (SELECT 1 FROM notes n
+                     WHERE n.thread_id = q.thread_id AND n.author_id != q.person_id
+                       AND n.seq > coalesce(q.delivered_seq, 0)) AS by_others,
+             (SELECT tc.closed_at FROM thread_closes tc WHERE tc.thread_id = q.thread_id)
+                 AS closed_at,
+             (SELECT max(n.created_at) FROM notes n WHERE n.thread_id = q.thread_id) AS last_at,
+             (SELECT max(n.seq) FROM notes n WHERE n.thread_id = q.thread_id) AS last_seq
+      FROM participants q JOIN threads t ON t.id = q.thread_id
+      WHERE t.status = 'closed') AS c
+WHERE participants.thread_id = c.thread_id AND participants.person_id = c.person_id;
+UPDATE session_threads AS s SET
+    delivered_seq = p.delivered_seq, has_new = 0, waiting = 0, person_inbox = 0
+FROM participants p JOIN threads t ON t.id = p.thread_id
+WHERE t.status = 'closed' AND p.thread_id = s.thread_id AND p.person_id = s.person_id;
 UPDATE participants SET resolved = 0 WHERE resolved != 0;
 UPDATE session_threads SET resolved = 0 WHERE resolved != 0;
 UPDATE threads SET status = 'open' WHERE status = 'closed';

@@ -396,13 +396,13 @@ fn delivered(out: &mut String, d: &Value, named: bool) {
             s(&d["delivered_at"]),
         );
     } else {
-        let _ = write!(
-            out,
-            "note {} seen by {} at {}",
-            s(&d["note"]),
-            session(&d["by"]),
-            since(s(&d["delivered_at"]))
-        );
+        let _ = write!(out, "note {} seen", s(&d["note"]));
+        // No session when the server could not say which one: a thread closed under 0.4.x was
+        // marked as reached by everyone in it when the server moved to 0.5.
+        if d["by"].is_object() {
+            let _ = write!(out, " by {}", session(&d["by"]));
+        }
+        let _ = write!(out, " at {}", since(s(&d["delivered_at"])));
         if handled {
             out.push_str("; handled");
             if d["handled_by"].is_object() {
@@ -930,6 +930,14 @@ mod tests {
         );
         // Answering a team question is optional: nothing is "not handled" there.
         assert!(!line(entry(1, None), "team").contains("not handled"));
+        // Reached and handled with no known session (a thread closed under 0.4.x).
+        let mut migrated = entry(0, Some(&Value::Null));
+        migrated["by"] = Value::Null;
+        assert_eq!(
+            line(migrated, "direct"),
+            "- @oscar: note n_1 seen at 10:46 UTC on 2026-11-08; handled at 19:30 UTC on \
+             2026-11-08"
+        );
     }
 
     #[test]
