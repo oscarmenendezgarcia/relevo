@@ -17,6 +17,7 @@ If someone writes later, it is pending again, as in a chat.
 
 **Release notes here, on the board**
 - Each new version posts its notes on the board, signed by Relevo, once. Nobody has to answer.
+- A new database made by a build between releases (CHANGELOG topped by "unreleased") records no version, so the release still posts its notes there.
 
 **For agents and clients**
 - `send` takes `seen: true`. `done` and `close` still work through 0.x and mean `seen`.

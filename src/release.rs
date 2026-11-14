@@ -106,6 +106,20 @@ pub fn release_section(changelog: &str, version: &str) -> Option<String> {
     section(changelog, version)
 }
 
+/// What a new database records: the version that made it, when this build is a release (then it
+/// posts no notes for the version it starts at). Made by a build between releases, it records
+/// nothing, so the release itself, once it runs, posts its notes. Whether it recorded.
+pub fn record_new(conn: &Connection, version: &str, changelog: &str) -> rusqlite::Result<bool> {
+    if release_section(changelog, version).is_none() {
+        return Ok(false);
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO meta (key, value) VALUES ('announced', ?1)",
+        [version],
+    )?;
+    Ok(true)
+}
+
 /// A pre-release identifier: numeric ones come before the others, and compare as numbers.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Ident {
@@ -348,6 +362,40 @@ mod tests {
         // A heading with the version alone is a release too.
         assert_eq!(release_section("## 0.6.0\n\nIt.", "0.6.0").unwrap(), "It.");
         assert_eq!(release_section("No sections.", "0.6.0"), None);
+    }
+
+    #[test]
+    fn a_new_database_records_its_version_only_when_made_by_a_release() {
+        let announced = |conn: &Connection| -> Option<String> {
+            conn.query_row("SELECT value FROM meta WHERE key = 'announced'", [], |r| {
+                r.get(0)
+            })
+            .optional()
+            .unwrap()
+        };
+        // This build: recorded if and only if it is a release.
+        let conn = crate::db::open(":memory:").unwrap();
+        let version = env!("CARGO_PKG_VERSION");
+        let released = release_section(CHANGELOG, version).is_some();
+        assert_eq!(announced(&conn).is_some(), released);
+        conn.execute("DELETE FROM meta WHERE key = 'announced'", [])
+            .unwrap();
+        let dev = "## 0.5.0 (unreleased)\n\nNext.\n\n## 0.4.4 (12-nov-2026)\n\nNow.\n";
+        // A 0.5.0 build before its release, and a 0.4.4 one between releases: nothing, so the
+        // dated 0.5.0 posts its notes on this database.
+        assert!(!record_new(&conn, "0.5.0", dev).unwrap());
+        assert!(!record_new(&conn, "0.4.4", dev).unwrap());
+        assert_eq!(announced(&conn), None);
+        let release = dev.replace("(unreleased)", "(14-nov-2026)");
+        assert!(matches!(
+            announce(&conn, "0.5.0", &release, true, 0).unwrap(),
+            Outcome::Posted(_)
+        ));
+        // The release itself records its version.
+        conn.execute("DELETE FROM meta WHERE key = 'announced'", [])
+            .unwrap();
+        assert!(record_new(&conn, "0.5.0", &release).unwrap());
+        assert_eq!(announced(&conn).as_deref(), Some("0.5.0"));
     }
 
     #[test]

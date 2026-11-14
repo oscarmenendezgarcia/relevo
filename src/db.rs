@@ -552,12 +552,10 @@ fn try_open(path: &str, migrate: bool) -> Result<Connection> {
     }
     tx.execute_batch(SCHEMA)?;
     make_system_person(&tx, now_unix())?;
-    // A new database has no release to announce: it starts at this version (see `release`).
+    // A new database made by a release has no release to announce: it starts at this version.
+    // One made by a build between releases records nothing (see `release::record_new`).
     if new {
-        tx.execute(
-            "INSERT OR IGNORE INTO meta (key, value) VALUES ('announced', ?1)",
-            [env!("CARGO_PKG_VERSION")],
-        )?;
+        crate::release::record_new(&tx, env!("CARGO_PKG_VERSION"), crate::release::CHANGELOG)?;
     }
     // How many closed threads layout 8 opens.
     let mut opened = 0;

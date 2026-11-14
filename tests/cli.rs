@@ -281,7 +281,8 @@ fn relevo_is_the_servers_own_name_and_in_no_list() {
         let conn = db::open(path).unwrap();
         db::invite(&conn, "ana", "Ana", None, "laptop", 0).unwrap();
         conn.execute(
-            "UPDATE meta SET value = '0.0.1' WHERE key = 'announced'",
+            "INSERT INTO meta (key, value) VALUES ('announced', '0.0.1')
+             ON CONFLICT (key) DO UPDATE SET value = '0.0.1'",
             [],
         )
         .unwrap();
@@ -330,7 +331,8 @@ fn serve_records_or_posts_the_release_notes_once_it_listens() {
             let conn = db::open(path).unwrap();
             db::invite(&conn, "ana", "Ana", None, "laptop", 0).unwrap();
             conn.execute(
-                "UPDATE meta SET value = '0.0.1' WHERE key = 'announced'",
+                "INSERT INTO meta (key, value) VALUES ('announced', '0.0.1')
+             ON CONFLICT (key) DO UPDATE SET value = '0.0.1'",
                 [],
             )
             .unwrap();
