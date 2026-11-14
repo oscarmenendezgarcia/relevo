@@ -214,7 +214,7 @@ Both routes need only the token: the session headers are not read at all (a malf
 
 ## HTTP
 
-Every route needs `Authorization: Bearer <token>`, and takes the optional `Relevo-Session`, `Relevo-Context` and `Relevo-Client` headers, and, through 0.x, `Relevo-Mentions: 1` (a client that knows a reply's mentions name people; see `send`). Bodies and responses are JSON. A malformed session id or context, or a `Relevo-Mentions` other than `1`, fails with `BAD_REQUEST` (checked after the token); a malformed `Relevo-Client` is ignored (see [Sessions](#sessions-and-routing)). So does an unknown, repeated or malformed `inbox` parameter.
+Every route needs `Authorization: Bearer <token>`, and takes the optional `Relevo-Session`, `Relevo-Context` and `Relevo-Client` headers, and, through 0.x, `Relevo-Mentions: 1` (a client that knows a reply's mentions name people; see `send`). Bodies and responses are JSON. A malformed session id or context, or a `Relevo-Mentions` other than `1`, fails with `BAD_REQUEST` (checked after the token). So does an unknown, repeated or malformed `inbox` parameter. A malformed `Relevo-Client` is ignored, never an error (see [Sessions](#sessions-and-routing)).
 
 ```
 GET  /api/inbox?all=1&wait=30
@@ -258,7 +258,7 @@ relevo token add <handle> --label "Codex desktop"                               
 relevo token list [<handle>]
 relevo token revoke <token-id>
 relevo people
-relevo sessions [<handle>]                                                                 # sessions seen in the last 7 days: handle, label, session id (or default), context (or general), last seen, client (name/version, or unknown)
+relevo sessions [<handle>]                                                                 # sessions of active people seen in the last 7 days: handle, label, session id (or default), context (or general), last seen, client (name/version, `?` after a version inferred from an old client's User-Agent, or unknown)
 relevo clients [<handle>] [--outdated]                                                     # the client and version of each session seen in the last 7 days (below)
 relevo about <handle> "new line"
 relevo deactivate <handle>                                                                 # also revokes every token of theirs

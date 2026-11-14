@@ -92,7 +92,7 @@ enum Command {
     /// older than this server (outdated first), with a summary line.
     Clients {
         handle: Option<String>,
-        /// Only the sessions that are outdated or say no version.
+        /// Only the sessions that are outdated or unknown (no version, or one that cannot be read).
         #[arg(long)]
         outdated: bool,
     },
