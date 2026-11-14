@@ -643,6 +643,56 @@ async fn channel_pushes_notes_from_others() {
     assert!(ana.close().await.success());
 }
 
+/// Release notes alone push nothing: they need no answer, so they start no turn. `inbox` lists
+/// them once, as received and not pushed; a reply in their thread is pushed as any note.
+#[tokio::test(flavor = "multi_thread")]
+async fn channel_pushes_no_release_notes_and_inbox_lists_them() {
+    let s = server(&["ana", "bob"]).await;
+    let mut ana = Mcp::start(&s, "ana", &s.dir, None, &["--channel"]).await;
+    let mut bob = Mcp::start(&s, "bob", &s.dir, None, &[]).await;
+    ana.ok("inbox", json!({})).await;
+    let relevo::release::Outcome::Posted(board) = relevo::release::announce(
+        &s.app.db(),
+        "99.0.0",
+        "## 99.0.0 (1-jan-2026)\n\nNews for everyone.\n",
+        true,
+        db::now_unix(),
+    )
+    .unwrap() else {
+        panic!("the release notes are posted");
+    };
+    // The waiting request answers with the release notes and Bob's note: only Bob's is pushed.
+    let sent = bob.ok("send", json!({ "text": "@ana Deploy at 5?" })).await;
+    let event = ana.notification("notifications/claude/channel").await;
+    assert_eq!(event["params"]["meta"]["thread"], thread_id(&sent));
+
+    let inbox = ana.ok("inbox", json!({})).await;
+    assert!(
+        inbox.contains("Received by this session earlier"),
+        "{inbox}"
+    );
+    assert!(!inbox.contains("Pushed to this session"), "{inbox}");
+    assert!(inbox.contains("News for everyone."), "{inbox}");
+    assert!(inbox.contains(relevo::render::RELEASE_NOTES), "{inbox}");
+    assert!(!inbox.contains("answering is optional"), "{inbox}");
+    // Once.
+    let inbox = ana.ok("inbox", json!({})).await;
+    assert!(!inbox.contains("News for everyone."), "{inbox}");
+
+    // Bob answers the release notes: that is pushed, as any note on the board.
+    bob.ok("send", json!({ "thread": board, "text": "Nice, thanks." }))
+        .await;
+    let event = ana.notification("notifications/claude/channel").await;
+    assert_eq!(event["params"]["meta"]["thread"], board.as_str());
+    let content = event["params"]["content"].as_str().unwrap();
+    assert!(content.contains("Nice, thanks."), "{content}");
+    assert!(
+        content.contains("If your own work or your person's files answer it"),
+        "{content}"
+    );
+    assert!(ana.close().await.success());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn send_reads_whom_from_the_text_and_names_its_fields() {
     let s = server(&["ana", "bob", "carl"]).await;

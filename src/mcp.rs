@@ -85,7 +85,8 @@ first, claim it with send(thread=\"<thread id>\", claim=true) and no text before
 if it needs nothing, mark it seen with send(thread=\"<thread id>\", seen=true) and no text; if \
 not, stay silent and leave it: it stays pending for your person. \
 Events may not reach you, so still look at your inbox when you start a task and before you \
-finish one: `inbox` also lists what was pushed since you last looked.";
+finish one: `inbox` also lists what was pushed since you last looked, and the release notes \
+Relevo posts, which are never pushed: they need no answer.";
 
 /// How long ending the session may hold up the exit once stdin closes.
 const END_TIMEOUT: Duration = Duration::from_secs(2);
@@ -280,6 +281,12 @@ fn merge_pushed(v: &mut Value, pushed: Vec<Value>) -> Vec<Value> {
             continue;
         };
         let new = t["new_notes"].as_array().cloned().unwrap_or_default();
+        // Release notes were received, not pushed (`quiet`).
+        let mark = if p["quiet"] == true {
+            "received"
+        } else {
+            "pushed"
+        };
         let mut notes: Vec<Value> = p["new_notes"]
             .as_array()
             .into_iter()
@@ -287,7 +294,7 @@ fn merge_pushed(v: &mut Value, pushed: Vec<Value>) -> Vec<Value> {
             .filter(|n| !new.iter().any(|m| m["id"] == n["id"]))
             .map(|n| {
                 let mut n = n.clone();
-                n["pushed"] = true.into();
+                n[mark] = true.into();
                 n
             })
             .collect();
@@ -666,8 +673,12 @@ fn stop_signal() -> std::io::Result<impl Future<Output = ()>> {
     })
 }
 
-/// The channel event for a thread with notes by others that are new for this session.
+/// The channel event for a thread with notes by others that are new for this session; none for
+/// release notes alone (`render::release_only`), which need no answer and start no turn.
 pub fn channel_event(thread: &Value, me: Option<&str>) -> Option<Value> {
+    if render::release_only(thread) {
+        return None;
+    }
     let new = thread["new_notes"].as_array()?;
     let from = new
         .iter()
@@ -762,6 +773,16 @@ async fn push_news(
         let me = client.known_you();
         let mut events = 0;
         for t in v["threads"].as_array().into_iter().flatten() {
+            if render::release_only(t) {
+                // Release notes alone: no event, so no turn. Kept for `inbox` (delivered now, it
+                // would not list them as new), and shown, so they are not handed over again.
+                let mut quiet = t.clone();
+                quiet["quiet"] = true.into();
+                remember(&pushed, &quiet);
+                show(&shown, t);
+                events += 1;
+                continue;
+            }
             let (thread, event) = match channel_event(t, me.as_deref()) {
                 Some(event) => (t.clone(), event),
                 None => match handover(&shown, t, me.as_deref()) {
@@ -932,6 +953,34 @@ mod tests {
         assert!(!content.contains("If your own work"), "{content}");
     }
 
+    /// Release notes alone push nothing: they need no answer, so they start no turn. With a
+    /// reply by someone, the thread is pushed as any other.
+    #[test]
+    fn release_notes_alone_push_no_event() {
+        let release = json!({ "id": "n_1", "author": "relevo", "via": "release notes",
+                              "created_at": "t", "text": "Relevo 0.5.0\n\nNews.",
+                              "truncated": false, "system": true });
+        let mut t = json!({
+            "id": "r_1", "kind": "global", "title": "Relevo 0.5.0", "from": "relevo",
+            "participants": ["ana", "oscar"], "status": "open", "pending": false,
+            "named": false, "teams": [], "context": null, "claimed": null,
+            "new_notes": [release]
+        });
+        assert!(channel_event(&t, Some("oscar")).is_none());
+        assert!(channel_event(&t, None).is_none());
+        t["new_notes"] = json!([release, { "id": "n_2", "author": "ana", "via": "x",
+                                           "created_at": "t", "text": "Nice.", "truncated": false }]);
+        let content = channel_event(&t, Some("oscar")).unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            content.contains("If your own work or your person's files answer it"),
+            "{content}"
+        );
+        assert!(content.contains(render::RELEASE_NOTES), "{content}");
+    }
+
     #[test]
     fn channel_events_offer_seen_and_pending_only_while_pending() {
         let t = json!({
@@ -1084,6 +1133,19 @@ mod tests {
         }
         forget(&pushed, "r_1");
         assert_eq!(lock(&pushed).len(), 1);
+        // Kept without a push (`quiet`): its notes are marked received, not pushed.
+        let mut quiet = t(vec![note("n_3")]);
+        quiet["quiet"] = true.into();
+        remember(&pushed, &quiet);
+        let mut v = json!({ "threads": [t(vec![note("n_4")])] });
+        assert!(merge_pushed(&mut v, std::mem::take(&mut *lock(&pushed)))[0]["id"] == "r_2");
+        let notes = &v["threads"][0]["new_notes"];
+        assert_eq!(
+            (notes[0]["received"].clone(), notes[0].get("pushed")),
+            (json!(true), None)
+        );
+        assert!(notes[1].get("received").is_none());
+        remember(&pushed, &json!({ "id": "r_2", "new_notes": [note("n_9")] }));
         for i in 0..MAX_PUSHED + 5 {
             remember(&pushed, &json!({ "id": format!("r_{i}"), "new_notes": [] }));
         }

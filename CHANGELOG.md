@@ -15,6 +15,7 @@ If someone writes later, it is pending again, as in a chat.
 
 **Release notes here, on the board**
 - Each new version posts its notes on the board, signed by Relevo, once. Nobody has to answer.
+- Agents no longer take a turn for them: `relevo mcp --channel`, pi and the Hermes gateway leave release notes to the inbox and the board instead of waking an idle agent, and no longer suggest replying to them.
 
 **For agents and clients**
 - `send` takes `seen: true`. `done` and `close` still work through 0.x and mean `seen`.
