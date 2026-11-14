@@ -9,6 +9,7 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use relevo::release::{self, Outcome};
 use relevo::{App, Clock, api, db};
+use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -37,7 +38,11 @@ fn server(handles: &[&str], announced: Option<&str>) -> Server {
     }
     match announced {
         Some(v) => conn
-            .execute("UPDATE meta SET value = ?1 WHERE key = 'announced'", [v])
+            .execute(
+                "INSERT INTO meta (key, value) VALUES ('announced', ?1)
+                 ON CONFLICT (key) DO UPDATE SET value = ?1",
+                [v],
+            )
             .unwrap(),
         None => conn
             .execute("DELETE FROM meta WHERE key = 'announced'", [])
@@ -220,25 +225,50 @@ async fn an_upgrade_posts_the_versions_notes_once_on_the_board() {
 }
 
 #[tokio::test]
+async fn the_release_note_counts_against_no_threads_hourly_guard() {
+    let s = server(&["ana"], Some("0.4.4"));
+    let Outcome::Posted(thread) = s.announce("0.5.0", true) else {
+        panic!("not posted");
+    };
+    // Twenty replies in the hour go in: the release note is not one of the twenty.
+    let send = |i| {
+        s.call(
+            "ana",
+            "POST",
+            "/api/send",
+            Some(json!({ "thread": thread, "text": format!("Reply {i}") })),
+        )
+    };
+    for i in 0..20 {
+        let (status, v) = send(i).await;
+        assert_eq!(status, StatusCode::OK, "{i}: {v}");
+    }
+    let (status, v) = send(20).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{v}");
+    assert_eq!(v["error"]["code"], "THREAD_BUSY", "{v}");
+}
+
+#[tokio::test]
 async fn a_new_database_a_downgrade_or_the_same_version_posts_nothing() {
-    // A database made by this version starts at it.
+    // A database made by this version starts at it when this build is a release; made between
+    // releases, it records nothing and posts nothing, so the release still posts.
     let conn = db::open(":memory:").unwrap();
-    let recorded: String = conn
+    let recorded: Option<String> = conn
         .query_row("SELECT value FROM meta WHERE key = 'announced'", [], |r| {
             r.get(0)
         })
+        .optional()
         .unwrap();
-    assert_eq!(recorded, env!("CARGO_PKG_VERSION"));
+    let version = env!("CARGO_PKG_VERSION");
+    let released = release::release_section(release::CHANGELOG, version).is_some();
+    assert_eq!(recorded.as_deref(), released.then_some(version));
     assert_eq!(
-        release::announce(
-            &conn,
-            env!("CARGO_PKG_VERSION"),
-            release::CHANGELOG,
-            true,
-            T0
-        )
-        .unwrap(),
-        Outcome::Announced
+        release::announce(&conn, version, release::CHANGELOG, true, T0).unwrap(),
+        if released {
+            Outcome::Announced
+        } else {
+            Outcome::NotReleased
+        }
     );
     let s = server(&["ana"], Some("0.6.0"));
     assert_eq!(s.announce("0.5.0", true), Outcome::Announced);
@@ -270,6 +300,9 @@ async fn a_build_that_is_not_a_release_posts_and_records_nothing() {
     assert_eq!(s.announce_with("0.6.0", dev, true), Outcome::NotReleased);
     // No section at all.
     assert_eq!(s.announce_with("0.5.1", dev, true), Outcome::NotReleased);
+    // With the notes off too: recording 0.6.0 now would keep its release from posting.
+    assert_eq!(s.announce_with("0.6.0", dev, false), Outcome::NotReleased);
+    assert_eq!(s.announce_with("0.5.0", dev, false), Outcome::NotReleased);
     assert_eq!(s.announced().as_deref(), Some("0.4.4"));
     assert_eq!(s.board_threads(), 0);
     // The release itself posts.
@@ -303,7 +336,8 @@ fn several_processes_starting_at_once_post_once() {
         let conn = db::open(&path).unwrap();
         db::invite(&conn, "ana", "Ana", None, "laptop", T0).unwrap();
         conn.execute(
-            "UPDATE meta SET value = '0.4.4' WHERE key = 'announced'",
+            "INSERT INTO meta (key, value) VALUES ('announced', '0.4.4')
+             ON CONFLICT (key) DO UPDATE SET value = '0.4.4'",
             [],
         )
         .unwrap();

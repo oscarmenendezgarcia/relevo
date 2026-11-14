@@ -165,6 +165,7 @@ struct ThreadOut {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SendRequest {
+    /// Deprecated (through 0.x): opens a thread as 0.3 did, for clients not yet updated.
     to: Option<Vec<String>>,
     thread: Option<String>,
     text: Option<String>,
@@ -1138,7 +1139,8 @@ fn write(
             people_only: true,
         },
         // A reply from a client before 0.4 (no `Relevo-Mentions: 1`), which cannot know that an
-        // `@` now names people, is written as 0.3 wrote it: its mentions are not read.
+        // `@` now names people, is written as 0.3 wrote it: its mentions are not read. Through
+        // 0.x (docs/protocol.md, `send`).
         (None, Some(_)) if req.thread.is_some() && !caller.reads_mentions => Whom {
             mentions: Vec::new(),
             people_only: false,
@@ -1208,8 +1210,12 @@ fn write_as(
             let row = find_thread(tx, session, id)?;
             let names = reply_names(tx, &whom.mentions, now)?;
             if req.text.is_some() {
+                // The server's own notes (release notes) count against no limit.
                 let recent: i64 = tx.query_row(
-                    "SELECT count(*) FROM notes WHERE thread_id = ?1 AND created_at > ?2",
+                    &format!(
+                        "SELECT count(*) FROM notes WHERE thread_id = ?1 AND created_at > ?2
+                         AND author_id IS NOT {SYSTEM_PERSON_SQL}"
+                    ),
                     params![row.id, now - 3600],
                     |r| r.get(0),
                 )?;

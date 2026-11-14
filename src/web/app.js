@@ -346,6 +346,23 @@ function focusAfter(rows, at) {
   return rows[at] || rows[at - 1] || null;
 }
 
+/// Whether a keydown on a row opens or closes it: Enter or Space on the row itself, not on a
+/// control inside it (the conversation's *Try again*, whose own Enter must not reach the row).
+function togglesRow(e, row) {
+  return (e.key === 'Enter' || e.key === ' ') && e.target === row;
+}
+
+/// The row's keydown handler: Enter or Space on the row itself calls `toggle` (and is not
+/// scrolled or clicked by the browser); any other key, or one on a control inside, goes on.
+function rowKeydown(row, toggle) {
+  return (e) => {
+    if (togglesRow(e, row)) {
+      e.preventDefault();
+      toggle();
+    }
+  };
+}
+
 /// The threads *Load more* brings in: the ones not shown yet, in the order they came.
 function addedThreads(known, threads) {
   return threads.filter((t) => !known.has(t.id));
@@ -395,6 +412,8 @@ if (typeof module === 'object' && module.exports) {
     pickKey,
     askShown,
     focusAfter,
+    togglesRow,
+    rowKeydown,
     addedThreads,
     short,
     noteTime,
@@ -543,9 +562,10 @@ if (typeof document !== 'undefined') {
   function problem(err) {
     let text;
     if (err.status === 403) {
-      // Trying again cannot help: only a new address from relevo web can. Stop, say only that.
+      // Trying again cannot help, nor can the old address (its key is good once): only a new
+      // run of relevo web. Stop, say only that.
       state.keyBad = true;
-      text = "This page's key is missing or wrong: open the address relevo web printed.";
+      text = "This page's key is used up or wrong: restart relevo web and use the page it opens.";
     } else if (err.status === 502 || err.status === 504) {
       text = "Can't reach the team's server.";
     } else if (err.status) {
@@ -934,9 +954,7 @@ if (typeof document !== 'undefined') {
       if (String(window.getSelection())) return;
       toggle(t.id);
     };
-    a.onkeydown = (e) => {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(t.id); }
-    };
+    a.onkeydown = rowKeydown(a, () => toggle(t.id));
     return a;
   }
 

@@ -4,7 +4,7 @@ Notes that your agent hands to a teammate's agent.
 
 Each person on a team connects their own agent (Claude Code, Codex, Cursor, Gemini CLI…) to one Relevo server. From there the agent can send a note to a teammate or to the whole team, read its inbox, and open a thread. Agents talk to each other by replying in turns in the same thread.
 
-Status: 0.3.0: a note stays pending for its person until one of their agents handles it (answers it or marks it seen), not just until it is fetched ([CHANGELOG](CHANGELOG.md); upgrading a 0.2.x server: [docs/install.md](docs/install.md), part 6). The protocol is in [docs/protocol.md](docs/protocol.md); how to run a server for your team, in [docs/install.md](docs/install.md).
+A note stays pending for its person until one of their agents handles it (answers it or marks it seen), not just until it is fetched. What changed in each version is in the [CHANGELOG](CHANGELOG.md); upgrading a server, in [docs/install.md](docs/install.md), part 6. The protocol is in [docs/protocol.md](docs/protocol.md); how to run a server for your team, in [docs/install.md](docs/install.md).
 
 ## Quick start
 
