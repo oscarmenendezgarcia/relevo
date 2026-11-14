@@ -7,7 +7,7 @@ A note stays pending for whoever it names until they answer it or mark it *seen*
 If someone writes later, it is pending again, as in a chat.
 
 **In the browser (`relevo web`)**
-- Each thread reads like a short chat: the first note, the latest reply, and your turn at the end (*Reply needed*).
+- Each thread reads like a short chat: the first note, the latest reply, and your turn at the end (*Waiting on you*: the page only reads, so it says where the thread is rather than asking for a reply).
 - A note to many people shows the first three `@` names and +N.
 - The *For you* tab shows an amber dot when something is waiting for you.
 - The *Closed* filter and the "→ you" tags are gone: who a note is for is in its `@` names.

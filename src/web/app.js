@@ -468,7 +468,7 @@ if (typeof document !== 'undefined') {
     convoLoading: new Set(),
     convoFailed: new Set(),
     opening: null,
-    // Threads whose Reply needed pill has already grown in, so a refresh doesn't replay it.
+    // Threads whose Waiting on you pill has already grown in, so a refresh doesn't replay it.
     reached: new Set(),
     growing: 0,
     lastOk: null,
@@ -901,7 +901,7 @@ if (typeof document !== 'undefined') {
     textEl.id = base + '-text';
     const names = [who.firstChild.id, textEl.id];
     if (t.pending) {
-      const sr = el('span', 'sr', ' Reply needed' + (t.kind === 'global' ? ', mentioned you' : '') + '.');
+      const sr = el('span', 'sr', ' Waiting on you' + (t.kind === 'global' ? ', mentioned you' : '') + '.');
       sr.id = base + '-status';
       msgBody.append(sr);
       names.push(sr.id);
@@ -928,7 +928,7 @@ if (typeof document !== 'undefined') {
       ghost.classList.add('ghost');
       seat.append(ghost);
       const body = el('div', 'msg-body');
-      body.append(el('b', '', 'You'), el('span', 'status', 'Reply needed'));
+      body.append(el('b', '', 'You'), el('span', 'status', 'Waiting on you'));
       if (t.kind === 'global') body.append(el('span', 'label', 'mentioned you'));
       const turn = el('div', 'msg turn');
       turn.setAttribute('aria-hidden', 'true'); // said once, in the opener
