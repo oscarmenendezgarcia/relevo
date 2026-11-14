@@ -4,7 +4,7 @@
 'use strict';
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { parseNote, parseInline, toDom, preview, rowText, pickKey, askShown, focusAfter, addedThreads, short, noteTime, ago, absolute } = require(
+const { parseNote, parseInline, toDom, preview, rowText, leadingMentions, pickKey, askShown, focusAfter, addedThreads, short, noteTime, ago, absolute } = require(
   path.join(__dirname, '..', '..', 'src', 'web', 'app.js')
 );
 
@@ -166,6 +166,9 @@ check('a row: the note from its first line, once, closed up or open', () => {
   assert.equal(rowText(many, false, true), many);
   assert.equal(rowText('@ana @luis @pedro hi', false, false), '@ana @luis @pedro hi');
   assert.equal(rowText('@a1 @b2 @c3 @d4', false, false), '@a1 @b2 @c3 +1');
+  // What the row's '+N' stands for: the run as written, and what follows it.
+  assert.deepEqual(leadingMentions(many).run, ['@ana', '@luis', '@pedro/api', '@sam', '@raquel']);
+  assert.equal(leadingMentions(many).rest, 'can you all check the 422?');
   // A mention later in the text is left alone.
   assert.equal(rowText('hi @ana @luis @pedro @sam', false, false), 'hi @ana @luis @pedro @sam');
 });
@@ -242,7 +245,7 @@ check('a row\'s preview is one paragraph, only allowed elements', () => {
   const text = 'Here is the **snippet** <img src=x>\nnext line:\n```js\nconst x = 1;\nmore\n```\nInline `<b>`';
   assert.equal(
     show(toDom(preview(text), doc)),
-    '<p>Here is the <strong>snippet</strong> &lt;img src=x> next line: <code>const x = 1;…</code> Inline <code>&lt;b></code></p>'
+    '<p>Here is the <strong>snippet</strong> &lt;img src=x> next line: <code>const x = 1;</code> Inline <code>&lt;b></code></p>'
   );
   assert.ok(doc.created.every((t) => ALLOWED.has(t)));
   assert.deepEqual(preview(''), []);
