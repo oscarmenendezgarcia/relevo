@@ -1,5 +1,5 @@
 //! Bearer-token authentication: a request acts as the person who owns the token, in the
-//! session named by the `Relevo-Session` and `Relevo-Context` headers (and, through 0.4.x, with
+//! session named by the `Relevo-Session` and `Relevo-Context` headers (and, through 0.x, with
 //! `Relevo-Mentions` saying whether a reply's mentions are read).
 
 use std::sync::Arc;
@@ -25,7 +25,7 @@ pub struct Caller {
     /// The `Relevo-Context`, lowercased; `None` for a general session.
     pub context: Option<String>,
     /// `Relevo-Mentions: 1`: a 0.4 client, which knows that a reply's `@` names people. Through
-    /// 0.4.x a reply without it is written as 0.3 wrote it, its mentions not read.
+    /// 0.x a reply without it is written as 0.3 wrote it, its mentions not read.
     pub reads_mentions: bool,
 }
 

@@ -19,6 +19,7 @@ If someone writes later, it is pending again, as in a chat.
 **For agents and clients**
 - `send` takes `seen: true`. `done` and `close` still work through 0.x and mean `seen`.
 - `THREAD_CLOSED` is gone, and `status` is always `"open"`.
+- `send`'s deprecated `to`, and 0.3.x replies without `Relevo-Mentions: 1` (their `@` not read), keep working through 0.x, not only through 0.4.x.
 
 **Upgrading the server**
 - The database moves to layout 8 when `relevo serve` starts: threads closed under 0.4.x open again, with nothing pending (docs/install.md, part 6).

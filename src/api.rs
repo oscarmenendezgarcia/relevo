@@ -165,6 +165,7 @@ struct ThreadOut {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SendRequest {
+    /// Deprecated (through 0.x): opens a thread as 0.3 did, for clients not yet updated.
     to: Option<Vec<String>>,
     thread: Option<String>,
     text: Option<String>,
@@ -1138,7 +1139,8 @@ fn write(
             people_only: true,
         },
         // A reply from a client before 0.4 (no `Relevo-Mentions: 1`), which cannot know that an
-        // `@` now names people, is written as 0.3 wrote it: its mentions are not read.
+        // `@` now names people, is written as 0.3 wrote it: its mentions are not read. Through
+        // 0.x (docs/protocol.md, `send`).
         (None, Some(_)) if req.thread.is_some() && !caller.reads_mentions => Whom {
             mentions: Vec::new(),
             people_only: false,
