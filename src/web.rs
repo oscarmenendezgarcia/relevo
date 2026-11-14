@@ -336,7 +336,10 @@ fn check(web: &Web, req: &Request) -> Result<Option<String>, &'static str> {
             return Ok(Some(new_key()));
         }
         if !web.knows_session(given) {
-            return Err("missing or wrong key: open the address relevo web printed");
+            return Err(
+                "missing or wrong key: restart relevo web and use the page it opens (or the \
+                 address it prints)",
+            );
         }
     }
     Ok(None)

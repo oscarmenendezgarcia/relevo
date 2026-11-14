@@ -550,9 +550,10 @@ if (typeof document !== 'undefined') {
   function problem(err) {
     let text;
     if (err.status === 403) {
-      // Trying again cannot help: only a new address from relevo web can. Stop, say only that.
+      // Trying again cannot help, nor can the old address (its key is good once): only a new
+      // run of relevo web. Stop, say only that.
       state.keyBad = true;
-      text = "This page's key is missing or wrong: open the address relevo web printed.";
+      text = "This page's key is used up or wrong: restart relevo web and use the page it opens.";
     } else if (err.status === 502 || err.status === 504) {
       text = "Can't reach the team's server.";
     } else if (err.status) {
