@@ -300,6 +300,9 @@ async fn a_build_that_is_not_a_release_posts_and_records_nothing() {
     assert_eq!(s.announce_with("0.6.0", dev, true), Outcome::NotReleased);
     // No section at all.
     assert_eq!(s.announce_with("0.5.1", dev, true), Outcome::NotReleased);
+    // With the notes off too: recording 0.6.0 now would keep its release from posting.
+    assert_eq!(s.announce_with("0.6.0", dev, false), Outcome::NotReleased);
+    assert_eq!(s.announce_with("0.5.0", dev, false), Outcome::NotReleased);
     assert_eq!(s.announced().as_deref(), Some("0.4.4"));
     assert_eq!(s.board_threads(), 0);
     // The release itself posts.

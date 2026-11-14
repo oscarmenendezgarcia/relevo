@@ -312,7 +312,8 @@ fn relevo_is_the_servers_own_name_and_in_no_list() {
 }
 
 /// `relevo serve` with the release notes off, by the switch or by RELEVO_RELEASE_NOTES, records
-/// its version without posting; on, it posts only if this build is a release.
+/// its version without posting; on, it posts. Either way only if this build is a release: one
+/// between releases records nothing.
 #[test]
 fn serve_records_or_posts_the_release_notes_once_it_listens() {
     let version = env!("CARGO_PKG_VERSION");
@@ -376,15 +377,15 @@ fn serve_records_or_posts_the_release_notes_once_it_listens() {
             .query_row("SELECT count(*) FROM threads", [], |r| r.get(0))
             .unwrap();
         let case = format!("flag {flag}, env {env:?}");
-        if !flag && env.is_none() && !released {
-            // Not a release: nothing recorded, nothing posted.
+        if !released {
+            // Not a release: nothing recorded, nothing posted, the notes on or off.
             assert_eq!(announced, "0.0.1", "{case}");
             assert!(said.contains("not a release"), "{case}: {said}");
         } else {
             assert_eq!(announced, version, "{case}");
         }
         assert_eq!(board, i64::from(posts), "{case}");
-        if !posts && (flag || env.is_some()) {
+        if released && (flag || env.is_some()) {
             assert!(said.contains("release notes are off"), "{case}: {said}");
         }
         std::fs::remove_dir_all(&dir).unwrap();

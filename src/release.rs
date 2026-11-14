@@ -23,9 +23,9 @@ pub enum Outcome {
     Announced,
     /// This build is not a release: the CHANGELOG's first section is another version's, or is
     /// marked "(unreleased)", or there is none (a build between releases). Nothing posted, and
-    /// nothing recorded, so the release itself still posts its notes.
+    /// nothing recorded (the notes on or off), so the release itself still posts its notes.
     NotReleased,
-    /// Turned off (`--no-release-notes`): recorded, not posted.
+    /// Turned off (`--no-release-notes`), on a release: recorded, not posted.
     Off,
     /// A person or a team had the name `relevo` before 0.5.0 reserved it, so the server has no
     /// person of its own: recorded, not posted.
@@ -232,13 +232,15 @@ pub fn announce(
         Some(last) if !newer(version, last) => return Ok(Outcome::Announced),
         _ => {}
     }
+    // A build between releases records nothing, the notes on or off: its version's release,
+    // once it runs, still posts.
+    let Some(section) = release_section(changelog, version) else {
+        return Ok(Outcome::NotReleased);
+    };
     let outcome = if !post {
         // Off: recorded, so turning them on later posts no older version's notes.
         Outcome::Off
     } else {
-        let Some(section) = release_section(changelog, version) else {
-            return Ok(Outcome::NotReleased);
-        };
         match system_person(&tx)? {
             None => Outcome::NameTaken,
             Some((person, token)) => {
