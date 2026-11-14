@@ -1177,6 +1177,17 @@ def mentions(text: str) -> list:
     return out
 
 
+def _ends_mention(text: str, mask: list, at: int) -> bool:
+    """Whether a mention of a name that ends at `at` ends there, as the server reads it: what follows in
+    its run (letters, digits, `_`, `-`, `.`, `@`, `/`) is nothing, a context (`/…`) or only the
+    punctuation that ends a mention (`@dev.` is a mention of `dev`; `@devon` and `@dev-x` are not)."""
+    end = at
+    while end < len(text) and not mask[end] and _is_attempt_char(text[end]):
+        end += 1
+    rest = text[at:end]
+    return not rest or rest[0] == "/" or all(c in ".-/" for c in rest)
+
+
 def as_plain_text(text: str, names: set) -> tuple[str, int]:
     """`text` with the `@` of each mention of `names` (lowercased) left out,
     so it is plain text and sends the note to nobody. Returns the text and how many it changed.
@@ -1184,23 +1195,26 @@ def as_plain_text(text: str, names: set) -> tuple[str, int]:
     Only the `@` goes: no backtick is added (one next to a backtick run would merge with it and change
     which text is code), and what follows it is a letter, so nothing around it can become a mention.
 
-    Should no mention match (a letter Python's Unicode tables read otherwise than the server's), each
-    `@` outside code that may start a mention and is followed by one of `names` goes instead: the
-    server named those, and the reply must not be lost for them."""
-    out, last, changed = [], 0, 0
-    for start, _, name in mentions(text):
-        if name in names:
-            out.append(text[last:start])
-            last, changed = start + 1, changed + 1
-    if not changed and names:
+    A name the server gave that no mention here reads as such (Python's Unicode tables count fewer
+    letters than the server's: `@रवि` reads as `@रव` here) goes all the same where the text, outside
+    code, has `@` and that name, ending as a mention ends: the server named it, and the reply must not
+    be lost for it. Never a longer name that starts with it (`@devon` for `dev`)."""
+    found = mentions(text)
+    spots = [start for start, _, name in found if name in names]
+    missed = names - {name for _, _, name in found}
+    if missed:
         mask = _code_mask(text)
         for i, c in enumerate(text):
-            if (c == "@" and not mask[i] and (i == 0 or _may_precede(text[i - 1]))
-                    and any(text[i + 1:i + 1 + len(n)].lower() == n for n in names)):
-                out.append(text[last:i])
-                last, changed = i + 1, changed + 1
+            if (c == "@" and not mask[i] and (i == 0 or _may_precede(text[i - 1])) and i not in spots
+                    and any(text[i + 1:i + 1 + len(n)].lower() == n and _ends_mention(text, mask, i + 1 + len(n))
+                            for n in missed)):
+                spots.append(i)
+    out, last = [], 0
+    for start in sorted(spots):
+        out.append(text[last:start])
+        last = start + 1
     out.append(text[last:])
-    return "".join(out), changed
+    return "".join(out), len(spots)
 
 
 _MAX_MENTIONS = 20

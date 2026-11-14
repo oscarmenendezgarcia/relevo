@@ -554,6 +554,8 @@ class Outbound(Base):
             # Attempts at a name that are none: the server names each whole run, and each goes as plain text.
             ("Ask @josé, @angular.io, @a, @user@mastodon.social or @ana.b; @" + "x" * 33 + ".",
              "Ask josé, angular.io, a, user@mastodon.social or ana.b; " + "x" * 33 + "."),
+            # A letter the server counts and Python does not (U+093F): what the server named still goes.
+            ("Thanks @रवि.", "Thanks रवि."),
             # More than 20, then the 20 it does not know.
             ("Ask " + " ".join(f"@p{i:02}" for i in range(21)),
              "Ask " + " ".join(f"@p{i:02}" for i in range(20)) + " p20",
@@ -646,9 +648,17 @@ class Outbound(Base):
         text = "Ask @josé or @angular.io, not `@josé`; cc @a."
         self.assertEqual(client.as_plain_text(text, {"josé", "angular.io", "a"}),
                          ("Ask josé or angular.io, not `@josé`; cc a.", 3))
-        # Should Python's Unicode tables read a letter otherwise than the server's, the names the server
-        # gave still go, outside code.
-        self.assertEqual(client.as_plain_text("Ask @x, `@zzz` and @zzzé", {"zzz"}), ("Ask @x, `@zzz` and zzzé", 1))
+        # A name the server gave that starts a longer one is not that one: `@zzzé` is no mention of zzz.
+        self.assertEqual(client.as_plain_text("Ask @x, `@zzz` and @zzzé", {"zzz"}), ("Ask @x, `@zzz` and @zzzé", 0))
+        # Python's tables count fewer letters than the server's (U+093F, a vowel sign, is a letter there):
+        # the names the server gave still go, outside code, ending as a mention ends; and in a reply,
+        # where every team is among the names, a team `dev` is not `@devon`.
+        self.assertEqual([n for _, _, n in client.mentions("@रवि")], ["रव"])
+        refused = client.RelevoError(400, "UNKNOWN_PERSON", "no active person or team is named रवि",
+                                     {"unknown": ["रवि"], "teams": [{"name": "dev"}]})
+        text = "@रवि, `@रवि` and @रविन, ask @devon or @dev-x; @रवि/x and @रवि."
+        self.assertEqual(client.as_plain_text(text, client.refused_mentions(refused, text, "oscar")),
+                         ("रवि, `@रवि` and @रविन, ask @devon or @dev-x; रवि/x and रवि.", 3))
 
     def test_a_mention_made_plain_text_leaves_no_mention(self):
         """However the text is written, leaving out the @ of the mentions of some names leaves none of
