@@ -148,7 +148,7 @@ fn without_relevo_db_an_admin_command_never_creates_a_database_here() {
 }
 
 #[test]
-fn only_serve_migrates_a_layout_5_6_or_7_database_and_check_db_says_so() {
+fn only_serve_migrates_a_layout_5_6_7_or_8_database_and_check_db_says_so() {
     for (dump, made_by) in [
         (
             include_str!("fixtures/layout5.sql"),
@@ -319,6 +319,10 @@ fn serve_records_or_posts_the_release_notes_once_it_listens() {
     let version = env!("CARGO_PKG_VERSION");
     let released = relevo::release::release_section(relevo::release::CHANGELOG, version).is_some();
     for (flag, env, posts) in [
+        (
+            include_str!("fixtures/layout8.sql"),
+            "a development build of relevo 0.5.0",
+        ),
         (true, None, false),
         (false, Some("0"), false),
         (false, Some("off"), false),

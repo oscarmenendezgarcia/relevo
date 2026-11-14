@@ -1,7 +1,8 @@
 //! Databases of layout 5, made by relevo 0.2.1 itself (`tests/fixtures/make-layout5.sh`), of
-//! layout 6, made by relevo 0.3.0 (`tests/fixtures/make-layout6.sh`), and of layout 7, made by
-//! relevo 0.4.4 (`tests/fixtures/make-layout7.sh`), migrated in place when this version first
-//! opens them, then used through the HTTP router.
+//! layout 6, made by relevo 0.3.0 (`tests/fixtures/make-layout6.sh`), of layout 7, made by
+//! relevo 0.4.4 (`tests/fixtures/make-layout7.sh`), and of layout 8, made by a development build
+//! of 0.5.0 (`tests/fixtures/make-layout8.sh`), migrated in place when this version first opens
+//! them, then used through the HTTP router.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,6 +20,8 @@ const LAYOUT6: &str = include_str!("fixtures/layout6.sql");
 const FIXTURE6: &str = include_str!("fixtures/layout6-tokens.json");
 const LAYOUT7: &str = include_str!("fixtures/layout7.sql");
 const FIXTURE7: &str = include_str!("fixtures/layout7-tokens.json");
+const LAYOUT8: &str = include_str!("fixtures/layout8.sql");
+const FIXTURE8: &str = include_str!("fixtures/layout8-tokens.json");
 
 /// A directory of its own, removed when the test ends.
 struct TempDir(PathBuf);
@@ -54,6 +57,11 @@ fn layout6(path: &str) -> i64 {
 /// The layout 7 database, as a file, and when its sessions were last seen.
 fn layout7(path: &str) -> i64 {
     made_by(path, LAYOUT7, 7)
+}
+
+/// The layout 8 database, as a file, and when its sessions were last seen.
+fn layout8(path: &str) -> i64 {
+    made_by(path, LAYOUT8, 8)
 }
 
 fn made_by(path: &str, dump: &str, layout: i64) -> i64 {
@@ -181,7 +189,7 @@ async fn a_layout_5_database_migrates_and_what_waited_for_a_reply_stays_pending(
         Clock::fixed(seen + 60),
         5,
     );
-    assert_eq!(user_version(&path), 8);
+    assert_eq!(user_version(&path), 9);
     let f = Fixture {
         app,
         v: serde_json::from_str(FIXTURE).unwrap(),
@@ -330,7 +338,7 @@ async fn a_layout_5_database_migrates_and_what_waited_for_a_reply_stays_pending(
         )
         .unwrap();
     assert_eq!(pending, 4);
-    assert_eq!(user_version(&path), 8);
+    assert_eq!(user_version(&path), 9);
 }
 
 /// The columns of every table and the definition of every index, as `db::open` leaves them.
@@ -388,6 +396,7 @@ fn a_migrated_database_has_the_layout_of_a_new_one() {
         ("5.db", layout5 as fn(&str) -> i64),
         ("6.db", layout6),
         ("7.db", layout7),
+        ("8.db", layout8),
     ] {
         let migrated = dir.0.join(name);
         let migrated = migrated.to_str().unwrap();
@@ -531,7 +540,7 @@ fn a_failed_migration_from_layout_7_leaves_it_at_layout_7() {
     conn.execute_batch("DROP TRIGGER no_reopening").unwrap();
     drop(conn);
     db::open_migrating(&path).unwrap();
-    assert_eq!(user_version(&path), 8);
+    assert_eq!(user_version(&path), 9);
 }
 
 #[test]
@@ -553,7 +562,7 @@ fn a_broken_reference_elsewhere_does_not_stop_the_migration() {
     .unwrap();
     drop(conn);
     db::open_migrating(&path).unwrap();
-    assert_eq!(user_version(&path), 8);
+    assert_eq!(user_version(&path), 9);
     // Still broken: the check the migration makes is over the tables that refer to threads.
     let conn = rusqlite::Connection::open(&path).unwrap();
     let broken: i64 = conn
@@ -570,7 +579,7 @@ fn a_broken_reference_elsewhere_does_not_stop_the_migration() {
 fn other_layouts_are_refused_and_left_as_they_are() {
     for (version, says) in [
         (4, "older version of relevo"),
-        (9, "newer version of relevo"),
+        (10, "newer version of relevo"),
     ] {
         let dir = TempDir::new();
         let path = dir.db();
@@ -613,6 +622,11 @@ fn only_serve_migrates_and_checking_writes_nothing() {
         (5, layout5 as fn(&str) -> i64, "relevo 0.1.0 to 0.2.x"),
         (6, layout6, "relevo 0.3.x"),
         (7, layout7, "relevo 0.4.x"),
+        (
+            8,
+            layout8,
+            "a development build of relevo 0.5.0 (before its release)",
+        ),
     ] {
         let path = dir.0.join(format!("{version}.db"));
         let path = path.to_str().unwrap();
@@ -647,7 +661,7 @@ fn only_serve_migrates_and_checking_writes_nothing() {
         // The server migrates it; then everything opens it, and checking says so, also while it
         // is open (read-only, through its -wal and -shm).
         let conn = db::open_migrating(path).unwrap();
-        assert_eq!(user_version(path), 8);
+        assert_eq!(user_version(path), 9);
         assert_eq!(db::check(path).unwrap(), db::Layout::Current);
         db::open(path).unwrap();
         drop(conn);
@@ -716,7 +730,7 @@ async fn a_layout_6_database_migrates_its_team_questions_to_the_global_board() {
         Clock::fixed(seen + 60),
         5,
     );
-    assert_eq!(user_version(&path), 8);
+    assert_eq!(user_version(&path), 9);
     // Delivery, handled and claims stay as they were, and so does what is pending.
     assert_eq!(open(flags(&path)), before);
     let f = Fixture {
@@ -842,7 +856,7 @@ async fn a_layout_7_database_migrates_and_its_closed_threads_open_with_nothing_p
         Clock::fixed(seen + 60),
         5,
     );
-    assert_eq!(user_version(&path), 8);
+    assert_eq!(user_version(&path), 9);
     // Nothing became pending, and no thread is closed.
     assert_eq!(waiting(&path), before);
     let closed: i64 = rusqlite::Connection::open(&path)
@@ -967,4 +981,58 @@ async fn a_layout_7_database_migrates_and_its_closed_threads_open_with_nothing_p
             .len(),
         3
     );
+}
+
+#[tokio::test]
+async fn a_layout_8_database_migrates_and_its_sessions_report_their_clients() {
+    let dir = TempDir::new();
+    let path = dir.db();
+    let seen = layout8(&path);
+    let before = flags(&path);
+    let app = App::new(
+        db::open_migrating(&path).unwrap(),
+        Clock::fixed(seen + 60),
+        5,
+    );
+    assert_eq!(user_version(&path), 9);
+    // Delivery, handled and claims are as they were.
+    assert_eq!(flags(&path), before);
+    // Every session is kept, and has said nothing of its client yet.
+    let sessions = || db::list_sessions(&app.db(), None, seen + 60).unwrap();
+    assert_eq!(sessions().len(), 4);
+    assert!(sessions().iter().all(|s| s.client.is_none()));
+    let f = Fixture {
+        app: app.clone(),
+        v: serde_json::from_str(FIXTURE8).unwrap(),
+    };
+    // Its next request says it: Bob's session, with what pi 0.5.0 sends.
+    let bob = f.agent("bob", "bob-term-01", "pagos-api");
+    let req = Request::get("/api/inbox")
+        .header("authorization", format!("Bearer {}", bob.token))
+        .header("relevo-session", "bob-term-01")
+        .header("relevo-context", "pagos-api")
+        .header("relevo-client", "pi/0.5.0");
+    let res = api::router(app.clone())
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bob_session = sessions()
+        .into_iter()
+        .find(|s| s.session.as_deref() == Some("bob-term-01"))
+        .unwrap();
+    assert_eq!(bob_session.client.as_deref(), Some("pi/0.5.0"));
+    assert!(!bob_session.client_inferred);
+    // What waited for Bob still does.
+    let mut pending: Vec<String> = bob.inbox().await["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["pending"] == true)
+        .map(|t| t["id"].as_str().unwrap().to_string())
+        .collect();
+    let mut expected = vec![f.thread("fetched"), f.thread("unread")];
+    pending.sort();
+    expected.sort();
+    assert_eq!(pending, expected);
 }

@@ -44,14 +44,19 @@ CREATE TABLE IF NOT EXISTS threads (
 -- first claim until they lapse, 15 minutes after it was last seen (see `session::lapse`).
 -- Sessions not seen for 7 days are forgotten. Ids are never reused (AUTOINCREMENT): `send_keys` keeps the
 -- id of a session that may be forgotten since, and a replay must not name a newer one for it.
+-- `client` is what the latest request said of the agent's client, `<name>/<version>` (the
+-- `Relevo-Client` header, or a `relevo/<version>` User-Agent read as `mcp/<version>`, then
+-- `client_inferred` is 1); NULL when it said nothing that could be read. Layout 9 brings both.
 CREATE TABLE IF NOT EXISTS sessions (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    token_id   TEXT NOT NULL REFERENCES tokens(id),
-    client_id  TEXT NOT NULL,
-    person_id  INTEGER NOT NULL REFERENCES people(id),
-    context    TEXT,
-    last_seen  INTEGER NOT NULL,
-    claims     INTEGER NOT NULL DEFAULT 0,
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_id        TEXT NOT NULL REFERENCES tokens(id),
+    client_id       TEXT NOT NULL,
+    person_id       INTEGER NOT NULL REFERENCES people(id),
+    context         TEXT,
+    last_seen       INTEGER NOT NULL,
+    claims          INTEGER NOT NULL DEFAULT 0,
+    client          TEXT,
+    client_inferred INTEGER NOT NULL DEFAULT 0,
     UNIQUE (token_id, client_id)
 );
 CREATE INDEX IF NOT EXISTS sessions_by_person ON sessions(person_id, last_seen);
@@ -309,11 +314,11 @@ pub const SESSION_LIFETIME_SECS: i64 = 7 * 24 * 3600;
 pub const CLAIM_LAPSE_SECS: i64 = 15 * 60;
 
 /// The layout of `SCHEMA`, kept in SQLite's `user_version`. A database of layout 5 (relevo 0.1.0
-/// to 0.2.x), 6 (relevo 0.3.x) or 7 (relevo 0.4.x) is migrated in place (`MIGRATE_FROM_5`,
-/// `MIGRATE_FROM_6`, `MIGRATE_FROM_7`, then `OPEN_CLOSED`), by `relevo serve` only; any other
-/// layout is refused, never half-updated (`CREATE TABLE IF NOT EXISTS` would skip the old tables
-/// and fail on their missing columns).
-const SCHEMA_VERSION: i64 = 8;
+/// to 0.2.x), 6 (relevo 0.3.x), 7 (relevo 0.4.x) or 8 (development builds of 0.5.0) is migrated
+/// in place (`MIGRATE_FROM_5`, `MIGRATE_FROM_6`, `MIGRATE_FROM_7`, `MIGRATE_FROM_8`, then
+/// `OPEN_CLOSED`), by `relevo serve` only; any other layout is refused, never half-updated
+/// (`CREATE TABLE IF NOT EXISTS` would skip the old tables and fail on their missing columns).
+const SCHEMA_VERSION: i64 = 9;
 
 /// Layout 5 to 6: the handled state of each participant, from what layout 5 recorded as handling.
 /// A thread that was `waiting` there (open, direct, its latest note not theirs) waited for their
@@ -396,6 +401,14 @@ DROP INDEX IF EXISTS session_new_context;
 DROP INDEX IF EXISTS session_count;
 ";
 
+/// Layout 8 to 9, before `SCHEMA`: each session keeps what its latest request said of its
+/// client (see `sessions`). A session seen before has said nothing yet: unknown until its next
+/// request. The new columns go last, as in `SCHEMA`.
+const MIGRATE_FROM_8: &str = "
+ALTER TABLE sessions ADD COLUMN client TEXT;
+ALTER TABLE sessions ADD COLUMN client_inferred INTEGER NOT NULL DEFAULT 0;
+";
+
 /// Layout 7 to 8, after `SCHEMA` (which brings `thread_closes` to a database that did not have it
 /// yet): every closed thread opens, handled by each of its named participants up to its latest
 /// note, so nothing becomes pending. Where that covers a note by someone else they had not
@@ -452,14 +465,14 @@ UPDATE session_threads SET resolved = 0 WHERE resolved != 0;
 UPDATE threads SET status = 'open' WHERE status = 'closed';
 ";
 
-/// Opens (or creates) the database and applies the schema. A database of layout 5, 6 or 7 is
+/// Opens (or creates) the database and applies the schema. A database of layout 5, 6, 7 or 8 is
 /// refused: only `relevo serve` migrates it (`open_migrating`), so that an admin command never
 /// changes the layout behind the owner's back, before a backup. `":memory:"` works for tests.
 pub fn open(path: &str) -> Result<Connection> {
     open_with(path, false, OPEN_PATIENCE)
 }
 
-/// `open`, migrating a database of layout 5, 6 or 7 in place: for `relevo serve`.
+/// `open`, migrating a database of layout 5, 6, 7 or 8 in place: for `relevo serve`.
 pub fn open_migrating(path: &str) -> Result<Connection> {
     open_with(path, true, OPEN_PATIENCE)
 }
@@ -556,9 +569,12 @@ fn try_open(path: &str, migrate: bool, deadline: std::time::Instant) -> Result<C
                     );
                 }
             }
-            tx.execute_batch(MIGRATE_FROM_7).with_context(|| {
-                format!("migrating database {path} from layout 7 to {SCHEMA_VERSION}")
-            })?;
+            if old <= 7 {
+                tx.execute_batch(MIGRATE_FROM_7)
+                    .with_context(|| format!("migrating database {path} from layout 7 to 8"))?;
+            }
+            tx.execute_batch(MIGRATE_FROM_8)
+                .with_context(|| format!("migrating database {path} from layout 8 to 9"))?;
             from = Some(old);
         }
         Layout::New | Layout::Current => {}
@@ -572,15 +588,14 @@ fn try_open(path: &str, migrate: bool, deadline: std::time::Instant) -> Result<C
     }
     // How many closed threads layout 8 opens.
     let mut opened = 0;
-    if from.is_some() {
+    if from.is_some_and(|old| old <= 7) {
         opened = tx.query_row(
             "SELECT count(*) FROM threads WHERE status = 'closed'",
             [],
             |r| r.get::<_, i64>(0),
         )?;
-        tx.execute_batch(OPEN_CLOSED).with_context(|| {
-            format!("migrating database {path} from layout 7 to {SCHEMA_VERSION}")
-        })?;
+        tx.execute_batch(OPEN_CLOSED)
+            .with_context(|| format!("migrating database {path} from layout 7 to 8"))?;
     }
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
@@ -607,10 +622,17 @@ fn migrated(old: i64, opened: i64) -> Vec<String> {
                 .to_string(),
         );
     }
-    lines.push(format!(
-        "migrated the database from layout 7 to {SCHEMA_VERSION}: threads no longer close; \
-         opened {opened} closed threads, handled by everyone they name"
-    ));
+    if old <= 7 {
+        lines.push(format!(
+            "migrated the database from layout 7 to 8: threads no longer close; opened {opened} \
+             closed threads, handled by everyone they name"
+        ));
+    }
+    lines.push(
+        "migrated the database from layout 8 to 9: sessions keep the client and version their \
+         agent reports"
+            .to_string(),
+    );
     lines
 }
 
@@ -643,7 +665,7 @@ fn broken_thread_refs(tx: &Connection) -> Result<Vec<(String, i64, String)>> {
     Ok(out)
 }
 
-/// Why a command other than `serve` refuses a database of layout 5, 6 or 7.
+/// Why a command other than `serve` refuses a database of layout 5, 6, 7 or 8.
 fn no_migration(path: &str, layout: Layout) -> String {
     format!(
         "database {path} has the layout of {}, which only `relevo serve` migrates (in place, \
@@ -661,8 +683,8 @@ pub enum Layout {
     New,
     /// This version's layout.
     Current,
-    /// Layout 5 (relevo 0.1.0 to 0.2.x), 6 (relevo 0.3.x) or 7 (relevo 0.4.x): `relevo serve`
-    /// migrates it.
+    /// Layout 5 (relevo 0.1.0 to 0.2.x), 6 (relevo 0.3.x), 7 (relevo 0.4.x) or 8 (development
+    /// builds of 0.5.0): `relevo serve` migrates it.
     Migrates(i64),
 }
 
@@ -672,7 +694,8 @@ impl Layout {
         match self {
             Layout::Migrates(5) => "relevo 0.1.0 to 0.2.x",
             Layout::Migrates(6) => "relevo 0.3.x",
-            Layout::Migrates(_) => "relevo 0.4.x",
+            Layout::Migrates(7) => "relevo 0.4.x",
+            Layout::Migrates(_) => "a development build of relevo 0.5.0 (before its release)",
             Layout::New | Layout::Current => "this relevo",
         }
     }
@@ -695,7 +718,7 @@ fn layout(conn: &Connection, path: &str) -> Result<Layout> {
     if version > SCHEMA_VERSION {
         bail!("database {path} was made by a newer version of relevo; use that one");
     }
-    if (5..=7).contains(&version) {
+    if (5..SCHEMA_VERSION).contains(&version) {
         return Ok(Layout::Migrates(version));
     }
     if tables > 0 {
@@ -1054,9 +1077,22 @@ pub struct SessionInfo {
     pub session: Option<String>,
     pub context: Option<String>,
     pub last_seen: i64,
+    /// What its latest request said of its client, `<name>/<version>`; `None`: nothing.
+    pub client: Option<String>,
+    /// Whether `client` was read from the User-Agent, not said.
+    pub client_inferred: bool,
 }
 
-/// Sessions seen in the last 7 days, of everyone or of one person, most recently seen first.
+impl SessionInfo {
+    /// The client's name and version, the version marked `?` when inferred; `None`: unknown.
+    pub fn client_version(&self) -> Option<(&str, String)> {
+        let (name, version) = self.client.as_deref()?.split_once('/')?;
+        let mark = if self.client_inferred { "?" } else { "" };
+        Some((name, format!("{version}{mark}")))
+    }
+}
+
+/// Sessions seen in the last 7 days, of every active person or of one, most recently seen first.
 pub fn list_sessions(
     conn: &Connection,
     handle: Option<&str>,
@@ -1065,12 +1101,14 @@ pub fn list_sessions(
     if let Some(handle) = handle {
         person_id(conn, handle)?;
     }
-    let mut stmt = conn.prepare(
-        "SELECT p.handle, t.label, nullif(s.client_id, ''), s.context, s.last_seen
+    let mut stmt = conn.prepare(&format!(
+        "SELECT p.handle, t.label, nullif(s.client_id, ''), s.context, s.last_seen, s.client,
+                s.client_inferred
          FROM sessions s JOIN tokens t ON t.id = s.token_id JOIN people p ON p.id = s.person_id
-         WHERE s.last_seen > ?2 AND (?1 IS NULL OR p.handle = ?1)
-         ORDER BY p.handle, s.last_seen DESC, s.id",
-    )?;
+         WHERE s.last_seen > ?2 AND (?1 IS NULL OR p.handle = ?1) AND p.active = 1
+           AND p.id IS NOT {SYSTEM_PERSON_SQL}
+         ORDER BY p.handle, s.last_seen DESC, s.id"
+    ))?;
     let rows = stmt.query_map(params![handle, now - SESSION_LIFETIME_SECS], |r| {
         Ok(SessionInfo {
             handle: r.get(0)?,
@@ -1078,6 +1116,8 @@ pub fn list_sessions(
             session: r.get(2)?,
             context: r.get(3)?,
             last_seen: r.get(4)?,
+            client: r.get(5)?,
+            client_inferred: r.get(6)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1485,9 +1525,10 @@ mod tests {
                 .collect()
         };
         let line = |from, to| format!("migrated the database from layout {from} to {to}");
-        assert_eq!(steps(5), [line(5, 6), line(6, 7), line(7, 8)]);
-        assert_eq!(steps(6), [line(6, 7), line(7, 8)]);
-        assert_eq!(steps(7), [line(7, 8)]);
+        assert_eq!(steps(5), [line(5, 6), line(6, 7), line(7, 8), line(8, 9)]);
+        assert_eq!(steps(6), [line(6, 7), line(7, 8), line(8, 9)]);
+        assert_eq!(steps(7), [line(7, 8), line(8, 9)]);
+        assert_eq!(steps(8), [line(8, 9)]);
         assert!(migrated(7, 2)[0].contains("opened 2 closed threads"));
     }
 

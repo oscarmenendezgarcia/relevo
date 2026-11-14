@@ -1,11 +1,12 @@
 //! Bearer-token authentication: a request acts as the person who owns the token, in the
 //! session named by the `Relevo-Session` and `Relevo-Context` headers (and, through 0.x, with
-//! `Relevo-Mentions` saying whether a reply's mentions are read).
+//! `Relevo-Mentions` saying whether a reply's mentions are read). `Relevo-Client` says which
+//! client the session runs, for the admin (`relevo clients`).
 
 use std::sync::Arc;
 
 use axum::extract::FromRequestParts;
-use axum::http::header::AUTHORIZATION;
+use axum::http::header::{AUTHORIZATION, USER_AGENT};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderName};
 use rusqlite::OptionalExtension;
@@ -27,11 +28,17 @@ pub struct Caller {
     /// `Relevo-Mentions: 1`: a 0.4 client, which knows that a reply's `@` names people. Through
     /// 0.x a reply without it is written as 0.3 wrote it, its mentions not read.
     pub reads_mentions: bool,
+    /// What the request says of its client, `<name>/<version>` (see `client`); `None` when it
+    /// says nothing that can be read.
+    pub client: Option<String>,
+    /// Whether `client` was read from the User-Agent rather than said by `Relevo-Client`.
+    pub client_inferred: bool,
 }
 
 const SESSION: HeaderName = HeaderName::from_static("relevo-session");
 const CONTEXT: HeaderName = HeaderName::from_static("relevo-context");
 const MENTIONS: HeaderName = HeaderName::from_static("relevo-mentions");
+const CLIENT: HeaderName = HeaderName::from_static("relevo-client");
 
 /// A header as trimmed text; `None` when absent.
 fn header(headers: &HeaderMap, name: &HeaderName) -> Result<Option<String>, ApiError> {
@@ -75,6 +82,44 @@ fn mentions_header(headers: &HeaderMap) -> Result<bool, ApiError> {
     }
 }
 
+/// What the request says of its client, and whether that was inferred: `Relevo-Client` when it is
+/// well-formed, else `mcp/<version>` from a `relevo/<version>` User-Agent (`relevo mcp` before
+/// 0.5.0, and `relevo connect` and `update`, which say it so). Anything else says nothing: never
+/// an error, so that other and older clients keep working.
+fn client(headers: &HeaderMap) -> (Option<String>, bool) {
+    let text = |name| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+    };
+    if let Some(said) = text(CLIENT).filter(|c| valid_client(c)) {
+        return (Some(said.to_string()), false);
+    }
+    let inferred = text(USER_AGENT)
+        .and_then(|ua| ua.strip_prefix("relevo/"))
+        .map(|version| format!("mcp/{version}"))
+        .filter(|c| valid_client(c));
+    let found = inferred.is_some();
+    (inferred, found)
+}
+
+/// `^[a-z][a-z0-9-]{0,15}/[0-9A-Za-z.+-]{1,32}$`: a client's name and its version.
+pub fn valid_client(client: &str) -> bool {
+    let Some((name, version)) = client.split_once('/') else {
+        return false;
+    };
+    name.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+        && name.len() <= 16
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && (1..=32).contains(&version.len())
+        && version
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-'))
+}
+
 /// The person and token behind the request's bearer token: (person id, handle, token id, label).
 fn owner(parts: &Parts, app: &App) -> Result<(i64, String, String, String), ApiError> {
     let secret = parts
@@ -106,6 +151,7 @@ impl FromRequestParts<Arc<App>> for Caller {
         // Checked after the token, so that a stranger learns nothing from a 400.
         let (session, context) = session_headers(&parts.headers)?;
         let reads_mentions = mentions_header(&parts.headers)?;
+        let (client, client_inferred) = client(&parts.headers);
         Ok(Caller {
             person_id,
             handle,
@@ -114,6 +160,8 @@ impl FromRequestParts<Arc<App>> for Caller {
             session,
             context,
             reads_mentions,
+            client,
+            client_inferred,
         })
     }
 }
