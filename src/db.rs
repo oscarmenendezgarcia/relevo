@@ -571,25 +571,32 @@ fn try_open(path: &str, migrate: bool) -> Result<Connection> {
     }
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
-    if from == Some(5) {
-        tracing::info!(db = path, "migrated the database from layout 5 to 6");
-    }
-    if from.is_some_and(|old| old <= 6) {
-        tracing::info!(
-            db = path,
-            "migrated the database from layout 6 to 7: team threads are global ones now"
-        );
-    }
     if let Some(old) = from {
-        tracing::info!(
-            db = path,
-            opened,
-            "migrated the database from layout {old} to {SCHEMA_VERSION}: threads no longer \
-             close; opened {opened} closed threads, handled by everyone they name"
-        );
+        for line in migrated(old, opened) {
+            tracing::info!(db = path, "{line}");
+        }
     }
     conn.pragma_update(None, "foreign_keys", "ON")?;
     Ok(conn)
+}
+
+/// What a migration from layout `old` logs, a line per step, once it has committed.
+fn migrated(old: i64, opened: i64) -> Vec<String> {
+    let mut lines = Vec::new();
+    if old == 5 {
+        lines.push("migrated the database from layout 5 to 6".to_string());
+    }
+    if old <= 6 {
+        lines.push(
+            "migrated the database from layout 6 to 7: team threads are global ones now"
+                .to_string(),
+        );
+    }
+    lines.push(format!(
+        "migrated the database from layout 7 to {SCHEMA_VERSION}: threads no longer close; \
+         opened {opened} closed threads, handled by everyone they name"
+    ));
+    lines
 }
 
 /// The tables that refer to `threads`: the only references layout 6 to 7 can break, since it makes
@@ -1427,6 +1434,21 @@ mod tests {
         }
         drop(conn);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_migration_logs_each_step_once() {
+        let steps = |old| -> Vec<String> {
+            migrated(old, 2)
+                .iter()
+                .map(|l| l.split(':').next().unwrap().to_string())
+                .collect()
+        };
+        let line = |from, to| format!("migrated the database from layout {from} to {to}");
+        assert_eq!(steps(5), [line(5, 6), line(6, 7), line(7, 8)]);
+        assert_eq!(steps(6), [line(6, 7), line(7, 8)]);
+        assert_eq!(steps(7), [line(7, 8)]);
+        assert!(migrated(7, 2)[0].contains("opened 2 closed threads"));
     }
 
     #[test]

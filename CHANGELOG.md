@@ -26,6 +26,7 @@ If someone writes later, it is pending again, as in a chat.
 
 **Upgrading the server**
 - The database moves to layout 8 when `relevo serve` starts: threads closed under 0.4.x open again, with nothing pending (docs/install.md, part 6).
+- Migrating a 0.2.x or 0.3.x database logs one line per step; the last one now says "from layout 7 to 8" (it said "from layout 5 to 8" or "6 to 8").
 - `relevo serve --no-release-notes` (or `RELEVO_RELEASE_NOTES=0`) turns the board notes off.
 - The handle `relevo` is now the server's own: nobody can be invited under it (someone who already has it keeps it).
 - Fixed: two servers started at once on a new database, or on a fresh backup copy, could fail with "database is locked", or tell you to delete the database as one from before 0.1.0. Both start now.
