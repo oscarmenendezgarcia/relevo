@@ -310,7 +310,7 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
         }
     }
     // Release notes need no answer, so answering them is not offered.
-    if shared && !names_you(t) && Some(opener) != me && !release_only(t) {
+    if shared && !names_you(t) && Some(opener) != me && !release_only(t, me) {
         out.push_str(
             "It does not name your person, so answering is optional: answer only from your own \
              work or your person's files (repeating someone's `about` line, or guessing who might \
@@ -332,15 +332,25 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
         if pending(t) && t["last_note"].is_object() {
             latest(&mut out, id, &t["last_note"], me);
         }
-    } else if partial && notes.iter().any(|n| n["pushed"] == true) {
-        out.push_str(
-            "New notes (those marked \"pushed earlier\" reached this session as channel events; \
-             shown again in case they did not reach you):\n",
-        );
-    } else if partial && notes.iter().any(|n| n["received"] == true) {
-        out.push_str(
-            "New notes (those marked \"received earlier\" reached this session in the background \
-             and were not pushed, since release notes start nothing):\n",
+    } else if partial
+        && notes
+            .iter()
+            .any(|n| n["pushed"] == true || n["received"] == true)
+    {
+        let mut why = Vec::new();
+        if notes.iter().any(|n| n["pushed"] == true) {
+            why.push("those marked \"pushed earlier\" reached this session as channel events");
+        }
+        if notes.iter().any(|n| n["received"] == true) {
+            why.push(
+                "those marked \"received earlier\" reached it in the background without one, \
+                 since release notes alone start nothing",
+            );
+        }
+        let _ = writeln!(
+            out,
+            "New notes ({}; shown again in case they did not reach you):",
+            why.join(", and ")
         );
     } else if partial {
         out.push_str("New notes:\n");
@@ -378,13 +388,18 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
     out
 }
 
-/// Whether the notes of `t` shown with it (`notes`, or else `new_notes`) are release notes only
-/// (`"system": true`): informative, so nothing in them asks for an answer or starts a turn.
-pub(crate) fn release_only(t: &Value) -> bool {
+/// Whether the notes by others shown with `t` (`notes`, or else `new_notes`; `me`'s own do not
+/// count) are release notes only (`"system": true`): informative, so nothing in them asks for an
+/// answer or starts a turn.
+pub(crate) fn release_only(t: &Value, me: Option<&str>) -> bool {
     let notes = t.get("notes").unwrap_or(&t["new_notes"]);
-    notes
+    let mut others = notes
         .as_array()
-        .is_some_and(|n| !n.is_empty() && n.iter().all(|n| n["system"] == true))
+        .into_iter()
+        .flatten()
+        .filter(|n| Some(s(&n["author"])) != me)
+        .peekable();
+    others.peek().is_some() && others.all(|n| n["system"] == true)
 }
 
 /// Whether a thread is pending for the person.
@@ -909,6 +924,19 @@ mod tests {
         assert!(out.contains("those marked \"received earlier\""), "{out}");
         assert!(
             pushed(std::slice::from_ref(&alone), Some("oscar")).contains("Pushed to this session")
+        );
+        // Pushed and received notes in one thread: both marks explained.
+        let mut both = alone.clone();
+        both["new_notes"] = json!([alone["new_notes"][0], t["new_notes"][1]]);
+        both["new_notes"][1]["pushed"] = true.into();
+        let out = thread(&both, Some("oscar"));
+        assert!(
+            out.contains(
+                "New notes (those marked \"pushed earlier\" reached this session as channel \
+                 events, and those marked \"received earlier\" reached it in the background \
+                 without one, since release notes alone start nothing; shown again"
+            ),
+            "{out}"
         );
         alone["quiet"] = true.into();
         let out = pushed(&[alone], Some("oscar"));
