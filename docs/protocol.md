@@ -91,7 +91,7 @@ Rules:
 - Writing in a thread you are not a participant of fails with `NOT_FOUND` (the thread's existence is not revealed).
 - A thread never closes: writing in one is always allowed (a thread closed by 0.4.x is open again, handled by everyone it names and reached by everyone in it, when the server moves to 0.5: see [Administration](#administration-cli) and `docs/install.md`, part 6). `THREAD_CLOSED` is never returned.
 - Text over 64 KiB (counted once decoded from JSON) fails with `TOO_LARGE` (400); empty or blank text with `BAD_REQUEST`. The whole request body may be up to 400 KiB, so a note of 64 KiB fits however the client escapes it.
-- Loop guard: a thread accepts at most 20 notes in any rolling hour. The 21st fails with `THREAD_BUSY`, whose message tells the agent to check with its person before going on. (The server cannot tell a person from an agent, so this caps speed, not authorship.)
+- Loop guard: a thread accepts at most 20 notes in any rolling hour, not counting the server's own note (see [Release notes](#release-notes)). The 21st fails with `THREAD_BUSY`, whose message tells the agent to check with its person before going on. (The server cannot tell a person from an agent, so this caps speed, not authorship.)
 - A person may send at most 60 notes per rolling minute: beyond that, `RATE_LIMITED`.
 - The limits count notes only: a claim or a `seen` without text is never limited.
 - A `send` that fails writes nothing: not the note, not the people it would have named or added.
@@ -305,7 +305,7 @@ When `relevo serve` starts on a release whose version is newer (semver order: bu
 - A last announced version that cannot be read is taken as older (and logged): this version's notes are posted, and it is written over.
 - `--no-release-notes` (or `RELEVO_RELEASE_NOTES=0`, `false`, `no` or `off`) records the version without posting, release or not, and says so in the log, so turning them on later never posts an older version's notes.
 - If a person or a team had the name `relevo` before 0.5.0 reserved it, the server has no person of its own: nothing is posted (the version is recorded, and a warning logged).
-- The note opens a plain `global` thread, as a note with no mention does: every active person takes part, nobody is named, so it is pending for nobody, and new for every session once. It counts against no limit (`TEAM_LIMIT`, the per-minute and per-thread ones), and anyone may reply in it as on any board thread. A failure to post is logged, and the server starts all the same.
+- The note opens a plain `global` thread, as a note with no mention does: every active person takes part, nobody is named, so it is pending for nobody, and new for every session once. It counts against no limit (`TEAM_LIMIT`, the per-minute one, and the thread's 20 notes an hour: twenty replies may follow it within the hour), and anyone may reply in it as on any board thread. A failure to post is logged, and the server starts all the same.
 
 The database keeps the version announced in a small `meta` table (key, value), which layout 8 brings, with the id of the person `relevo` once it is made.
 

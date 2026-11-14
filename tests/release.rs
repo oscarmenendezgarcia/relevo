@@ -225,6 +225,30 @@ async fn an_upgrade_posts_the_versions_notes_once_on_the_board() {
 }
 
 #[tokio::test]
+async fn the_release_note_counts_against_no_threads_hourly_guard() {
+    let s = server(&["ana"], Some("0.4.4"));
+    let Outcome::Posted(thread) = s.announce("0.5.0", true) else {
+        panic!("not posted");
+    };
+    // Twenty replies in the hour go in: the release note is not one of the twenty.
+    let send = |i| {
+        s.call(
+            "ana",
+            "POST",
+            "/api/send",
+            Some(json!({ "thread": thread, "text": format!("Reply {i}") })),
+        )
+    };
+    for i in 0..20 {
+        let (status, v) = send(i).await;
+        assert_eq!(status, StatusCode::OK, "{i}: {v}");
+    }
+    let (status, v) = send(20).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{v}");
+    assert_eq!(v["error"]["code"], "THREAD_BUSY", "{v}");
+}
+
+#[tokio::test]
 async fn a_new_database_a_downgrade_or_the_same_version_posts_nothing() {
     // A database made by this version starts at it when this build is a release; made between
     // releases, it records nothing and posts nothing, so the release still posts.

@@ -1210,8 +1210,12 @@ fn write_as(
             let row = find_thread(tx, session, id)?;
             let names = reply_names(tx, &whom.mentions, now)?;
             if req.text.is_some() {
+                // The server's own notes (release notes) count against no limit.
                 let recent: i64 = tx.query_row(
-                    "SELECT count(*) FROM notes WHERE thread_id = ?1 AND created_at > ?2",
+                    &format!(
+                        "SELECT count(*) FROM notes WHERE thread_id = ?1 AND created_at > ?2
+                         AND author_id IS NOT {SYSTEM_PERSON_SQL}"
+                    ),
                     params![row.id, now - 3600],
                     |r| r.get(0),
                 )?;
