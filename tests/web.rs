@@ -140,13 +140,13 @@ fn assert_security_headers(headers: &HeaderMap, what: &str) {
     assert_eq!(get("cross-origin-opener-policy"), "same-origin", "{what}");
 }
 
-/// What a browser says about where a request came from: only `cross-site` is refused, and a
-/// request that says nothing is refused for nothing.
+/// What a browser says about where a request came from: only `cross-site` is refused, only for
+/// the API, and a request that says nothing is refused for nothing.
 #[tokio::test]
 async fn a_request_from_another_site_is_refused() {
     let s = setup().await;
     let key = ("relevo-web-key", s.key.as_str());
-    for path in ["/", "/app.js", "/api/timeline?tab=board"] {
+    for path in ["/api/timeline?tab=board", "/api/timeline/threads/t_x"] {
         let (status, headers, body) = ask(
             &s.web,
             "GET",
@@ -157,6 +157,14 @@ async fn a_request_from_another_site_is_refused() {
         assert_eq!(status, StatusCode::FORBIDDEN, "cross-site {path}");
         assert_eq!(json(&body)["error"]["code"], "FORBIDDEN");
         assert_security_headers(&headers, "cross-site");
+    }
+    // The page and its files hold no data: the browser loads them from the launcher file
+    // (`file://`), which it calls `cross-site`, so they are not refused for it.
+    for path in ["/", "/app.js", "/app.css"] {
+        let (status, headers, _) =
+            ask(&s.web, "GET", path, &[("sec-fetch-site", "cross-site")]).await;
+        assert_eq!(status, StatusCode::OK, "cross-site {path}");
+        assert_security_headers(&headers, "cross-site page");
     }
     for site in ["none", "same-origin", "same-site", ""] {
         let (status, _, _) = ask(
