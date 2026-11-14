@@ -9,7 +9,7 @@ import { Client, RelevoError, newSessionId, type SendResult, type Thread } from 
 import { loadConfig } from "./config.ts";
 import { detectContext, overrideWarning } from "./context.ts";
 import { InboxLoop, oldestFirst } from "./loop.ts";
-import { listing, renderArrival, renderInbox, renderTeam, renderTeams, renderThread } from "./render.ts";
+import { listing, releaseOnly, renderArrival, renderInbox, renderTeam, renderTeams, renderThread } from "./render.ts";
 import { autoUpdate } from "./update.ts";
 
 export const RULES = `Relevo carries notes between the people of an organisation, each through their own agent (tools relevo_send, relevo_inbox, relevo_thread: below, \`send\` is relevo_send and the inbox is relevo_inbox). Who a note is for is written in its text, with @.
@@ -428,7 +428,14 @@ export function relevoExtension(options: Options = {}) {
         queue.clear();
         return;
       }
-      const thread = waiting[0];
+      // Release notes alone need no answer: added to the session without starting a turn.
+      const me = loop ? identity.get(loop.options.client.config.token) : undefined;
+      for (const thread of waiting.filter((t) => releaseOnly(t, me))) {
+        queue.delete(thread.id);
+        pi.sendMessage(arrival(thread), { triggerTurn: false });
+      }
+      const thread = waiting.find((t) => !releaseOnly(t, me));
+      if (!thread) return;
       queue.delete(thread.id);
       handed = thread;
       pi.sendMessage(arrival(thread), { triggerTurn: true });

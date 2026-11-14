@@ -3,9 +3,10 @@
 connect() first ends the session an earlier start of the gateway may have left (DELETE
 /api/session), so it starts as a new session and gets what is still pending for its person; then
 it keeps one waiting inbox request open (wait=55) and backs off on errors. Each thread with new
-notes becomes a MessageEvent from the author of its latest note, and so, once, does a thread that
-names the person (any direct one), pending for them, whose latest note this adapter never handed
-over (the answer that carried it was lost on the way, say); send() writes the agent's reply in that
+notes by someone else becomes a MessageEvent from the author of its latest note (release notes alone
+start no turn), and so, once, does a thread that names the person (any direct one), pending for them,
+whose latest note this adapter never handed over (the answer that carried it was lost on the way,
+say); send() writes the agent's reply in that
 thread (once more with its offending mentions as plain text, when the server refuses them);
 disconnect() stops the loop, then ends the session with DELETE /api/session. One fixed
 Relevo-Session per profile (see client.gateway_session_id), general unless RELEVO_CONTEXT is set.
@@ -556,6 +557,11 @@ class RelevoAdapter(BasePlatformAdapter):
         others = [n for n in notes if n.get("author") != self._me]
         if not others:
             return  # only notes of our person's own sessions: nothing to answer
+        if all(n.get("system") is True for n in others):
+            # Release notes alone need no answer: no turn. Handed over all the same (remembered
+            # above), so they are not offered again.
+            logger.info("[relevo] release notes in thread %s: informative, no turn", thread_id)
+            return
         latest = others[-1]
         author = str(latest.get("author") or "")
         person = team.get(author) or {}

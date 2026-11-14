@@ -616,6 +616,15 @@ def is_optional(thread: dict) -> bool:
     return is_shared(thread) and not names_you(thread)
 
 
+def release_only(thread: dict, me: Optional[str] = None) -> bool:
+    """Whether the notes by others shown with the thread (`notes`, or else `new_notes`; `me`'s own do
+    not count) are release notes only (`system: true`): informative, so nothing in them asks for an
+    answer or starts a turn."""
+    notes = thread["notes"] if "notes" in thread else thread.get("new_notes")
+    others = [n for n in notes or [] if isinstance(n, dict) and n.get("author") != me]
+    return bool(others) and all(n.get("system") is True for n in others)
+
+
 def is_pending(thread: dict) -> bool:
     """Pending for the person (not handled yet): `pending` (a server before 0.3.0 does not say it:
     nothing is pending then), in a thread that names them. A team or global-board thread that does
@@ -663,8 +672,9 @@ def render_thread_head(thread: dict, me: Optional[str] = None, *, hints: bool = 
     title = _wrap(opener, me, 'field="title"', _defang(str(thread.get("title") or "")).replace("\n", " "), sep="")
     lines = [f"Thread {thread.get('id')} · {kind_of(thread)}",
              f"Title (the first line of the first note): {title}"]
-    # Someone else's thread that does not name the person says so in the line on answering it.
-    optional = is_optional(thread) and opener != me
+    # Someone else's thread that does not name the person says so in the line on answering it;
+    # release notes need no answer, so answering them is not offered.
+    optional = is_optional(thread) and opener != me and not release_only(thread, me)
     named = " It names your person." if names_you(thread) else "" if optional else " It does not name your person."
     if kind == "team" and not isinstance(thread.get("teams"), list):
         # A server before 0.4.0: a question to everyone.
@@ -1114,9 +1124,37 @@ def _code_mask(text: str) -> list:
     return mask
 
 
+def _is_attempt_char(c: str) -> bool:
+    """What an attempt at a name runs over: letters and digits (any script), `_`, `-`, `.`, `@` and `/`.
+    So `@user@mastodon.social` is one attempt, refused as a whole."""
+    return c.isalnum() or c in "_-.@/"
+
+
+def _address(text: str, start: int, run: int) -> Optional[tuple[str, int]]:
+    """The run `text[start:run]` of an attempt, whole, as a name and its optional context: (name, end),
+    or None when it is not an address at all, which is what makes `@josé` name `josé` and not `jos`."""
+    at = start
+    while at < run and _is_name_char(text[at]):
+        at += 1
+    # A trailing `-` is punctuation, not part of the name: `@ana-/x` is no address.
+    while at > start and text[at - 1] == "-":
+        at -= 1
+    if not _NAME.fullmatch(text[start:at]):
+        return None
+    if at < run:
+        if text[at] != "/" or not all(_is_context_char(c) for c in text[at + 1:run]):
+            return None
+    return text[start:at], run
+
+
 def mentions(text: str) -> list:
     """Every mention of `text` outside code, in order, repeats included, as the server reads them
-    (src/mention.rs): (start, end, name), `end` past the context if one follows, `name` lowercased."""
+    (src/mention.rs): (start, end, name), `end` past the context if one follows, `name` lowercased.
+
+    An `@` followed by a letter (any script) begins an attempt at a name: a run over letters, digits,
+    `_`, `-`, `.`, `@` and `/`, without the punctuation that ends it. When the run is no name (with an
+    optional context), the whole run is the name, as UNKNOWN_PERSON lists it: `josé`, `a`,
+    `user@mastodon.social`, `ana.b`. After a digit, a space or nothing, the `@` is plain text."""
     mask = _code_mask(text)
     out = []
     i = 0
@@ -1124,28 +1162,32 @@ def mentions(text: str) -> list:
         if text[i] != "@" or mask[i] or (i > 0 and not _may_precede(text[i - 1])):
             i += 1
             continue
-        start = end = i + 1
-        while end < len(text) and not mask[end] and _is_name_char(text[end]):
-            end += 1
-        name_end = end
-        while name_end > start and text[name_end - 1] == "-":
-            name_end -= 1
-        name = text[start:name_end]
-        if not _NAME.fullmatch(name):
+        start = i + 1
+        if start >= len(text) or mask[start] or not text[start].isalpha():
             i += 1
             continue
-        stop = name_end
-        if name_end == end and end < len(text) and text[end] == "/" and not mask[end]:
-            to = end + 1
-            while to < len(text) and not mask[to] and _is_context_char(text[to]):
-                to += 1
-            last = to
-            while last > end + 1 and text[last - 1] in ".,;:!?)-/'":
-                last -= 1
-            stop = max(last, end) if last > end + 1 else end
-        out.append((i, stop, name.lower()))
-        i = max(stop, i + 1)
+        end = start
+        while end < len(text) and not mask[end] and _is_attempt_char(text[end]):
+            end += 1
+        run = end
+        while run > start and text[run - 1] in ".,;:!?)-/'":
+            run -= 1
+        found = _address(text, start, run)
+        name = found[0] if found else text[start:run]
+        out.append((i, run, name.lower()))
+        i = max(end, i + 1)
     return out
+
+
+def _ends_mention(text: str, mask: list, at: int) -> bool:
+    """Whether a mention of a name that ends at `at` ends there, as the server reads it: what follows in
+    its run (letters, digits, `_`, `-`, `.`, `@`, `/`) is nothing, a context (`/…`) or only the
+    punctuation that ends a mention (`@dev.` is a mention of `dev`; `@devon` and `@dev-x` are not)."""
+    end = at
+    while end < len(text) and not mask[end] and _is_attempt_char(text[end]):
+        end += 1
+    rest = text[at:end]
+    return not rest or rest[0] == "/" or all(c in ".-/" for c in rest)
 
 
 def as_plain_text(text: str, names: set) -> tuple[str, int]:
@@ -1153,14 +1195,28 @@ def as_plain_text(text: str, names: set) -> tuple[str, int]:
     so it is plain text and sends the note to nobody. Returns the text and how many it changed.
 
     Only the `@` goes: no backtick is added (one next to a backtick run would merge with it and change
-    which text is code), and what follows it is a name, so nothing around it can become a mention."""
-    out, last, changed = [], 0, 0
-    for start, _, name in mentions(text):
-        if name in names:
-            out.append(text[last:start])
-            last, changed = start + 1, changed + 1
+    which text is code), and what follows it is a letter, so nothing around it can become a mention.
+
+    A name the server gave that no mention here reads as such (Python's Unicode tables count fewer
+    letters than the server's: `@रवि` reads as `@रव` here) goes all the same where the text, outside
+    code, has `@` and that name, ending as a mention ends: the server named it, and the reply must not
+    be lost for it. Never a longer name that starts with it (`@devon` for `dev`)."""
+    found = mentions(text)
+    spots = [start for start, _, name in found if name in names]
+    missed = names - {name for _, _, name in found}
+    if missed:
+        mask = _code_mask(text)
+        for i, c in enumerate(text):
+            if (c == "@" and not mask[i] and (i == 0 or _may_precede(text[i - 1])) and i not in spots
+                    and any(text[i + 1:i + 1 + len(n)].lower() == n and _ends_mention(text, mask, i + 1 + len(n))
+                            for n in missed)):
+                spots.append(i)
+    out, last = [], 0
+    for start in sorted(spots):
+        out.append(text[last:start])
+        last = start + 1
     out.append(text[last:])
-    return "".join(out), changed
+    return "".join(out), len(spots)
 
 
 _MAX_MENTIONS = 20
