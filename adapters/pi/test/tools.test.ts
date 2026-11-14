@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -160,6 +160,20 @@ test("a note with no mention goes on the global board", async () => {
     hers,
     new RegExp(`## Thread ${id} \\(global board\\)\\n[^\\n]*\\nPosted by @oscar on the global board, to everyone on the server\\. It does not name your person\\.`),
   );
+});
+
+test("every request says Relevo-Client: pi/<the version in package.json>", async () => {
+  const { version } = JSON.parse(readFileSync(join(import.meta.dirname, "..", "package.json"), "utf8"));
+  const ext = extension();
+  await ext.tool("relevo_inbox", {}, work);
+  const lines = server.admin("clients", "oscar").split("\n");
+  const mine = lines.filter((l) => l.startsWith("oscar\tpi laptop\tpi-"));
+  assert.ok(mine.length > 0, lines.join("\n"));
+  for (const line of mine) {
+    const [, , , , client, reported] = line.split("\t");
+    assert.equal(client, "pi");
+    assert.equal(reported, version);
+  }
 });
 
 test("inbox shows the team, the session's context, and others' text as untrusted", async () => {

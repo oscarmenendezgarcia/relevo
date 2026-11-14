@@ -49,9 +49,10 @@ fn check_token(conn: &Connection, caller: &Caller) -> Result<(), ApiError> {
 /// sessions not seen for 15 minutes (this one's included: they lapsed before it came back),
 /// forgets sessions not seen for 7 days, then those of the token beyond `MAX_SESSIONS_PER_TOKEN`.
 ///
-/// With `arrived`, the request has just arrived and records the context it sent (the latest one
-/// wins). Otherwise it is a waiting request answering, whose context may be older than one the
-/// session sent since: it keeps the session's context.
+/// With `arrived`, the request has just arrived and records the context and the client it sent
+/// (the latest request wins, saying nothing included). Otherwise it is a waiting request
+/// answering, whose context may be older than one the session sent since: it keeps the
+/// session's.
 pub fn touch(
     conn: &Connection,
     app: &App,
@@ -68,10 +69,14 @@ pub fn touch(
         )?
         .query_row(params![caller.token_id, caller.session], |r| r.get(0))?;
     let (id, context): (i64, Option<String>) = conn.query_row(
-        "INSERT INTO sessions (token_id, client_id, person_id, context, last_seen)
-         VALUES (?1, ?2, ?3, ?4, ?5)
+        "INSERT INTO sessions (token_id, client_id, person_id, context, last_seen, client,
+                               client_inferred)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?7, ?8)
          ON CONFLICT (token_id, client_id)
          DO UPDATE SET context = CASE WHEN ?6 THEN excluded.context ELSE context END,
+                       client = CASE WHEN ?6 THEN excluded.client ELSE client END,
+                       client_inferred = CASE WHEN ?6 THEN excluded.client_inferred
+                                         ELSE client_inferred END,
                        last_seen = excluded.last_seen
          RETURNING id, context",
         params![
@@ -80,7 +85,9 @@ pub fn touch(
             caller.person_id,
             caller.context,
             now,
-            arrived
+            arrived,
+            caller.client,
+            caller.client_inferred
         ],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;

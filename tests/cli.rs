@@ -73,6 +73,169 @@ async fn sessions_lists_label_session_context_and_last_seen() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+#[tokio::test]
+async fn clients_lists_each_sessions_client_against_the_servers_version_outdated_first() {
+    let dir = std::env::temp_dir().join(db::random_id("relevo-cli-"));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("relevo.db");
+    let path = path.to_str().unwrap();
+    let now = db::now_unix();
+    let server = env!("CARGO_PKG_VERSION");
+    let conn = db::open(path).unwrap();
+    let ana = db::invite(&conn, "ana", "Ana", None, "Claude Code", now).unwrap();
+    let bob = db::invite(&conn, "bob", "Bob", None, "pi", now).unwrap();
+    let carl = db::invite(&conn, "carl", "Carl", None, "Hermes", now).unwrap();
+    let app = App::new(conn, Clock::system(), 5);
+    let current = format!("pi/{server}");
+    // (token, session, context, Relevo-Client, User-Agent), in the order they are seen.
+    for (token, session, context, client, agent) in [
+        (
+            &bob.secret,
+            Some("pi-term-01"),
+            None,
+            Some(current.as_str()),
+            None,
+        ),
+        (
+            &ana.secret,
+            Some("mcp_new001"),
+            Some("pagos-api"),
+            Some("mcp/999.0.0"),
+            None,
+        ),
+        (
+            &carl.secret,
+            Some("hermes-gw-1"),
+            None,
+            None,
+            Some("python-httpx/0.28.1"),
+        ),
+        (&ana.secret, None, None, None, Some("relevo/0.0.1")),
+        (
+            &bob.secret,
+            Some("pi-term-02"),
+            None,
+            Some("pi/0.0.2"),
+            None,
+        ),
+    ] {
+        let mut req = Request::get("/api/inbox").header("authorization", format!("Bearer {token}"));
+        for (name, value) in [
+            ("relevo-session", session),
+            ("relevo-context", context),
+            ("relevo-client", client),
+            ("user-agent", agent),
+        ] {
+            if let Some(value) = value {
+                req = req.header(name, value);
+            }
+        }
+        let res = api::router(app.clone())
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert!(res.status().is_success());
+    }
+
+    let out = relevo(path, &["clients"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 6, "{out}");
+    let rows: Vec<Vec<&str>> = lines[..5].iter().map(|l| l.split('\t').collect()).collect();
+    let without_time: Vec<Vec<&str>> = rows
+        .iter()
+        .map(|r| {
+            assert!(r[6].ends_with('Z'), "{out}");
+            [&r[..6], &r[7..]].concat()
+        })
+        .collect();
+    assert_eq!(
+        without_time,
+        vec![
+            vec![
+                "ana",
+                "Claude Code",
+                "default",
+                "general",
+                "mcp",
+                "0.0.1?",
+                "outdated"
+            ],
+            vec![
+                "bob",
+                "pi",
+                "pi-term-02",
+                "general",
+                "pi",
+                "0.0.2",
+                "outdated"
+            ],
+            vec![
+                "carl",
+                "Hermes",
+                "hermes-gw-1",
+                "general",
+                "unknown",
+                "-",
+                "unknown"
+            ],
+            vec![
+                "ana",
+                "Claude Code",
+                "mcp_new001",
+                "pagos-api",
+                "mcp",
+                "999.0.0",
+                "newer"
+            ],
+            vec![
+                "bob",
+                "pi",
+                "pi-term-01",
+                "general",
+                "pi",
+                server,
+                "current"
+            ],
+        ],
+        "{out}"
+    );
+    assert_eq!(
+        lines[5],
+        format!("1 session on {server}, 2 outdated, 1 unknown, 1 newer")
+    );
+
+    // Only what is outdated or unknown; the summary still counts them all.
+    let out = relevo(path, &["clients", "--outdated"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 4, "{out}");
+    assert!(
+        lines[..3]
+            .iter()
+            .all(|l| l.ends_with("\toutdated") || l.ends_with("\tunknown"))
+    );
+    assert_eq!(
+        lines[3],
+        format!("1 session on {server}, 2 outdated, 1 unknown, 1 newer")
+    );
+    // One person's.
+    let out = relevo(path, &["clients", "bob"]);
+    assert_eq!(out.lines().count(), 3, "{out}");
+    assert!(
+        out.ends_with(&format!("1 session on {server}, 1 outdated, 0 unknown\n")),
+        "{out}"
+    );
+
+    // `sessions` says the client too, last.
+    let out = relevo(path, &["sessions", "ana"]);
+    let mut clients: Vec<&str> = out.lines().map(|l| l.split('\t').nth(5).unwrap()).collect();
+    clients.sort();
+    assert_eq!(clients, ["mcp/0.0.1?", "mcp/999.0.0"], "{out}");
+    let out = relevo(path, &["sessions", "carl"]);
+    assert!(out.trim_end().ends_with("\tunknown"), "{out}");
+    drop(app);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn a_database_from_an_older_block_is_refused_with_a_clear_message() {
     let dir = std::env::temp_dir().join(db::random_id("relevo-cli-"));
@@ -148,7 +311,7 @@ fn without_relevo_db_an_admin_command_never_creates_a_database_here() {
 }
 
 #[test]
-fn only_serve_migrates_a_layout_5_6_or_7_database_and_check_db_says_so() {
+fn only_serve_migrates_a_layout_5_6_7_or_8_database_and_check_db_says_so() {
     for (dump, made_by) in [
         (
             include_str!("fixtures/layout5.sql"),
@@ -156,6 +319,10 @@ fn only_serve_migrates_a_layout_5_6_or_7_database_and_check_db_says_so() {
         ),
         (include_str!("fixtures/layout6.sql"), "relevo 0.3.x"),
         (include_str!("fixtures/layout7.sql"), "relevo 0.4.x"),
+        (
+            include_str!("fixtures/layout8.sql"),
+            "a development build of relevo 0.5.0",
+        ),
     ] {
         let dir = std::env::temp_dir().join(db::random_id("relevo-cli-"));
         std::fs::create_dir(&dir).unwrap();
@@ -305,6 +472,13 @@ fn relevo_is_the_servers_own_name_and_in_no_list() {
         assert!(err.contains("the server's own name"), "{args:?}: {err}");
     }
     assert!(!relevo(path, &["people"]).contains("relevo"));
+    assert!(!relevo(path, &["clients"]).contains("relevo"));
+    let out = Command::new(env!("CARGO_BIN_EXE_relevo"))
+        .args(["--db", path, "clients", "relevo"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("the server's own name"));
     assert!(!relevo(path, &["token", "list"]).contains("relevo"));
     // `serve` takes the switch.
     assert!(relevo(path, &["serve", "--help"]).contains("--no-release-notes"));

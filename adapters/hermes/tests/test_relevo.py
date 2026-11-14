@@ -1596,6 +1596,18 @@ class Sessions(Base):
         answer = tools.relevo_send({"thread": opened["thread"], "text": "Bob does."})
         self.assertIn("Another of your person's sessions holds this thread: step aside", answer)
 
+    async def test_every_request_says_relevo_client_hermes_and_the_plugin_version(self):
+        """Relevo-Client: hermes/<the version in plugin.yaml>, from the gateway and from the tools."""
+        version = re.search(r"^version:\s*(\S+)", (_PLUGIN / "plugin.yaml").read_text(), re.M).group(1)
+        a = self.make_adapter()
+        await a.connect()
+        tools.relevo_inbox({})
+        rows = [line.split("\t") for line in SERVER.admin("clients", "oscar").splitlines() if "\t" in line]
+        by_session = {row[2]: row for row in rows}
+        for session in (a.settings.session, client.resolve_settings().session):
+            self.assertIn(session, by_session, rows)
+            self.assertEqual(by_session[session][4:6], ["hermes", version])
+
     async def test_a_claim_is_a_state_not_a_note(self):
         """send(thread, claim: true) with no text: the thread is this session's, nothing is written."""
         opened = self.ana.send(to=["oscar"], text="Can you rerun the refunds export?")

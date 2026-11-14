@@ -36,20 +36,9 @@ _running = threading.Lock()
 RETRY_DELAYS: tuple = (10, 60, 300, 1800)
 
 
-def plugin_version(folder: Path) -> Optional[str]:
-    """The version plugin.yaml in `folder` says (its top-level `version:`), None when there is none."""
-    try:
-        text = (folder / "plugin.yaml").read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
-    for line in text.splitlines():
-        if line.startswith("version:"):
-            return line.split(":", 1)[1].strip().strip("\"'") or None
-    return None
-
-
+plugin_version = client.plugin_version
 # The version this process loaded: another one in FOLDER runs only once the gateway restarts.
-LOADED = plugin_version(FOLDER)
+LOADED = client.VERSION
 # The versions in the folder the person was told of (or is being told of right now).
 _told: set = set()
 _notices: set = set()

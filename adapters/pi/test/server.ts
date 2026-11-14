@@ -48,6 +48,8 @@ export interface TestServer {
   invite(handle: string, about?: string, label?: string): string;
   /** Runs `relevo team <args…>` on the server's database: `team("add", "backend", "--title", "Backend")`, `team("join", "backend", "ana")`. */
   team(...args: string[]): void;
+  /** Runs `relevo <args…>` on the server's database and returns what it printed: `admin("clients", "ana")`. */
+  admin(...args: string[]): string;
   stop(): Promise<void>;
 }
 
@@ -119,6 +121,9 @@ export async function startServer(
     },
     team(...args) {
       execFileSync(bin, ["team", ...args, "--db", db], { stdio: "ignore" });
+    },
+    admin(...args) {
+      return execFileSync(bin, [...args, "--db", db], { encoding: "utf8" });
     },
     async stop() {
       if (proc.exitCode === null) {

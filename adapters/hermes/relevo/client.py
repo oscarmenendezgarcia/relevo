@@ -23,6 +23,25 @@ from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
+
+def plugin_version(folder: Path) -> Optional[str]:
+    """The version plugin.yaml in `folder` says (its top-level `version:`), None when there is none."""
+    try:
+        text = (folder / "plugin.yaml").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    for line in text.splitlines():
+        if line.startswith("version:"):
+            return line.split(":", 1)[1].strip().strip("\"'") or None
+    return None
+
+
+# The version of this plugin that this process loaded (its folder may hold a newer one since: see
+# update.py), and what every request says of this client (`Relevo-Client`, docs/protocol.md). Without
+# a version the header is left out, and the server takes the client as unknown.
+VERSION = plugin_version(Path(__file__).resolve().parent)
+CLIENT = f"hermes/{VERSION}" if VERSION else None
+
 WAIT_SECONDS = 55
 # A waiting inbox answers within `wait`; leave room for the network on top.
 _WAIT_SLACK = 20
@@ -422,6 +441,8 @@ class Api:
             "Relevo-Mentions": "1",
             "Accept": "application/json",
         }
+        if CLIENT:
+            headers["Relevo-Client"] = CLIENT
         if self.settings.context:
             headers["Relevo-Context"] = self.settings.context
         return {"method": method, "url": self.settings.url + path, "headers": headers,

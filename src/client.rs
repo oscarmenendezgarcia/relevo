@@ -9,6 +9,11 @@ use serde_json::Value;
 
 use crate::config::Config;
 
+/// What every request says of its client (`Relevo-Client`, docs/protocol.md): `relevo mcp`, and
+/// the binary's other commands that talk to the server (`connect`, `update`, `web`), all one
+/// binary of this version.
+pub const CLIENT: &str = concat!("mcp/", env!("CARGO_PKG_VERSION"));
+
 /// How long an ordinary request may take.
 const TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -68,8 +73,14 @@ impl Client {
     ) -> anyhow::Result<Self> {
         // reqwest is built without a default TLS provider; ring is the one this binary carries.
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let builder =
-            || reqwest::Client::builder().user_agent(concat!("relevo/", env!("CARGO_PKG_VERSION")));
+        let builder = || {
+            reqwest::Client::builder()
+                .user_agent(concat!("relevo/", env!("CARGO_PKG_VERSION")))
+                .default_headers(reqwest::header::HeaderMap::from_iter([(
+                    reqwest::header::HeaderName::from_static("relevo-client"),
+                    reqwest::header::HeaderValue::from_static(CLIENT),
+                )]))
+        };
         let http = match &config.cert {
             // That certificate alone, never the system's authorities.
             Some(pem) => builder()

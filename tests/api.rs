@@ -1665,6 +1665,170 @@ async fn the_same_session_id_under_two_tokens_is_two_sessions() {
     );
 }
 
+/// What each of `who`'s sessions keeps of its client: session id (`None`: default), client,
+/// whether it was inferred.
+fn clients_of(t: &Team, who: &str) -> Vec<(Option<String>, Option<String>, bool)> {
+    let mut out: Vec<_> = db::list_sessions(&t.app.db(), Some(who), T0)
+        .unwrap()
+        .into_iter()
+        .map(|s| (s.session, s.client, s.client_inferred))
+        .collect();
+    out.sort();
+    out
+}
+
+/// A session of `who` that sends these headers too.
+fn agent_with(t: &Team, who: &str, id: &str, extra: &[(&str, &str)]) -> Agent {
+    let mut agent = t.agent(who, id, "");
+    agent
+        .headers
+        .extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+    agent
+}
+
+#[tokio::test]
+async fn each_session_keeps_the_client_its_latest_request_reported() {
+    let t = team(&["ana", "bob"]);
+    let some = |s: &str| Some(s.to_string());
+    // Said with `Relevo-Client`: kept as said, for that session alone.
+    let pi = agent_with(&t, "ana", "pi-session-1", &[("relevo-client", "pi/0.5.0")]);
+    pi.inbox().await;
+    let hermes = agent_with(
+        &t,
+        "ana",
+        "hermes-sess-1",
+        &[("relevo-client", "hermes/0.5.1")],
+    );
+    hermes.inbox().await;
+    assert_eq!(
+        clients_of(&t, "ana"),
+        [
+            (some("hermes-sess-1"), some("hermes/0.5.1"), false),
+            (some("pi-session-1"), some("pi/0.5.0"), false),
+        ]
+    );
+    // The latest request wins, a `send` as an `inbox`.
+    let pi = agent_with(
+        &t,
+        "ana",
+        "pi-session-1",
+        &[("relevo-client", "pi/0.5.2-rc.1+abc")],
+    );
+    pi.ok(json!({ "text": "@bob Hi" })).await;
+    assert_eq!(clients_of(&t, "ana")[1].1, some("pi/0.5.2-rc.1+abc"));
+
+    // A `relevo/<version>` User-Agent without the header is `relevo mcp` before 0.5.0: inferred.
+    let old = agent_with(&t, "bob", "mcp_old0001", &[("user-agent", "relevo/0.4.4")]);
+    old.inbox().await;
+    // The header wins over the User-Agent.
+    let new = agent_with(
+        &t,
+        "bob",
+        "mcp_new0001",
+        &[
+            ("user-agent", "relevo/0.5.0"),
+            ("relevo-client", "mcp/0.5.0"),
+        ],
+    );
+    new.inbox().await;
+    // Any other User-Agent says nothing: node's fetch, httpx, curl.
+    for (i, ua) in [
+        "node",
+        "python-httpx/0.28.1",
+        "curl/8.5.0",
+        "relevo/",
+        "relevo/0.4.4 x",
+    ]
+    .iter()
+    .enumerate()
+    {
+        agent_with(&t, "bob", &format!("other-ua-{i}"), &[("user-agent", ua)])
+            .inbox()
+            .await;
+    }
+    let bob = clients_of(&t, "bob");
+    assert_eq!(bob[0], (some("mcp_new0001"), some("mcp/0.5.0"), false));
+    assert_eq!(bob[1], (some("mcp_old0001"), some("mcp/0.4.4"), true));
+    assert!(bob[2..].iter().all(|(_, c, _)| c.is_none()), "{bob:?}");
+
+    // A malformed value is ignored, never an error: the request works, and says nothing (or what
+    // its User-Agent says).
+    let long_name = format!("{}/1.0", "a".repeat(17));
+    let long_version = format!("pi/{}", "1".repeat(33));
+    for bad in [
+        "Pi/0.5.0",
+        "pi",
+        "pi/",
+        "/0.5.0",
+        "0pi/1",
+        "pi/0.5.0 beta",
+        "pi/0.5/0",
+        "pi_x/1",
+        "pi/0.5.0é",
+        &long_name,
+        &long_version,
+    ] {
+        let agent = agent_with(&t, "bob", "malformed-1", &[("relevo-client", bad)]);
+        let (status, v) = agent.get("/api/inbox").await;
+        assert_eq!(status, StatusCode::OK, "{bad}: {v}");
+        let kept = clients_of(&t, "bob");
+        let kept = kept.iter().find(|s| s.0 == some("malformed-1")).unwrap();
+        assert_eq!(kept.1, None, "{bad}");
+        let agent = agent_with(
+            &t,
+            "bob",
+            "malformed-2",
+            &[("relevo-client", bad), ("user-agent", "relevo/0.4.3")],
+        );
+        agent.inbox().await;
+        let kept = clients_of(&t, "bob");
+        let kept = kept.iter().find(|s| s.0 == some("malformed-2")).unwrap();
+        assert_eq!(kept.1, some("mcp/0.4.3"), "{bad}");
+        assert!(kept.2);
+    }
+    // The longest well-formed one.
+    let longest = format!("{}/{}", "a".repeat(16), "1".repeat(32));
+    agent_with(&t, "bob", "longest-1", &[("relevo-client", &longest)])
+        .inbox()
+        .await;
+    assert!(
+        clients_of(&t, "bob")
+            .iter()
+            .any(|s| s.1.as_deref() == Some(longest.as_str()))
+    );
+
+    // No header at all (the default session here) keeps working, and is unknown.
+    t.inbox("ana").await;
+    assert_eq!(clients_of(&t, "ana")[0], (None, None, false));
+    // A session's latest request decides, also when it says nothing.
+    pi.inbox().await;
+    t.agent("ana", "pi-session-1", "").inbox().await;
+    assert_eq!(
+        clients_of(&t, "ana")[2],
+        (some("pi-session-1"), None, false)
+    );
+}
+
+#[tokio::test]
+async fn a_waiting_request_answering_keeps_the_client_a_newer_request_reported() {
+    let t = team(&["ana", "bob"]);
+    let old = agent_with(&t, "bob", "term-0001", &[("relevo-client", "pi/0.5.0")]);
+    let waiting = tokio::spawn(async move { old.inbox_at("/api/inbox?wait=30").await });
+    // Until it waits.
+    for _ in 0..100 {
+        if !clients_of(&t, "bob").is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    agent_with(&t, "bob", "term-0001", &[("relevo-client", "pi/0.5.1")])
+        .inbox()
+        .await;
+    t.ok("ana", json!({ "text": "@bob Wake up" })).await;
+    waiting.await.unwrap();
+    assert_eq!(clients_of(&t, "bob")[0].1.as_deref(), Some("pi/0.5.1"));
+}
+
 #[tokio::test]
 async fn sessions_not_seen_for_7_days_are_forgotten() {
     let t = team(&["ana", "bob"]);

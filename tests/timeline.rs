@@ -812,7 +812,8 @@ async fn a_person_invited_later_and_one_deactivated_keep_to_their_own_threads() 
 }
 
 /// A layout-7 database made before the timeline's tables (by relevo 0.4.0) gets them when the
-/// server moves it to layout 8, which reads `thread_closes` only once `SCHEMA` made it.
+/// server moves it to layout 8, which reads `thread_closes` only once `SCHEMA` made it (and on to
+/// layout 9).
 #[test]
 fn a_layout_7_database_without_the_timeline_tables_gets_them_when_it_migrates() {
     let dir = std::env::temp_dir().join(db::random_id("relevo-timeline-"));
@@ -824,6 +825,8 @@ fn a_layout_7_database_without_the_timeline_tables_gets_them_when_it_migrates() 
         conn.execute_batch(
             "DROP INDEX participants_timeline; DROP INDEX notes_by_thread_author;
              DROP TABLE note_contexts; DROP TABLE thread_closes;
+             ALTER TABLE sessions DROP COLUMN client_inferred;
+             ALTER TABLE sessions DROP COLUMN client;
              PRAGMA user_version = 7;",
         )
         .unwrap();
@@ -841,7 +844,7 @@ fn a_layout_7_database_without_the_timeline_tables_gets_them_when_it_migrates() 
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     drop(conn);
     std::fs::remove_dir_all(&dir).unwrap();
 }
