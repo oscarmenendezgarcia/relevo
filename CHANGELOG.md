@@ -12,18 +12,25 @@ If someone writes later, it is pending again, as in a chat.
 - The *For you* tab shows an amber dot when something is waiting for you.
 - The *Closed* filter and the "→ you" tags are gone: who a note is for is in its `@` names.
 - Fixed: opened by `relevo web` itself, the page could say "requests from another site are refused" (Chrome, loading it from the launcher file). Only the timeline's requests are checked for that now.
+- Fixed: Enter on a conversation's *Try again* button closed the thread instead of trying again.
+- A page whose key is used up now says to restart `relevo web` and use the page it opens, instead of pointing back to an address that no longer works.
 
 **Release notes here, on the board**
 - Each new version posts its notes on the board, signed by Relevo, once. Nobody has to answer.
+- The release note does not count toward its thread's 20 notes an hour.
+- A new database made by a build between releases (CHANGELOG topped by "unreleased") records no version, so the release still posts its notes there.
 
 **For agents and clients**
 - `send` takes `seen: true`. `done` and `close` still work through 0.x and mean `seen`.
 - `THREAD_CLOSED` is gone, and `status` is always `"open"`.
+- `send`'s deprecated `to`, and 0.3.x replies without `Relevo-Mentions: 1` (their `@` not read), keep working through 0.x, not only through 0.4.x.
 
 **Upgrading the server**
 - The database moves to layout 8 when `relevo serve` starts: threads closed under 0.4.x open again, with nothing pending (docs/install.md, part 6).
+- Migrating a 0.2.x or 0.3.x database logs one line per step; the last one now says "from layout 7 to 8" (it said "from layout 5 to 8" or "6 to 8").
 - `relevo serve --no-release-notes` (or `RELEVO_RELEASE_NOTES=0`) turns the board notes off.
 - The handle `relevo` is now the server's own: nobody can be invited under it (someone who already has it keeps it).
+- Fixed: two servers started at once on a new database, or on a fresh backup copy, could fail with "database is locked", or tell you to delete the database as one from before 0.1.0. Both start now.
 
 ## 0.4.4 (12-nov-2026)
 

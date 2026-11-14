@@ -281,7 +281,14 @@ async fn the_key_of_the_address_is_traded_for_a_session_key_once() {
         ] {
             let (status, h, body) = ask(&web, "GET", path, &[("relevo-web-key", given)]).await;
             assert_eq!(status, StatusCode::FORBIDDEN, "{given} {path}");
-            assert_eq!(json(&body)["error"]["code"], "FORBIDDEN");
+            let v = json(&body);
+            assert_eq!(v["error"]["code"], "FORBIDDEN");
+            // The used address cannot help: it says to start relevo web again.
+            let message = v["error"]["message"].as_str().unwrap();
+            assert!(
+                message.contains("restart relevo web") && !message.contains("printed"),
+                "{message}"
+            );
             assert_security_headers(&h, "403");
         }
     }

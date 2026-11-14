@@ -456,30 +456,75 @@ UPDATE threads SET status = 'open' WHERE status = 'closed';
 /// refused: only `relevo serve` migrates it (`open_migrating`), so that an admin command never
 /// changes the layout behind the owner's back, before a backup. `":memory:"` works for tests.
 pub fn open(path: &str) -> Result<Connection> {
-    open_with(path, false)
+    open_with(path, false, OPEN_PATIENCE)
 }
 
 /// `open`, migrating a database of layout 5, 6 or 7 in place: for `relevo serve`.
 pub fn open_migrating(path: &str) -> Result<Connection> {
-    open_with(path, true)
+    open_with(path, true, OPEN_PATIENCE)
 }
 
-fn open_with(path: &str, migrate: bool) -> Result<Connection> {
+/// How long opening waits, in all, for other processes opening the same file at the same time
+/// (two servers started at once on a new database, or on a copy not yet in WAL mode).
+const OPEN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(15);
+
+fn open_with(path: &str, migrate: bool, patience: std::time::Duration) -> Result<Connection> {
     create_private(path).with_context(|| format!("creating database {path}"))?;
+    // SQLite answers "database is locked" at once, without waiting, to a switch to WAL mode while
+    // another process reads the file, and in a few other moments of another one making it or
+    // switching it: an attempt that met one is tried again (it wrote nothing: its transaction
+    // was rolled back), with a new connection, for a while.
+    // Every wait, the busy timeout's included, ends by the deadline.
+    let deadline = std::time::Instant::now() + patience;
+    let mut pause = std::time::Duration::from_millis(5);
+    loop {
+        match try_open(path, migrate, deadline) {
+            Err(e) if busy(&e) && !left(deadline).is_zero() => {
+                std::thread::sleep(pause.min(left(deadline)));
+                pause = (pause * 2).min(std::time::Duration::from_millis(100));
+            }
+            done => return done,
+        }
+    }
+}
+
+/// The time left until `deadline`, zero past it.
+fn left(deadline: std::time::Instant) -> std::time::Duration {
+    deadline.saturating_duration_since(std::time::Instant::now())
+}
+
+/// Waits for another process's lock at most until `deadline` (and, then, not at all).
+fn wait_until(conn: &Connection, deadline: std::time::Instant) -> rusqlite::Result<()> {
+    conn.busy_timeout(left(deadline))
+}
+
+/// Whether `e` is SQLite's "database is locked".
+fn busy(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        c.downcast_ref::<rusqlite::Error>()
+            .and_then(rusqlite::Error::sqlite_error_code)
+            == Some(rusqlite::ErrorCode::DatabaseBusy)
+    })
+}
+
+/// One attempt of `open_with`, waiting for other processes' locks until `deadline` at most.
+fn try_open(path: &str, migrate: bool, deadline: std::time::Instant) -> Result<Connection> {
     let mut conn = Connection::open(path).with_context(|| format!("opening database {path}"))?;
-    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    wait_until(&conn, deadline)?;
     // A layout it refuses is left as it is: found before anything is written, WAL mode included.
     let refuses = |layout| matches!(layout, Layout::Migrates(_)) && !migrate;
     let found = layout(&conn, path)?;
     if refuses(found) {
         bail!(no_migration(path, found));
     }
+    wait_until(&conn, deadline)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     // Off while migrating: layout 7 makes the threads table again, which the others refer to.
     // (The pragma does nothing inside a transaction, so it is set around it.)
     conn.pragma_update(None, "foreign_keys", "OFF")?;
     // One transaction, so a process opening a new file at the same time sees it either empty or
     // with its version set, and one opening an old file sees it either old or migrated.
+    wait_until(&conn, deadline)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     // Said here, logged once the transaction has committed: a migration that did not happen must
     // not be announced as if it had.
@@ -491,11 +536,11 @@ fn open_with(path: &str, migrate: bool) -> Result<Connection> {
         Layout::Migrates(old) => {
             if old == 5 {
                 tx.execute_batch(MIGRATE_FROM_5)
-                    .with_context(|| format!("migrating database {path} from layout 5"))?;
+                    .with_context(|| format!("migrating database {path} from layout 5 to 6"))?;
             }
             if old <= 6 {
                 tx.execute_batch(MIGRATE_FROM_6)
-                    .with_context(|| format!("migrating database {path} from layout 6"))?;
+                    .with_context(|| format!("migrating database {path} from layout 6 to 7"))?;
                 let broken = broken_thread_refs(&tx)?;
                 if !broken.is_empty() {
                     let rows: Vec<String> = broken
@@ -505,14 +550,14 @@ fn open_with(path: &str, migrate: bool) -> Result<Connection> {
                         })
                         .collect();
                     bail!(
-                        "migrating database {path} from layout 6: {} broken references: {}",
+                        "migrating database {path} from layout 6 to 7: {} broken references: {}",
                         broken.len(),
                         rows.join("; ")
                     );
                 }
             }
             tx.execute_batch(MIGRATE_FROM_7).with_context(|| {
-                format!("migrating database {path} from layout {old} to {SCHEMA_VERSION}")
+                format!("migrating database {path} from layout 7 to {SCHEMA_VERSION}")
             })?;
             from = Some(old);
         }
@@ -520,46 +565,53 @@ fn open_with(path: &str, migrate: bool) -> Result<Connection> {
     }
     tx.execute_batch(SCHEMA)?;
     make_system_person(&tx, now_unix())?;
-    // A new database has no release to announce: it starts at this version (see `release`).
+    // A new database made by a release has no release to announce: it starts at this version.
+    // One made by a build between releases records nothing (see `release::record_new`).
     if new {
-        tx.execute(
-            "INSERT OR IGNORE INTO meta (key, value) VALUES ('announced', ?1)",
-            [env!("CARGO_PKG_VERSION")],
-        )?;
+        crate::release::record_new(&tx, env!("CARGO_PKG_VERSION"), crate::release::CHANGELOG)?;
     }
     // How many closed threads layout 8 opens.
     let mut opened = 0;
-    if let Some(old) = from {
+    if from.is_some() {
         opened = tx.query_row(
             "SELECT count(*) FROM threads WHERE status = 'closed'",
             [],
             |r| r.get::<_, i64>(0),
         )?;
         tx.execute_batch(OPEN_CLOSED).with_context(|| {
-            format!("migrating database {path} from layout {old} to {SCHEMA_VERSION}")
+            format!("migrating database {path} from layout 7 to {SCHEMA_VERSION}")
         })?;
     }
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
-    if from == Some(5) {
-        tracing::info!(db = path, "migrated the database from layout 5 to 6");
-    }
-    if from.is_some_and(|old| old <= 6) {
-        tracing::info!(
-            db = path,
-            "migrated the database from layout 6 to 7: team threads are global ones now"
-        );
-    }
     if let Some(old) = from {
-        tracing::info!(
-            db = path,
-            opened,
-            "migrated the database from layout {old} to {SCHEMA_VERSION}: threads no longer \
-             close; opened {opened} closed threads, handled by everyone they name"
-        );
+        for line in migrated(old, opened) {
+            tracing::info!(db = path, "{line}");
+        }
     }
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    // Open: from now on, each statement waits for another process's lock as long as it needs.
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     Ok(conn)
+}
+
+/// What a migration from layout `old` logs, a line per step, once it has committed.
+fn migrated(old: i64, opened: i64) -> Vec<String> {
+    let mut lines = Vec::new();
+    if old == 5 {
+        lines.push("migrated the database from layout 5 to 6".to_string());
+    }
+    if old <= 6 {
+        lines.push(
+            "migrated the database from layout 6 to 7: team threads are global ones now"
+                .to_string(),
+        );
+    }
+    lines.push(format!(
+        "migrated the database from layout 7 to {SCHEMA_VERSION}: threads no longer close; \
+         opened {opened} closed threads, handled by everyone they name"
+    ));
+    lines
 }
 
 /// The tables that refer to `threads`: the only references layout 6 to 7 can break, since it makes
@@ -628,7 +680,15 @@ impl Layout {
 
 /// The layout of the database `conn` has open, or why this version refuses it.
 fn layout(conn: &Connection, path: &str) -> Result<Layout> {
-    let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    // The version and the tables in one statement, so of the same moment: read apart, a file
+    // another process made in between would show its tables and not yet its version, as a file
+    // of before 0.1.0 does.
+    let (version, tables): (i64, i64) = conn.query_row(
+        "SELECT (SELECT user_version FROM pragma_user_version),
+                (SELECT count(*) FROM sqlite_master)",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
     if version == SCHEMA_VERSION {
         return Ok(Layout::Current);
     }
@@ -638,7 +698,6 @@ fn layout(conn: &Connection, path: &str) -> Result<Layout> {
     if (5..=7).contains(&version) {
         return Ok(Layout::Migrates(version));
     }
-    let tables: i64 = conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))?;
     if tables > 0 {
         bail!(
             "database {path} was made by an older version of relevo (before 0.1.0), which \
@@ -1347,6 +1406,89 @@ mod tests {
         }
         drop(conn);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Opens `path` from `n` threads at once, each with its own connection, as servers started
+    /// together: every one must get it, at this layout.
+    fn open_at_once(path: &std::path::Path, n: usize) {
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(n));
+        let opens: Vec<_> = (0..n)
+            .map(|_| {
+                let gate = gate.clone();
+                let path = path.to_str().unwrap().to_string();
+                std::thread::spawn(move || {
+                    gate.wait();
+                    open_migrating(&path).map(drop)
+                })
+            })
+            .collect();
+        for open in opens {
+            if let Err(e) = open.join().unwrap() {
+                panic!("{}: {e:#}", path.display());
+            }
+        }
+        assert_eq!(check(path.to_str().unwrap()).unwrap(), Layout::Current);
+    }
+
+    #[test]
+    fn servers_starting_at_once_on_a_new_file_all_open_it() {
+        let dir = std::env::temp_dir().join(random_id("relevo-test-"));
+        std::fs::create_dir(&dir).unwrap();
+        for round in 0..20 {
+            open_at_once(&dir.join(format!("new-{round}.db")), 6);
+        }
+        // A copy not in WAL mode (as `relevo backup` writes one), opened at once.
+        let source = dir.join("source.db");
+        let conn = open(source.to_str().unwrap()).unwrap();
+        invite(&conn, "ana", "Ana", None, "laptop", 0).unwrap();
+        for round in 0..20 {
+            let copy = dir.join(format!("copy-{round}.db"));
+            conn.execute("VACUUM INTO ?1", [copy.to_str().unwrap()])
+                .unwrap();
+            open_at_once(&copy, 6);
+        }
+        drop(conn);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn opening_waits_for_a_held_lock_no_longer_than_its_patience() {
+        let dir = std::env::temp_dir().join(random_id("relevo-test-"));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("held.db");
+        let path = path.to_str().unwrap();
+        drop(open(path).unwrap());
+        // Another process holds the database, for longer than the opener will wait.
+        let holder = Connection::open(path).unwrap();
+        holder.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let patience = std::time::Duration::from_millis(400);
+        let start = std::time::Instant::now();
+        let err = open_with(path, false, patience).unwrap_err();
+        let took = start.elapsed();
+        assert!(busy(&err), "{err:#}");
+        assert!(took >= patience, "{took:?}");
+        assert!(
+            took < patience + std::time::Duration::from_millis(500),
+            "{took:?}"
+        );
+        holder.execute_batch("ROLLBACK").unwrap();
+        drop(holder);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_migration_logs_each_step_once() {
+        let steps = |old| -> Vec<String> {
+            migrated(old, 2)
+                .iter()
+                .map(|l| l.split(':').next().unwrap().to_string())
+                .collect()
+        };
+        let line = |from, to| format!("migrated the database from layout {from} to {to}");
+        assert_eq!(steps(5), [line(5, 6), line(6, 7), line(7, 8)]);
+        assert_eq!(steps(6), [line(6, 7), line(7, 8)]);
+        assert_eq!(steps(7), [line(7, 8)]);
+        assert!(migrated(7, 2)[0].contains("opened 2 closed threads"));
     }
 
     #[test]
