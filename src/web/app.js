@@ -199,7 +199,8 @@ function preview(text) {
     if (children.length) children.push({ t: 'text', text: ' ' });
     if (b.t === 'pre') {
       const lines = b.text.split('\n');
-      children.push({ t: 'code', text: lines[0] + (lines.length > 1 ? '…' : '') });
+      // Its first line only; the row's own clamp says when there is more (two '…' read as a typo).
+      children.push({ t: 'code', text: lines[0] });
     } else {
       b.children.forEach((c) => children.push(flat(c)));
     }
@@ -304,13 +305,20 @@ const MENTIONS_SHOWN = 3;
 /// @mentions and all, as one paragraph the page clamps to two lines, without a heading's #, and
 /// ending in '…' when the server cut it; a run of more than three @mentions it starts with shows
 /// the first three and '+N', so the two lines still say what it is about.
+/// The @mentions a note starts with (from its first line on), as written, and what follows them.
+function leadingMentions(text) {
+  const { lines, first, line } = titleLine(text);
+  let rest = first < 0 ? '' : [line].concat(lines.slice(first + 1)).join('\n');
+  const run = [];
+  for (let m; (m = rest.match(LEADING_MENTION)); rest = rest.slice(m[0].length)) run.push(m[0].trim().replace(/[,:;]+$/, ''));
+  return { run, rest };
+}
+
 function rowText(text, truncated, open) {
   if (open) return text;
   const { lines, first, line } = titleLine(text);
   if (first < 0) return truncated ? '…' : '';
-  let rest = [line].concat(lines.slice(first + 1)).join('\n');
-  const run = [];
-  for (let m; (m = rest.match(LEADING_MENTION)); rest = rest.slice(m[0].length)) run.push(m[0].trim().replace(/[,:;]+$/, ''));
+  const { run, rest } = leadingMentions(text);
   const head = run.length > MENTIONS_SHOWN
     ? run.slice(0, MENTIONS_SHOWN).join(' ') + ' +' + (run.length - MENTIONS_SHOWN) + (rest ? ' ' : '')
     : null;
@@ -326,6 +334,8 @@ if (typeof module === 'object' && module.exports) {
     renderNote,
     preview,
     rowText,
+    leadingMentions,
+    MENTIONS_SHOWN,
     pickKey,
     askShown,
     focusAfter,
@@ -388,6 +398,8 @@ if (typeof document !== 'undefined') {
     growing: 0,
     lastOk: null,
     lastTry: 0,
+    // The key was refused: nothing is asked again until the page is opened from a new address.
+    keyBad: false,
     // Each view the person picks is a new generation: an answer for an older one is dropped when
     // it comes. `busy` is the generation a load is running for, if any.
     gen: 0,
@@ -466,6 +478,8 @@ if (typeof document !== 'undefined') {
   function problem(err) {
     let text;
     if (err.status === 403) {
+      // Trying again cannot help: only a new address from relevo web can. Stop, say only that.
+      state.keyBad = true;
       text = "This page's key is missing or wrong: open the address relevo web printed.";
     } else if (err.status === 502 || err.status === 504) {
       text = "Can't reach the team's server.";
@@ -520,6 +534,7 @@ if (typeof document !== 'undefined') {
   /// and with For you's All every pending thread, whatever page it is on. An answer for a view no
   /// longer shown is dropped.
   async function refresh() {
+    if (state.keyBad) return;
     const gen = state.gen;
     if (state.busy === gen) return;
     state.busy = gen;
@@ -644,6 +659,21 @@ if (typeof document !== 'undefined') {
 
   // ---------- drawing ----------
 
+  /// The '+N' after the first three @mentions of a closed-up row: coloured like them, as it
+  /// stands for more of them, and naming them on hover.
+  function markMore(textEl, text) {
+    const { run } = leadingMentions(text);
+    if (run.length <= MENTIONS_SHOWN) return;
+    const third = textEl.querySelectorAll('.mention')[MENTIONS_SHOWN - 1];
+    const node = third && third.nextSibling;
+    const m = node && node.nodeType === 3 && node.data.match(/^ \+\d+/);
+    if (!m) return;
+    node.splitText(m[0].length); // node keeps ' +N'; what follows stays as it was
+    const more = el('span', 'mention mention-more', m[0].trim());
+    more.title = run.slice(MENTIONS_SHOWN).join(' ');
+    node.replaceWith(document.createTextNode(' '), more);
+  }
+
   /// Note text as one clamped paragraph (a row's preview).
   function md(text, cls) {
     const div = el('div', cls);
@@ -691,7 +721,9 @@ if (typeof document !== 'undefined') {
       avCol.append(lineEl);
     }
     const body = el('div', 'msg-body');
-    body.append(header(n.author, n.via, n.created_at, short), md(rowText(n.text, n.truncated, false), 'text'));
+    const textEl = md(rowText(n.text, n.truncated, false), 'text');
+    markMore(textEl, n.text);
+    body.append(header(n.author, n.via, n.created_at, short), textEl);
     const msg = el('div', 'msg latest');
     msg.append(avCol, body);
     return msg;
@@ -774,6 +806,7 @@ if (typeof document !== 'undefined') {
       textEl.classList.add('text');
     } else {
       textEl = md(shown, 'text');
+      markMore(textEl, first.text);
     }
     msgBody.append(textEl);
     // The row's name, for screen readers: who opened it, what it says and its status, not the
@@ -1019,7 +1052,7 @@ if (typeof document !== 'undefined') {
     }
     const empty = $('empty');
     let text = '';
-    if (state.loading && state.failed) text = "Couldn't load this. It is tried again every 30 seconds.";
+    if (state.loading && state.failed && !state.keyBad) text = "Couldn't load this. It is tried again every 30 seconds.";
     else if (!state.loading && !state.threads.length && !state.needs.length) {
       text = state.tab === 'board' ? 'Nothing on the board yet.' : grouped() ? 'Nothing for you yet.' : 'Nothing here.';
     }

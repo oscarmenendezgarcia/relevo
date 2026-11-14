@@ -92,7 +92,7 @@ section + section { margin-top: 32px; }
 }
 .who b, .who span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .who b { flex: 0 1 auto; color: var(--text); font-weight: 600; font-size: 15px; }
-.who span { flex: 0 10 auto; }
+.who span { flex: 0 10 auto; min-width: 6ch; } /* a long name leaves "via …" readable, not a sliver */
 .who time { flex-shrink: 0; margin-left: auto; font-variant-numeric: tabular-nums; white-space: nowrap; }
 /* Lines that are not a note's header (loading, a failure with its button) may wrap */
 .who.wrap { flex-wrap: wrap; }
