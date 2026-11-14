@@ -523,6 +523,9 @@ class Outbound(Base):
             ("@Equipo and @zzz should know.", "Equipo and zzz should know."),
             # A person with two contexts, then a name it does not know.
             ("@zzz: @ana/x or @ana/y?", "@zzz: ana/x or ana/y?", "zzz: ana/x or ana/y?"),
+            # Attempts at a name that are none: the server names each whole run, and each goes as plain text.
+            ("Ask @josé, @angular.io, @a, @user@mastodon.social or @ana.b; @" + "x" * 33 + ".",
+             "Ask josé, angular.io, a, user@mastodon.social or ana.b; " + "x" * 33 + "."),
             # More than 20, then the 20 it does not know.
             ("Ask " + " ".join(f"@p{i:02}" for i in range(21)),
              "Ask " + " ".join(f"@p{i:02}" for i in range(20)) + " p20",
@@ -571,7 +574,7 @@ class Outbound(Base):
 
         self.assertEqual(found("@ana, (@bob) @Carl/Pagos-API@feat/x: and @team."),
                          ["@ana", "@bob", "@Carl/Pagos-API@feat/x", "@team"])
-        for text in ("pedro@empresa.com", "https://x.com/@ana", "@@ana", "`@ana`", "```\n@ana\n```", "@a", "@1",
+        for text in ("pedro@empresa.com", "https://x.com/@ana", "@@ana", "`@ana`", "```\n@ana\n```", "@1", "@2024 @ @",
                      "x`@ana", "~~~\n@ana", "`a\n@ana\nb`", "`a\n\n`@ana`"):
             self.assertEqual(found(text), [], text)
         # An inline span does not cross a blank line: a stray backtick does not hide the next paragraph.
@@ -592,6 +595,32 @@ class Outbound(Base):
         self.assertEqual(client.refused_mentions(refused, text, "oscar"), {"p20", "p21"})
         other = client.RelevoError(400, "BAD_REQUEST", "text is empty")
         self.assertEqual(client.refused_mentions(other, text, "oscar"), set())
+
+    def test_an_attempt_at_a_name_is_read_whole_as_the_server_reads_it(self):
+        """`@` and a letter (any script) begin an attempt at a name: a run over letters, digits, `_`, `-`, `.`,
+        `@` and `/`. When it is no name (with an optional context), UNKNOWN_PERSON lists the whole run, so
+        client.mentions names the whole run too, or the reply's plain-text retry would match nothing."""
+        long = "x" * 33
+
+        def found(text):
+            return [(text[start:end], name) for start, end, name in client.mentions(text)]
+
+        self.assertEqual(found(f"@josé, @angular.io. @a @user@mastodon.social (@ana.b) @{long}!"),
+                         [("@josé", "josé"), ("@angular.io", "angular.io"), ("@a", "a"),
+                          ("@user@mastodon.social", "user@mastodon.social"), ("@ana.b", "ana.b"), (f"@{long}", long)])
+        # Lowercased, as the server lists them; a name with a context is still the name.
+        self.assertEqual(found("@JOSÉ @Ana/pagos-api@main @ana-/x @Zoë"),
+                         [("@JOSÉ", "josé"), ("@Ana/pagos-api@main", "ana"), ("@ana-/x", "ana-/x"), ("@Zoë", "zoë")])
+        # In code, after a letter or digit, or before a digit or a space: no attempt.
+        for text in ("`@josé`", "```\n@angular.io\n```", "x@josé", "@1a", "@ josé", "`@a` and ``@user@x.y``"):
+            self.assertEqual(found(text), [], text)
+        # The plain-text retry wraps exactly what the server named.
+        text = "Ask @josé or @angular.io, not `@josé`; cc @a."
+        self.assertEqual(client.as_plain_text(text, {"josé", "angular.io", "a"}),
+                         ("Ask josé or angular.io, not `@josé`; cc a.", 3))
+        # Should Python's Unicode tables read a letter otherwise than the server's, the names the server
+        # gave still go, outside code.
+        self.assertEqual(client.as_plain_text("Ask @x, `@zzz` and @zzzé", {"zzz"}), ("Ask @x, `@zzz` and zzzé", 1))
 
     def test_a_mention_made_plain_text_leaves_no_mention(self):
         """However the text is written, leaving out the @ of the mentions of some names leaves none of

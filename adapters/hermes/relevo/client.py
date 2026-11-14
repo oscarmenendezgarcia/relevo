@@ -1114,9 +1114,37 @@ def _code_mask(text: str) -> list:
     return mask
 
 
+def _is_attempt_char(c: str) -> bool:
+    """What an attempt at a name runs over: letters and digits (any script), `_`, `-`, `.`, `@` and `/`.
+    So `@user@mastodon.social` is one attempt, refused as a whole."""
+    return c.isalnum() or c in "_-.@/"
+
+
+def _address(text: str, start: int, run: int) -> Optional[tuple[str, int]]:
+    """The run `text[start:run]` of an attempt, whole, as a name and its optional context: (name, end),
+    or None when it is not an address at all, which is what makes `@josé` name `josé` and not `jos`."""
+    at = start
+    while at < run and _is_name_char(text[at]):
+        at += 1
+    # A trailing `-` is punctuation, not part of the name: `@ana-/x` is no address.
+    while at > start and text[at - 1] == "-":
+        at -= 1
+    if not _NAME.fullmatch(text[start:at]):
+        return None
+    if at < run:
+        if text[at] != "/" or not all(_is_context_char(c) for c in text[at + 1:run]):
+            return None
+    return text[start:at], run
+
+
 def mentions(text: str) -> list:
     """Every mention of `text` outside code, in order, repeats included, as the server reads them
-    (src/mention.rs): (start, end, name), `end` past the context if one follows, `name` lowercased."""
+    (src/mention.rs): (start, end, name), `end` past the context if one follows, `name` lowercased.
+
+    An `@` followed by a letter (any script) begins an attempt at a name: a run over letters, digits,
+    `_`, `-`, `.`, `@` and `/`, without the punctuation that ends it. When the run is no name (with an
+    optional context), the whole run is the name, as UNKNOWN_PERSON lists it: `josé`, `a`,
+    `user@mastodon.social`, `ana.b`. After a digit, a space or nothing, the `@` is plain text."""
     mask = _code_mask(text)
     out = []
     i = 0
@@ -1124,27 +1152,20 @@ def mentions(text: str) -> list:
         if text[i] != "@" or mask[i] or (i > 0 and not _may_precede(text[i - 1])):
             i += 1
             continue
-        start = end = i + 1
-        while end < len(text) and not mask[end] and _is_name_char(text[end]):
-            end += 1
-        name_end = end
-        while name_end > start and text[name_end - 1] == "-":
-            name_end -= 1
-        name = text[start:name_end]
-        if not _NAME.fullmatch(name):
+        start = i + 1
+        if start >= len(text) or mask[start] or not text[start].isalpha():
             i += 1
             continue
-        stop = name_end
-        if name_end == end and end < len(text) and text[end] == "/" and not mask[end]:
-            to = end + 1
-            while to < len(text) and not mask[to] and _is_context_char(text[to]):
-                to += 1
-            last = to
-            while last > end + 1 and text[last - 1] in ".,;:!?)-/'":
-                last -= 1
-            stop = max(last, end) if last > end + 1 else end
-        out.append((i, stop, name.lower()))
-        i = max(stop, i + 1)
+        end = start
+        while end < len(text) and not mask[end] and _is_attempt_char(text[end]):
+            end += 1
+        run = end
+        while run > start and text[run - 1] in ".,;:!?)-/'":
+            run -= 1
+        found = _address(text, start, run)
+        name = found[0] if found else text[start:run]
+        out.append((i, run, name.lower()))
+        i = max(end, i + 1)
     return out
 
 
@@ -1153,12 +1174,23 @@ def as_plain_text(text: str, names: set) -> tuple[str, int]:
     so it is plain text and sends the note to nobody. Returns the text and how many it changed.
 
     Only the `@` goes: no backtick is added (one next to a backtick run would merge with it and change
-    which text is code), and what follows it is a name, so nothing around it can become a mention."""
+    which text is code), and what follows it is a letter, so nothing around it can become a mention.
+
+    Should no mention match (a letter Python's Unicode tables read otherwise than the server's), each
+    `@` outside code that may start a mention and is followed by one of `names` goes instead: the
+    server named those, and the reply must not be lost for them."""
     out, last, changed = [], 0, 0
     for start, _, name in mentions(text):
         if name in names:
             out.append(text[last:start])
             last, changed = start + 1, changed + 1
+    if not changed and names:
+        mask = _code_mask(text)
+        for i, c in enumerate(text):
+            if (c == "@" and not mask[i] and (i == 0 or _may_precede(text[i - 1]))
+                    and any(text[i + 1:i + 1 + len(n)].lower() == n for n in names)):
+                out.append(text[last:i])
+                last, changed = i + 1, changed + 1
     out.append(text[last:])
     return "".join(out), changed
 
