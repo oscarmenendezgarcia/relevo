@@ -270,3 +270,121 @@ fn teams_are_kept_from_the_cli() {
     relevo(path, &["invite", "backend", "--name", "B"]);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn relevo_is_the_servers_own_name_and_in_no_list() {
+    let dir = std::env::temp_dir().join(db::random_id("relevo-cli-"));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("relevo.db");
+    let path = path.to_str().unwrap();
+    {
+        let conn = db::open(path).unwrap();
+        db::invite(&conn, "ana", "Ana", None, "laptop", 0).unwrap();
+        conn.execute(
+            "UPDATE meta SET value = '0.0.1' WHERE key = 'announced'",
+            [],
+        )
+        .unwrap();
+        let release = format!("## {} (1-jan-2026)\n\nNews.\n", env!("CARGO_PKG_VERSION"));
+        relevo::release::announce(&conn, env!("CARGO_PKG_VERSION"), &release, true, 0).unwrap();
+    }
+    for args in [
+        &["invite", "relevo", "--name", "Mine"][..],
+        &["team", "add", "relevo"][..],
+        &["token", "add", "relevo", "--label", "x"][..],
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_relevo"))
+            .arg("--db")
+            .arg(path)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{args:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("the server's own name"), "{args:?}: {err}");
+    }
+    assert!(!relevo(path, &["people"]).contains("relevo"));
+    assert!(!relevo(path, &["token", "list"]).contains("relevo"));
+    // `serve` takes the switch.
+    assert!(relevo(path, &["serve", "--help"]).contains("--no-release-notes"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `relevo serve` with the release notes off, by the switch or by RELEVO_RELEASE_NOTES, records
+/// its version without posting; on, it posts only if this build is a release.
+#[test]
+fn serve_records_or_posts_the_release_notes_once_it_listens() {
+    let version = env!("CARGO_PKG_VERSION");
+    let released = relevo::release::release_section(relevo::release::CHANGELOG, version).is_some();
+    for (flag, env, posts) in [
+        (true, None, false),
+        (false, Some("0"), false),
+        (false, Some("off"), false),
+        (false, None, released),
+    ] {
+        let dir = std::env::temp_dir().join(db::random_id("relevo-cli-"));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("relevo.db");
+        let path = path.to_str().unwrap();
+        {
+            let conn = db::open(path).unwrap();
+            db::invite(&conn, "ana", "Ana", None, "laptop", 0).unwrap();
+            conn.execute(
+                "UPDATE meta SET value = '0.0.1' WHERE key = 'announced'",
+                [],
+            )
+            .unwrap();
+        }
+        let log = dir.join("serve.log");
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_relevo"));
+        cmd.arg("--db")
+            .arg(path)
+            .args(["serve", "--addr", "127.0.0.1:0"])
+            .env_remove("RELEVO_RELEASE_NOTES")
+            .env("RUST_LOG", "info")
+            .stdout(std::fs::File::create(&log).unwrap())
+            .stderr(std::process::Stdio::null());
+        if flag {
+            cmd.arg("--no-release-notes");
+        }
+        if let Some(env) = env {
+            cmd.env("RELEVO_RELEASE_NOTES", env);
+        }
+        let mut child = cmd.spawn().unwrap();
+        // It says what it did once it listens.
+        let said = (0..200)
+            .find_map(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                let out = std::fs::read_to_string(&log).unwrap_or_default();
+                (out.contains("relevo listening") && out.contains("release notes")).then_some(out)
+            })
+            .unwrap_or_else(|| std::fs::read_to_string(&log).unwrap_or_default());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let listening = said.find("relevo listening").expect(&said);
+        let release = said.find("release notes").expect(&said);
+        assert!(listening < release, "{said}");
+        let conn = rusqlite::Connection::open(path).unwrap();
+        let announced: String = conn
+            .query_row("SELECT value FROM meta WHERE key = 'announced'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let board: i64 = conn
+            .query_row("SELECT count(*) FROM threads", [], |r| r.get(0))
+            .unwrap();
+        let case = format!("flag {flag}, env {env:?}");
+        if !flag && env.is_none() && !released {
+            // Not a release: nothing recorded, nothing posted.
+            assert_eq!(announced, "0.0.1", "{case}");
+            assert!(said.contains("not a release"), "{case}: {said}");
+        } else {
+            assert_eq!(announced, version, "{case}");
+        }
+        assert_eq!(board, i64::from(posts), "{case}");
+        if !posts && (flag || env.is_some()) {
+            assert!(said.contains("release notes are off"), "{case}: {said}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}

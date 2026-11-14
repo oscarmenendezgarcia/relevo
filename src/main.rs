@@ -61,6 +61,10 @@ enum Command {
         /// database]
         #[arg(long, value_name = "DIR", env = "RELEVO_DIST")]
         dist: Option<PathBuf>,
+        /// Do not post a new version's release notes on the global board (it is still recorded
+        /// as announced). RELEVO_RELEASE_NOTES=0 does the same.
+        #[arg(long)]
+        no_release_notes: bool,
     },
     /// Print the SHA-256 fingerprint of the certificate `serve --tls` uses, for teammates to
     /// compare with what `relevo connect` shows.
@@ -429,6 +433,34 @@ fn server_tls(
     Ok(Some(cert.server_config()?))
 }
 
+/// Posts this version's release notes on the global board, once (`relevo::release`). A failure is
+/// logged, and the server starts all the same.
+fn release_notes(conn: &rusqlite::Connection, no_release_notes: bool, now: i64) {
+    use relevo::release::{self, Outcome};
+    let version = env!("CARGO_PKG_VERSION");
+    let env = std::env::var("RELEVO_RELEASE_NOTES").ok();
+    let post = release::enabled(no_release_notes, env.as_deref());
+    match release::announce(conn, version, release::CHANGELOG, post, now) {
+        Ok(Outcome::Posted(thread)) => {
+            tracing::info!(%thread, "posted the release notes of relevo {version} on the global board")
+        }
+        Ok(Outcome::Announced) => {}
+        Ok(Outcome::NotReleased) => tracing::info!(
+            "relevo {version} is not a release (the CHANGELOG's first section is not its own, \
+             dated): no release notes posted"
+        ),
+        Ok(Outcome::Off) => tracing::info!(
+            "release notes are off: relevo {version} is recorded as announced, nothing posted"
+        ),
+        Ok(Outcome::NameTaken) => tracing::warn!(
+            "a person or a team has the name 'relevo', which this version keeps for the \
+             server's own release notes: relevo {version} is recorded as announced, nothing \
+             posted"
+        ),
+        Err(e) => tracing::warn!("could not post the release notes of relevo {version}: {e:#}"),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -530,6 +562,7 @@ async fn main() -> Result<()> {
             tls_cert,
             tls_key,
             dist,
+            no_release_notes,
         } => {
             let tls = server_tls(
                 &db_file,
@@ -547,6 +580,8 @@ async fn main() -> Result<()> {
             let listener = tokio::net::TcpListener::bind(addr).await?;
             let scheme = if tls.is_some() { "https" } else { "http" };
             tracing::info!(%addr, db = %db_file, %scheme, "relevo listening");
+            // Posted once the server can serve: bound, with its TLS set up.
+            release_notes(&app.db(), no_release_notes, db::now_unix());
             if tls.is_none() && !addr.ip().is_loopback() {
                 tracing::warn!(
                     %addr,

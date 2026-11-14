@@ -13,8 +13,11 @@ const FENCE = /^ {0,3}(`{3,}|~{3,})/;
 const NOT_BEFORE_MENTION = /[A-Za-z0-9._\-+/@`]/;
 const MENTION = /^@([A-Za-z0-9][A-Za-z0-9_-]{1,31})(\/[A-Za-z0-9._@/-]*)?/;
 const TRAILING = /[.,;:!?)\-/']+$/;
+// A list item: `-`, `*` or `•`, a space, its text.
+const ITEM = /^ {0,3}[-*•] +(\S.*)$/;
 
-/// A note as a list of blocks: { t: 'p', children } and { t: 'pre', text }.
+/// A note as a list of blocks: { t: 'p', children }, { t: 'pre', text } and { t: 'ul', children }
+/// (consecutive lines starting with `- `, `* ` or `• `, each a { t: 'li', children }).
 function parseNote(text) {
   const lines = String(text).replace(/\r\n?/g, '\n').split('\n');
   const blocks = [];
@@ -35,11 +38,58 @@ function parseNote(text) {
       blocks.push({ t: 'pre', text: code.join('\n') });
       continue;
     }
+    // Not inside an inline code span the paragraph opened and a later line of it closes.
+    const item = ITEM.exec(lines[i]);
+    if (item && !inCodeSpan(para, lines, i)) {
+      endPara();
+      const items = [];
+      while (i < lines.length) {
+        const m = ITEM.exec(lines[i]);
+        if (m) {
+          items.push([m[1]]);
+          i++;
+        } else if (items.length && /^\s/.test(lines[i]) && lines[i].trim() !== '') {
+          // An indented line goes on with the item above (an item wrapped, or a deeper
+          // marker, which is not nested: it reads as text of that item).
+          items[items.length - 1].push(lines[i].trim());
+          i++;
+        } else break;
+      }
+      i--;
+      blocks.push({ t: 'ul', children: items.map((item) => ({ t: 'li', children: parseInline(item.join('\n')) })) });
+      continue;
+    }
     if (lines[i].trim() === '') endPara();
     else para.push(lines[i]);
   }
   endPara();
   return blocks;
+}
+
+/// Whether line `i` sits inside an inline code span: the paragraph so far (`para`) opened a run
+/// of backticks that it has not closed, and a later line of the paragraph (before a blank line)
+/// closes it.
+function inCodeSpan(para, lines, i) {
+  const s = para.join('\n');
+  let open = 0;
+  for (let j = 0; j < s.length; ) {
+    if (s[j] !== '`') {
+      j++;
+      continue;
+    }
+    let n = 0;
+    while (s[j + n] === '`') n++;
+    const close = closingTicks(s, j + n, n);
+    if (close < 0) {
+      open = n;
+      break;
+    }
+    j = close + n;
+  }
+  if (!open) return false;
+  const rest = [];
+  for (let k = i; k < lines.length && lines[k].trim() !== ''; k++) rest.push(lines[k]);
+  return closingTicks(rest.join('\n'), 0, open) >= 0;
 }
 
 /// One paragraph's inline nodes: text, br, code, strong, em and mention.
@@ -139,7 +189,7 @@ function closingStar(s, from) {
   return -1;
 }
 
-const TAGS = { p: 'p', pre: 'pre', code: 'code', strong: 'strong', em: 'em', mention: 'span', br: 'br' };
+const TAGS = { p: 'p', pre: 'pre', ul: 'ul', li: 'li', code: 'code', strong: 'strong', em: 'em', mention: 'span', br: 'br' };
 
 /// The DOM of a parsed note, built in `doc` with createElement and text nodes only.
 function toDom(blocks, doc) {
@@ -201,6 +251,12 @@ function preview(text) {
       const lines = b.text.split('\n');
       // Its first line only; the row's own clamp says when there is more (two '…' read as a typo).
       children.push({ t: 'code', text: lines[0] });
+    } else if (b.t === 'ul') {
+      b.children.forEach((li, n) => {
+        if (n) children.push({ t: 'text', text: ' ' });
+        children.push({ t: 'text', text: '• ' });
+        li.children.forEach((c) => children.push(flat(c)));
+      });
     } else {
       b.children.forEach((c) => children.push(flat(c)));
     }
@@ -433,7 +489,16 @@ if (typeof document !== 'undefined') {
     return ((first ? first.segment : Array.from(trimmed)[0]) || '?').toUpperCase();
   }
 
-  function avatar(handle) {
+  /// A note's avatar: an initial in a colour from the handle, or, for a note the server marks as
+  /// its own (`system`: the release notes), the Relevo mark.
+  function avatar(handle, system) {
+    if (system) {
+      const mark = el('img', 'av system');
+      mark.src = '/mark.svg';
+      mark.alt = '';
+      mark.setAttribute('aria-hidden', 'true');
+      return mark;
+    }
     const name = state.names[handle] || handle;
     const a = el('div', 'av ' + colour(handle), initial(name));
     a.setAttribute('aria-hidden', 'true');
@@ -714,7 +779,7 @@ if (typeof document !== 'undefined') {
   /// from it to your seat when the thread waits for you.
   function latest(n, pending) {
     const avCol = el('div', 'av-col');
-    avCol.append(avatar(n.author));
+    avCol.append(avatar(n.author, n.system));
     if (pending) {
       const lineEl = el('div', 'line joined');
       lineEl.setAttribute('aria-hidden', 'true');
@@ -751,7 +816,7 @@ if (typeof document !== 'undefined') {
     full.notes.forEach((n, i) => {
       if (i === 0) return; // opener shown in the card's first .msg
       const avCol = el('div', 'av-col');
-      avCol.append(avatar(n.author));
+      avCol.append(avatar(n.author, n.system));
       // The thread line runs on from each reply to the next, and from the last to your seat
       if (pending || i < full.notes.length - 1) {
         const lineEl = el('div', 'line joined');
@@ -787,7 +852,7 @@ if (typeof document !== 'undefined') {
     // Opener message
     const hasReplies = t.notes > 1;
     const avCol = el('div', 'av-col');
-    avCol.append(avatar(t.from));
+    avCol.append(avatar(t.from, first.system));
     if (hasReplies || t.pending) {
       // Joined to what comes next: the latest reply (closed up), the replies (open), your seat
       const lineEl = el('div', t.pending || !open || full ? 'line joined' : 'line');

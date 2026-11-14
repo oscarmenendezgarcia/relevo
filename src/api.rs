@@ -18,7 +18,8 @@ use serde_json::{Value, json};
 
 use crate::auth::Caller;
 use crate::db::{
-    CONTEXT_FORMAT, RESERVED_HANDLES, context_repo, random_id, rfc3339, valid_context,
+    CONTEXT_FORMAT, RESERVED_HANDLES, SYSTEM_PERSON_SQL, context_repo, random_id, rfc3339,
+    valid_context,
 };
 use crate::error::ApiError;
 use crate::mention::{Mention, mentions, mentions_only};
@@ -88,6 +89,9 @@ struct NoteOut {
     created_at: String,
     text: String,
     truncated: bool,
+    /// Written by the server's own person: the release notes (left out otherwise).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    system: bool,
 }
 
 #[derive(Serialize)]
@@ -424,7 +428,7 @@ fn inbox_count(conn: &Connection, session: &Session, all: bool) -> Result<usize,
 /// Recomputes what the rows of a thread know about it (latest note, new, waiting (pending),
 /// inbox, fresh, and the copies on the sessions' rows). Runs after every change to the thread: a
 /// note, a delivery, a claim, a person handling it, a person named.
-fn refresh(conn: &Connection, thread: &str) -> Result<(), ApiError> {
+pub(crate) fn refresh(conn: &Connection, thread: &str) -> rusqlite::Result<()> {
     // A thread is opened by its first note, so it always has a latest one.
     let last_seq: i64 = conn.query_row(
         "SELECT max(seq) FROM notes WHERE thread_id = ?1",
@@ -550,16 +554,19 @@ fn thread_teams(conn: &Connection, thread: &str) -> Result<Vec<String>, ApiError
     Ok(rows)
 }
 
+/// The participants of a thread, in order; never the server's own person, who only posts.
 fn participants(conn: &Connection, thread: &str) -> Result<Vec<String>, ApiError> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT pe.handle FROM participants p JOIN people pe ON pe.id = p.person_id
-         WHERE p.thread_id = ?1 ORDER BY p.rowid",
-    )?;
+         WHERE p.thread_id = ?1 AND p.person_id IS NOT {SYSTEM_PERSON_SQL} ORDER BY p.rowid"
+    ))?;
     let rows = stmt.query_map([thread], |r| r.get(0))?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-const NOTE_COLUMNS: &str = "SELECT n.id, a.handle, n.via, n.created_at, n.text
+/// `n.author_id IS (…)`: the server's own person (`db::SYSTEM_PERSON_SQL`), one key read.
+const NOTE_COLUMNS: &str = "SELECT n.id, a.handle, n.via, n.created_at, n.text,
+       n.author_id IS (SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'system_person')
      FROM notes n JOIN people a ON a.id = n.author_id";
 
 /// The note `?1` of thread `?2`, by its primary key: one row read per thread shown.
@@ -580,6 +587,7 @@ fn note_out(r: &rusqlite::Row, max_chars: Option<usize>) -> rusqlite::Result<Not
         created_at: rfc3339(r.get(3)?),
         text,
         truncated,
+        system: r.get(5)?,
     })
 }
 
@@ -740,7 +748,7 @@ fn held_by(conn: &Connection, thread: &str, me: i64) -> Result<Vec<HolderOut>, A
 /// of their own have what their person has), and whether the person has handled it, when and
 /// from which session.
 fn delivery(conn: &Connection, thread: &str) -> Result<Vec<Delivery>, ApiError> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT pe.handle, n.id, p.delivered_at, p.delivered_label, p.delivered_context,
                 ct.label, p.claimed_context, p.claimed_at,
                 (SELECT count(*) FROM sessions s
@@ -756,8 +764,8 @@ fn delivery(conn: &Connection, thread: &str) -> Result<Vec<Delivery>, ApiError> 
                AND o.seq <= p.delivered_seq)
          LEFT JOIN sessions cs ON cs.id = p.claimed_by
          LEFT JOIN tokens ct ON ct.id = cs.token_id
-         WHERE p.thread_id = ?1 ORDER BY p.rowid",
-    )?;
+         WHERE p.thread_id = ?1 AND p.person_id IS NOT {SYSTEM_PERSON_SQL} ORDER BY p.rowid"
+    ))?;
     let rows = stmt.query_map([thread], |r| {
         let session = |label: Option<String>, context: Option<String>| {
             label.map(|label| SessionOut { label, context })
@@ -1419,8 +1427,11 @@ fn take_claim(
 /// A thread's kind, and how many people other than the writer take part in it.
 fn reach(tx: &Connection, thread: &str) -> Result<(String, i64), ApiError> {
     Ok(tx.query_row(
-        "SELECT kind, (SELECT count(*) - 1 FROM participants WHERE thread_id = ?1)
-         FROM threads WHERE id = ?1",
+        &format!(
+            "SELECT kind, (SELECT count(*) - 1 FROM participants
+                           WHERE thread_id = ?1 AND person_id IS NOT {SYSTEM_PERSON_SQL})
+             FROM threads WHERE id = ?1"
+        ),
         [thread],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?)
@@ -1861,11 +1872,18 @@ mod tests {
         }
     }
 
-    /// `last_note` costs one primary-key lookup (and its author's) per thread returned.
+    /// `last_note` costs one primary-key lookup (and its author's) per thread returned, and one
+    /// of the server's own person in `meta`.
     #[test]
     fn last_note_is_read_by_its_key() {
         let plan = plan(&format!("{NOTE_COLUMNS} {NOTE_AT_SQL}"));
-        assert_eq!(plan.len(), 2, "{plan:#?}");
+        assert_eq!(plan.len(), 4, "{plan:#?}");
+        assert!(
+            plan[2..]
+                .iter()
+                .any(|s| s.starts_with("SEARCH meta USING INDEX")),
+            "{plan:#?}"
+        );
         assert!(
             plan[0].starts_with("SEARCH n USING INTEGER PRIMARY KEY"),
             "{plan:#?}"

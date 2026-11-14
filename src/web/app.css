@@ -71,6 +71,8 @@ section + section { margin-top: 32px; }
   width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center;
   font-size: 12px; font-weight: 700; color: #0b0c0f; flex-shrink: 0; background: var(--c);
 }
+/* The server's own person (the release notes): the Relevo mark, as it is */
+.av.system { background: none; }
 .c0 { --c: #93c5fd; } .c1 { --c: #f9a8d4; } .c2 { --c: #86efac; }
 .c3 { --c: #c4b5fd; } .c4 { --c: #fcd34d; } .c5 { --c: #fdba74; }
 .c6 { --c: #67e8f9; } .c7 { --c: #fca5a5; }
@@ -156,6 +158,10 @@ section + section { margin-top: 32px; }
 
 /* Note text, as the safe renderer builds it */
 .md p { margin: 0 0 6px; }
+/* Lists: a bullet, and wrapped lines aligned with the text, not under the bullet */
+.md ul { margin: 0 0 6px; padding-left: 1.25em; }
+.md li { margin: 0 0 2px; }
+.md li::marker { color: var(--faint); }
 .md p:last-child { margin-bottom: 0; }
 code { font-family: var(--mono); font-size: 12.5px; background: var(--soft); padding: 1px 4px; border-radius: 4px; }
 .md pre { font-family: var(--mono); font-size: 12.5px; background: var(--soft); border-radius: 6px; padding: 8px 10px; margin: 6px 0; overflow-x: auto; }

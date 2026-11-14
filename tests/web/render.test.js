@@ -68,7 +68,7 @@ function render(text) {
   return { html: show(toDom(parseNote(text), doc)), tags: doc.created };
 }
 
-const ALLOWED = new Set(['p', 'br', 'code', 'pre', 'strong', 'em', 'span']);
+const ALLOWED = new Set(['p', 'br', 'code', 'pre', 'ul', 'li', 'strong', 'em', 'span']);
 let count = 0;
 function check(name, f) {
   f();
@@ -171,6 +171,38 @@ check('a row: the note from its first line, once, closed up or open', () => {
   assert.equal(leadingMentions(many).rest, 'can you all check the 422?');
   // A mention later in the text is left alone.
   assert.equal(rowText('hi @ana @luis @pedro @sam', false, false), 'hi @ana @luis @pedro @sam');
+});
+
+check('lists: lines starting with - * or • are items, inline marks kept', () => {
+  const doc = fakeDocument();
+  const text = 'Changes:\n- one **bold**\n* two `code` <b>\n• three @ana\nafter';
+  assert.equal(
+    show(toDom(parseNote(text), doc)),
+    '<p>Changes:</p><ul><li>one <strong>bold</strong></li><li>two <code>code</code> &lt;b></li><li>three <span.mention>@ana</span></li></ul><p>after</p>'
+  );
+  assert.ok(doc.created.every((t) => ALLOWED.has(t)));
+  // Not an item: no space after the dash, a negative number, a dash inside a line.
+  assert.equal(show(toDom(parseNote('-1 degrees\nnot - an item'), fakeDocument())), '<p>-1 degrees<br></br>not - an item</p>');
+  // In a row's preview, items become one line with bullets.
+  assert.equal(show(toDom(preview('Notes\n- a\n- b'), fakeDocument())), '<p>Notes • a • b</p>');
+});
+
+check('lists: not inside an open code span; wrapped items; deeper markers read as text', () => {
+  const html = (text) => show(toDom(parseNote(text), fakeDocument()));
+  // A `- ` line inside an inline code span the paragraph opened and a later line closes: code.
+  assert.equal(html('Run `make\n- all` now'), '<p>Run <code>make - all</code> now</p>');
+  // A backtick nothing closes is text: the item is an item.
+  assert.equal(html('Run `make\n- all'), '<p>Run `make</p><ul><li>all</li></ul>');
+  // A span closed on its own line opens nothing.
+  assert.equal(html('Run `make` then\n- all'), '<p>Run <code>make</code> then</p><ul><li>all</li></ul>');
+  // An item wrapped onto an indented line goes on in that item.
+  assert.equal(html('- one long\n  item\n- two'), '<ul><li>one long<br></br>item</li><li>two</li></ul>');
+  // A deeper marker is no nesting: an indented one is its own item, a far-indented one text of
+  // the item above. Nothing is lost or garbled.
+  assert.equal(html('- one\n  - sub\n- two'), '<ul><li>one</li><li>sub</li><li>two</li></ul>');
+  assert.equal(html('- one\n    - deep\n- two'), '<ul><li>one<br></br>- deep</li><li>two</li></ul>');
+  // A blank line ends the list.
+  assert.equal(html('- one\n\n  later'), '<ul><li>one</li></ul><p>  later</p>');
 });
 
 check('the key: from the address, else what the tab kept', () => {

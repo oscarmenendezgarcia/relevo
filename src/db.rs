@@ -215,6 +215,14 @@ CREATE TABLE IF NOT EXISTS thread_closes (
     person_id INTEGER NOT NULL REFERENCES people(id),
     closed_at INTEGER NOT NULL
 );
+-- What the server keeps about itself, by key: `announced`, the latest version of relevo whose
+-- release notes the server posted on the global board (or would have: see `release`), and
+-- `system_person`, the id of the person `relevo` who posts them. Layout 8 brings it (a database of
+-- layout 7 gets it as it migrates).
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 -- The timeline reads a person's threads by latest note, newest first, a page at a time, and
 -- whether they wrote in a thread.
 CREATE INDEX IF NOT EXISTS participants_timeline ON participants(person_id, last_seq);
@@ -224,6 +232,75 @@ CREATE INDEX IF NOT EXISTS notes_by_thread_author ON notes(thread_id, author_id)
 /// Names no person nor team may take: 0.3's whole team, which the deprecated `to` still reads
 /// as "everyone". In a note's text they name nobody (a team is always named).
 pub const RESERVED_HANDLES: [&str; 2] = ["team", "equipo"];
+
+/// The handle of the server's own person, who posts each version's release notes on the global
+/// board (`release`). The server makes it when it first opens a database where nobody has the
+/// name (`make_system_person`); it has no usable token, is in no people list, a mention of it
+/// names nobody, and the admin commands refuse it, by its id: a person who had the handle before
+/// 0.5.0 keeps it, and stays theirs to manage.
+pub const SYSTEM_HANDLE: &str = "relevo";
+
+/// The id of the person `relevo`, when the server made it: `NULL` otherwise.
+pub const SYSTEM_PERSON_SQL: &str =
+    "(SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'system_person')";
+
+/// Refuses the server's own person (by its id, not its name) for anything an admin does to a
+/// person or a team.
+fn not_system(conn: &Connection, handle: &str) -> Result<()> {
+    let system: bool = conn.query_row(
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM people WHERE handle = ?1 AND id IS {SYSTEM_PERSON_SQL})"
+        ),
+        [handle],
+        |r| r.get(0),
+    )?;
+    if system {
+        bail!(
+            "'{handle}' is the server's own name: it posts the release notes of each version on \
+             the global board, and nobody can take it"
+        );
+    }
+    Ok(())
+}
+
+/// Makes the server's own person (`SYSTEM_HANDLE`) the first time a database is opened where
+/// nobody has the name, neither a person nor a team: inactive (so it is in no people list, in no
+/// new thread, and names nobody), with one revoked token whose hash no secret has, which its
+/// notes record. Its id goes in `meta`.
+fn make_system_person(tx: &Connection, now: i64) -> Result<()> {
+    let made: bool = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM meta WHERE key = 'system_person')",
+        [],
+        |r| r.get(0),
+    )?;
+    let taken: bool = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM people WHERE handle = ?1)
+             OR EXISTS (SELECT 1 FROM teams WHERE name = ?1)",
+        [SYSTEM_HANDLE],
+        |r| r.get(0),
+    )?;
+    if made || taken {
+        return Ok(());
+    }
+    tx.execute(
+        "INSERT INTO people (handle, name, about, active, created_at)
+         VALUES (?1, 'Relevo', 'the release notes of each version', 0, ?2)",
+        params![SYSTEM_HANDLE, now],
+    )?;
+    let person = tx.last_insert_rowid();
+    let token = random_id("t_");
+    // A SHA-256 is 64 hex digits: this hash is no secret's.
+    tx.execute(
+        "INSERT INTO tokens (id, person_id, label, hash, created_at, revoked_at)
+         VALUES (?1, ?2, 'release notes', ?3, ?4, ?4)",
+        params![token, person, format!("system:{token}"), now],
+    )?;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES ('system_person', ?1)",
+        [person.to_string()],
+    )?;
+    Ok(())
+}
 
 /// A session not seen for this long is forgotten, and so are its claims.
 pub const SESSION_LIFETIME_SECS: i64 = 7 * 24 * 3600;
@@ -306,7 +383,8 @@ DROP TABLE threads;
 ALTER TABLE threads_7 RENAME TO threads;
 ";
 
-/// Layout 7 to 8, before `SCHEMA`: threads no longer close, so the inbox's indexes no longer leave
+/// Layout 7 to 8, before `SCHEMA` (which brings the `meta` table, empty: the release notes of
+/// this version are then posted, as after any upgrade): threads no longer close, so the inbox's indexes no longer leave
 /// out resolved threads (a closed `team` or `global` thread that does not name the person). They
 /// go, and `SCHEMA` makes them again without that condition. The `resolved` columns and
 /// `threads.status` stay, unused: dropping a column would make those tables again, for nothing.
@@ -406,7 +484,9 @@ fn open_with(path: &str, migrate: bool) -> Result<Connection> {
     // Said here, logged once the transaction has committed: a migration that did not happen must
     // not be announced as if it had.
     let mut from = None;
-    match layout(&tx, path)? {
+    let now_found = layout(&tx, path)?;
+    let new = now_found == Layout::New;
+    match now_found {
         layout if refuses(layout) => bail!(no_migration(path, layout)),
         Layout::Migrates(old) => {
             if old == 5 {
@@ -439,6 +519,14 @@ fn open_with(path: &str, migrate: bool) -> Result<Connection> {
         Layout::New | Layout::Current => {}
     }
     tx.execute_batch(SCHEMA)?;
+    make_system_person(&tx, now_unix())?;
+    // A new database has no release to announce: it starts at this version (see `release`).
+    if new {
+        tx.execute(
+            "INSERT OR IGNORE INTO meta (key, value) VALUES ('announced', ?1)",
+            [env!("CARGO_PKG_VERSION")],
+        )?;
+    }
     // How many closed threads layout 8 opens.
     let mut opened = 0;
     if let Some(old) = from {
@@ -705,6 +793,7 @@ fn one_line(what: &str, value: &str) -> Result<()> {
 }
 
 fn person_id(conn: &Connection, handle: &str) -> Result<i64> {
+    not_system(conn, handle)?;
     conn.query_row("SELECT id FROM people WHERE handle = ?1", [handle], |r| {
         r.get(0)
     })
@@ -733,6 +822,7 @@ pub fn invite(
     if RESERVED_HANDLES.contains(&handle) {
         bail!("'{handle}' is reserved: it was 0.3's whole team, and @{handle} names nobody");
     }
+    not_system(conn, handle)?;
     one_line("name", name)?;
     if let Some(about) = about {
         one_line("about", about)?;
@@ -796,12 +886,12 @@ pub fn list_tokens(conn: &Connection, handle: Option<&str>) -> Result<Vec<TokenI
     if let Some(handle) = handle {
         person_id(conn, handle)?;
     }
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT t.id, p.handle, t.label, t.created_at, t.revoked_at
          FROM tokens t JOIN people p ON p.id = t.person_id
-         WHERE ?1 IS NULL OR p.handle = ?1
+         WHERE (?1 IS NULL OR p.handle = ?1) AND p.id IS NOT {SYSTEM_PERSON_SQL}
          ORDER BY p.handle, t.created_at, t.id",
-    )?;
+    ))?;
     let rows = stmt.query_map([handle], |r| {
         Ok(TokenInfo {
             id: r.get(0)?,
@@ -871,9 +961,12 @@ pub struct PersonInfo {
     pub active: bool,
 }
 
+/// Everyone on the server but its own person (`SYSTEM_HANDLE`).
 pub fn list_people(conn: &Connection) -> Result<Vec<PersonInfo>> {
-    let mut stmt =
-        conn.prepare("SELECT handle, name, about, active FROM people ORDER BY handle")?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT handle, name, about, active FROM people
+         WHERE id IS NOT {SYSTEM_PERSON_SQL} ORDER BY handle"
+    ))?;
     let rows = stmt.query_map([], |r| {
         Ok(PersonInfo {
             handle: r.get(0)?,
@@ -967,6 +1060,7 @@ pub fn add_team(conn: &Connection, name: &str, title: Option<&str>, now: i64) ->
     if RESERVED_HANDLES.contains(&name) {
         bail!("'{name}' is reserved: it was 0.3's whole team, and @{name} names nobody");
     }
+    not_system(conn, name)?;
     if let Some(title) = title {
         one_line("title", title)?;
     }
@@ -1006,6 +1100,7 @@ pub fn join_team(conn: &Connection, name: &str, handles: &[String]) -> Result<Ve
     let tx = conn.unchecked_transaction()?;
     let mut done = Vec::new();
     for handle in handles {
+        not_system(&tx, handle)?;
         let active: Option<bool> = tx
             .query_row(
                 "SELECT active FROM people WHERE handle = ?1",

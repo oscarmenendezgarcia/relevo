@@ -439,6 +439,58 @@ fn a_layout_6_database_with_a_broken_thread_reference_names_the_row_and_refuses_
     assert_eq!(user_version(&path), 6);
 }
 
+#[tokio::test]
+async fn a_layout_7_database_gets_the_meta_table_and_this_versions_release_notes() {
+    let dir = TempDir::new();
+    let path = dir.db();
+    let seen = layout7(&path);
+    let conn = db::open_migrating(&path).unwrap();
+    // The table is there, and has announced nothing: this start is an upgrade.
+    let announced = |conn: &rusqlite::Connection| -> Option<String> {
+        conn.query_row("SELECT value FROM meta WHERE key = 'announced'", [], |r| {
+            r.get(0)
+        })
+        .ok()
+    };
+    assert_eq!(announced(&conn), None);
+    use relevo::release::{CHANGELOG, Outcome, announce, release_section};
+    // This build posts its notes only if it is a release: its version's section dated, and first
+    // in the CHANGELOG. A build between releases posts and records nothing.
+    let version = env!("CARGO_PKG_VERSION");
+    let outcome = announce(&conn, version, CHANGELOG, true, seen + 30).unwrap();
+    if release_section(CHANGELOG, version).is_none() {
+        assert_eq!(outcome, Outcome::NotReleased);
+        assert_eq!(announced(&conn), None);
+    }
+    // The release posts them, once: a restart posts nothing.
+    let release = "# Changelog\n\n## 9.0.0 (14-nov-2026)\n\nThreads never close.\n";
+    let Outcome::Posted(thread) = announce(&conn, "9.0.0", release, true, seen + 30).unwrap()
+    else {
+        panic!("not posted");
+    };
+    assert_eq!(
+        announce(&conn, "9.0.0", release, true, seen + 40).unwrap(),
+        Outcome::Announced
+    );
+    assert_eq!(announced(&conn).as_deref(), Some("9.0.0"));
+    let version = "9.0.0";
+    // Everyone of the old database takes part, and nobody has it pending.
+    let f = Fixture {
+        app: App::new(conn, Clock::fixed(seen + 60), 5),
+        v: serde_json::from_str(FIXTURE7).unwrap(),
+    };
+    for who in ["ana", "bob", "carl"] {
+        let th = f.agent(who, "after-upgrade", "").thread(&thread).await;
+        assert_eq!(th["kind"], "global", "{who}");
+        assert_eq!(th["from"], "relevo", "{who}");
+        assert_eq!(th["pending"], false, "{who}");
+        assert_eq!(
+            th["notes"][0]["text"].as_str().unwrap().lines().next(),
+            Some(format!("Relevo {version}").as_str())
+        );
+    }
+}
+
 #[test]
 fn a_failed_migration_from_layout_7_leaves_it_at_layout_7() {
     let dir = TempDir::new();

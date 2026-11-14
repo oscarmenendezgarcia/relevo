@@ -429,6 +429,11 @@ fn delivered(out: &mut String, d: &Value, named: bool) {
     }
 }
 
+/// The line after a note by the server's own person (`relevo`), who posts each new version's
+/// release notes on the global board.
+pub const RELEASE_NOTES: &str =
+    "These are the release notes of the Relevo server's new version: they need no answer.";
+
 /// A note's text, fenced unless it is `me`'s, and a line when it was cut.
 fn note_text(out: &mut String, id: &str, n: &Value, me: Option<&str>) {
     let author = s(&n["author"]);
@@ -438,6 +443,10 @@ fn note_text(out: &mut String, id: &str, n: &Value, me: Option<&str>) {
         out.push_str(&untrusted(author, s(&n["text"])));
     }
     out.push('\n');
+    // By the server's flag, never by the author's handle: a person may have had `relevo`.
+    if n["system"] == true {
+        let _ = writeln!(out, "{RELEASE_NOTES}");
+    }
     if n["truncated"] == true {
         let _ = writeln!(
             out,
@@ -819,6 +828,34 @@ mod tests {
                   "text": "Is the refund endpoint live?", "truncated": true }
             ]
         })
+    }
+
+    /// A note by the server's own person says, once, that it is the release notes and needs no
+    /// answer; nobody else's does.
+    #[test]
+    fn release_notes_say_they_need_no_answer() {
+        let mut t = sample();
+        t["kind"] = "global".into();
+        t["from"] = "relevo".into();
+        t["named"] = false.into();
+        t["pending"] = false.into();
+        t["new_notes"] = json!([
+            { "id": "n_1", "author": "relevo", "via": "release notes", "created_at": "t",
+              "text": "Relevo 0.5.0\n\nNews.", "truncated": false, "system": true },
+            { "id": "n_2", "author": "ana", "via": "Claude Code", "created_at": "t",
+              "text": "Nice.", "truncated": false }
+        ]);
+        let out = thread(&t, Some("oscar"));
+        assert_eq!(out.matches(RELEASE_NOTES).count(), 1, "{out}");
+        assert!(
+            out.contains(&format!("News.\n</untrusted>\n{RELEASE_NOTES}\n")),
+            "{out}"
+        );
+        assert!(!thread(&sample(), Some("oscar")).contains(RELEASE_NOTES));
+        // A person who had the handle `relevo` writes as anyone: no line without the flag.
+        let mut legacy = t.clone();
+        legacy["new_notes"][0]["system"] = Value::Null;
+        assert!(!thread(&legacy, Some("oscar")).contains(RELEASE_NOTES));
     }
 
     #[test]
