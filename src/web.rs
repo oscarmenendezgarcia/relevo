@@ -312,19 +312,21 @@ fn check(web: &Web, req: &Request) -> Result<Option<String>, &'static str> {
         Some(_) => true,
         None => false,
     };
-    // The browser says where the request came from. Only `cross-site` is refused: a request with
-    // no such header (an old browser, a tool of this user's) is refused for nothing. When Origin
-    // already matched above, skip this check: Safari on macOS sends `cross-site` for same-origin
-    // requests to 127.0.0.1, and Origin is the more reliable signal.
-    if !origin_ok
-        && req
-            .headers()
-            .get("sec-fetch-site")
-            .is_some_and(|site| site.as_bytes() == b"cross-site")
-    {
-        return Err("requests from another site are refused");
-    }
     if req.uri().path().starts_with("/api/") {
+        // The browser says where the request came from. Only `cross-site` is refused: a request
+        // with no such header (an old browser, a tool of this user's) is refused for nothing.
+        // When Origin already matched above, skip this check: Chrome on macOS sends `cross-site`
+        // for same-origin requests to 127.0.0.1, and Origin is the more reliable signal. The page
+        // and its files are not checked: they hold no data, and loading the page from the
+        // launcher file (`file://`) is `cross-site` to the browser.
+        if !origin_ok
+            && req
+                .headers()
+                .get("sec-fetch-site")
+                .is_some_and(|site| site.as_bytes() == b"cross-site")
+        {
+            return Err("requests from another site are refused");
+        }
         let given = req
             .headers()
             .get(KEY_HEADER)
