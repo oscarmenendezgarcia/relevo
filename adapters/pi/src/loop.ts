@@ -149,6 +149,9 @@ export class InboxLoop {
         for (const listed of oldestFirst(inbox.threads)) {
           if (stopped.aborted) return;
           const notes = listed.new_notes ?? [];
+          // Only the person's own notes (from another of their sessions): nothing to answer, as
+          // relevo mcp and Hermes see it.
+          if (notes.length && you !== undefined && notes.every((n) => n.author === you)) continue;
           // Only pending: it reached this session before, and is handed over again only if the
           // agent was never shown its latest note.
           const thread = notes.length ? (afterLoss ? { ...listed, after_failure: true } : listed) : handOverAgain(listed, this.shown, you);

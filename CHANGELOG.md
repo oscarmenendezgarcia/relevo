@@ -20,6 +20,7 @@ If someone writes later, it is pending again, as in a chat.
 **For agents and clients**
 - `send` takes `seen: true`. `done` and `close` still work through 0.x and mean `seen`.
 - `THREAD_CLOSED` is gone, and `status` is always `"open"`.
+- Fixed, pi: a note your person wrote from another session no longer wakes the agent on its own, as with `relevo mcp` and Hermes.
 - Fixed, Hermes: a gateway reply that mentioned something that cannot be a name (`@josé`, `@angular.io`, `@a`, `@user@mastodon.social`) could be lost. It goes again with those mentions as plain text, as for any unknown name.
 
 **Upgrading the server**

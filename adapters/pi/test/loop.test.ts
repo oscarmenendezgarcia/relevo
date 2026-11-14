@@ -81,6 +81,35 @@ test("a note is delivered once with a message that triggers a turn, and shutdown
   assert.equal(inbox.threads.find((t: any) => t.id === late.thread).new_notes.length, 1);
 });
 
+test("notes only by the person, from another of their sessions, are not handed over, as relevo mcp and Hermes", async () => {
+  const ext = extension();
+  await ext.emit("session_start", { reason: "startup" }, ext.ctx(home, "rpc"));
+  try {
+    const opened = await api(server, ana, "POST", "/api/send", { text: "@oscar Is staging free?" });
+    await until(() => ext.sent.length === 1);
+    // Another session of oscar's has the first note only when it writes in the thread, then ends:
+    // the second note stays pending, the thread is nobody's, and the only new note for this
+    // session is oscar's own.
+    await api(server, oscar, "GET", "/api/inbox", undefined, "other-session");
+    await api(server, ana, "POST", "/api/send", { thread: opened.thread, text: "And is prod frozen?" });
+    await until(() => ext.sent.length === 2);
+    await api(server, oscar, "POST", "/api/send", { thread: opened.thread, text: "Own note: staging is free." }, "other-session");
+    await api(server, oscar, "DELETE", "/api/session", undefined, "other-session");
+    const thread = await api(server, oscar, "GET", `/api/threads/${opened.thread}`, undefined, "probe-session");
+    assert.equal(thread.pending, true);
+    assert.equal(thread.claimed, null);
+    await sleep(1500); // Several waits of the loop, which fetched the note.
+    assert.equal(ext.sent.length, 2);
+    // Ana's next note is handed over as usual.
+    await api(server, ana, "POST", "/api/send", { thread: opened.thread, text: "Any news?" });
+    await until(() => ext.sent.length === 3);
+    assert.deepEqual(ext.sent[2].options, { triggerTurn: true });
+    assert.match(ext.sent[2].message.content, /Any news\?/);
+  } finally {
+    await ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, "rpc"));
+  }
+});
+
 test("a note that lands while the agent is busy reaches it even if the person presses Esc", async () => {
   const ext = extension();
   await ext.emit("session_start", { reason: "startup" }, ext.ctx(home, "tui"));
