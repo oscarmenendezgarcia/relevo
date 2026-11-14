@@ -118,7 +118,8 @@ test("release notes alone start no turn: they are added to the session, informat
   const release = { id: "r_release00001", kind: "global", title: "Relevo 0.5.0", from: "relevo", participants: [], teams: [], named: false,
     status: "open", pending: false, context: null, claimed: null };
   const answers = [
-    [{ ...release, new_notes: [note("n_1", "relevo", "Relevo 0.5.0\n\nNews for everyone.", true)] }],
+    // With the person's own note beside them (from another of their sessions): still no turn.
+    [{ ...release, new_notes: [note("n_1", "relevo", "Relevo 0.5.0\n\nNews for everyone.", true), note("n_3", "oscar", "Read them.")] }],
     [{ ...release, new_notes: [note("n_2", "ana", "Nice, thanks.")] }],
   ];
   const fake = createServer((req, res) => {

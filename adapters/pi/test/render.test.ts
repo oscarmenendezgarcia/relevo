@@ -512,4 +512,9 @@ test("a note by relevo, the server's own person, says it is the release notes an
   assert.match(arrival, /^Relevo: release notes in thread [^\n]*No answer needed: do not reply to them, claim them or mark them seen\./);
   assert.doesNotMatch(arrival, /answering is optional|If your own work|relevo_send/);
   assert.match(renderArrival(t, "oscar"), /If your own work or your person's files answer it/);
+  // The person's own notes beside them do not count.
+  const own: Thread = { ...alone, new_notes: [t.new_notes![0], { ...t.new_notes![1], author: "oscar" }] };
+  assert.ok(releaseOnly(own, "oscar") && !releaseOnly(own, "ana"));
+  assert.doesNotMatch(renderThread(own, { me: "oscar" }), /answering is optional/);
+  assert.match(renderArrival(own, "oscar"), /^Relevo: release notes in thread/);
 });

@@ -557,7 +557,7 @@ class RelevoAdapter(BasePlatformAdapter):
         others = [n for n in notes if n.get("author") != self._me]
         if not others:
             return  # only notes of our person's own sessions: nothing to answer
-        if all(n.get("system") is True for n in notes):
+        if all(n.get("system") is True for n in others):
             # Release notes alone need no answer: no turn. Handed over all the same (remembered
             # above), so they are not offered again.
             logger.info("[relevo] release notes in thread %s: informative, no turn", thread_id)

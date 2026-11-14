@@ -442,6 +442,14 @@ class ReleaseNotes(Base):
                             for line in logs.output), logs.output)
         await a._dispatch(thread, {})
         self.assertEqual(self.events, [])
+        # The person's own note beside new release notes (from another of their sessions) does not count.
+        later = {**release, "id": "n_rel0"}
+        own = {"id": "n_own1", "author": "oscar", "via": "pi", "created_at": "t", "text": "Read them.",
+               "truncated": False}
+        await a._dispatch({**thread, "new_notes": [later, own], "last_note": own}, {})
+        self.assertEqual(self.events, [])
+        self.assertTrue(client.release_only({**thread, "new_notes": [later, own]}, "oscar"))
+        self.assertNotIn(client.OPTIONAL, client.render_thread_head({**thread, "new_notes": [later, own]}, "oscar"))
         # Ana answers on the board: that is a turn, with her note, as today.
         reply = {"id": "n_rel2", "author": "ana", "via": "pi", "created_at": "t", "text": "Nice, thanks.",
                  "truncated": False}

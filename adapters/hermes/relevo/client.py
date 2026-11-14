@@ -616,11 +616,13 @@ def is_optional(thread: dict) -> bool:
     return is_shared(thread) and not names_you(thread)
 
 
-def release_only(thread: dict) -> bool:
-    """Whether the notes shown with the thread (`notes`, or else `new_notes`) are release notes only
-    (`system: true`): informative, so nothing in them asks for an answer or starts a turn."""
+def release_only(thread: dict, me: Optional[str] = None) -> bool:
+    """Whether the notes by others shown with the thread (`notes`, or else `new_notes`; `me`'s own do
+    not count) are release notes only (`system: true`): informative, so nothing in them asks for an
+    answer or starts a turn."""
     notes = thread["notes"] if "notes" in thread else thread.get("new_notes")
-    return bool(notes) and all(isinstance(n, dict) and n.get("system") is True for n in notes)
+    others = [n for n in notes or [] if isinstance(n, dict) and n.get("author") != me]
+    return bool(others) and all(n.get("system") is True for n in others)
 
 
 def is_pending(thread: dict) -> bool:
@@ -672,7 +674,7 @@ def render_thread_head(thread: dict, me: Optional[str] = None, *, hints: bool = 
              f"Title (the first line of the first note): {title}"]
     # Someone else's thread that does not name the person says so in the line on answering it;
     # release notes need no answer, so answering them is not offered.
-    optional = is_optional(thread) and opener != me and not release_only(thread)
+    optional = is_optional(thread) and opener != me and not release_only(thread, me)
     named = " It names your person." if names_you(thread) else "" if optional else " It does not name your person."
     if kind == "team" and not isinstance(thread.get("teams"), list):
         # A server before 0.4.0: a question to everyone.

@@ -429,11 +429,12 @@ export function relevoExtension(options: Options = {}) {
         return;
       }
       // Release notes alone need no answer: added to the session without starting a turn.
-      for (const thread of waiting.filter(releaseOnly)) {
+      const me = loop ? identity.get(loop.options.client.config.token) : undefined;
+      for (const thread of waiting.filter((t) => releaseOnly(t, me))) {
         queue.delete(thread.id);
         pi.sendMessage(arrival(thread), { triggerTurn: false });
       }
-      const thread = waiting.find((t) => !releaseOnly(t));
+      const thread = waiting.find((t) => !releaseOnly(t, me));
       if (!thread) return;
       queue.delete(thread.id);
       handed = thread;

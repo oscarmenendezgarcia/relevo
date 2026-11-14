@@ -78,12 +78,13 @@ export function optional(t: Thread): boolean {
 }
 
 /**
- * Whether the notes shown with the thread (`notes`, or else `new_notes`) are release notes only
- * (`system: true`): informative, so nothing in them asks for an answer or starts a turn.
+ * Whether the notes by others shown with the thread (`notes`, or else `new_notes`; `me`'s own do not
+ * count) are release notes only (`system: true`): informative, so nothing in them asks for an answer
+ * or starts a turn.
  */
-export function releaseOnly(t: Thread): boolean {
-  const notes = t.notes ?? t.new_notes ?? [];
-  return notes.length > 0 && notes.every((n) => n.system === true);
+export function releaseOnly(t: Thread, me?: string): boolean {
+  const others = (t.notes ?? t.new_notes ?? []).filter((n) => n.author !== me);
+  return others.length > 0 && others.every((n) => n.system === true);
 }
 
 /** What kind of thread it is: `direct`, `team: @backend` or `global board` (a team question to everyone from a server before 0.4.0). */
@@ -237,7 +238,7 @@ export function renderThread(t: Thread, options: ThreadOptions = {}): string {
   // for every participant already.
   if (!t.delivery) for (const h of t.held_by ?? []) lines.push(`${claimState(h.handle, h)}.`);
   // Release notes need no answer, so answering them is not offered.
-  if (optional(t) && t.from !== me && !releaseOnly(t)) {
+  if (optional(t) && t.from !== me && !releaseOnly(t, me)) {
     lines.push(
       "It does not name your person, so answering is optional: answer only from your own work or your person's files " +
         "(repeating someone's `about` line, or guessing who might know, is not an answer); do not claim it.",
@@ -365,7 +366,7 @@ export function renderArrival(t: Thread, me?: string): string {
   // Where a team or global-board thread was sent; nothing for a direct one.
   const to = t.kind === "global" ? ", on the global board" : t.kind === "team" ? (t.teams?.length ? `, to ${listing(t.teams)}` : ", to everyone") : "";
   let intro: string;
-  if (releaseOnly(t)) {
+  if (releaseOnly(t, me)) {
     // Informative only: added to the session without a turn (index.ts), nothing to do with it.
     intro =
       `Relevo: release notes in thread ${t.id}${to}: the Relevo server's new version, for your information.${who} ` +
