@@ -352,6 +352,17 @@ function togglesRow(e, row) {
   return (e.key === 'Enter' || e.key === ' ') && e.target === row;
 }
 
+/// The row's keydown handler: Enter or Space on the row itself calls `toggle` (and is not
+/// scrolled or clicked by the browser); any other key, or one on a control inside, goes on.
+function rowKeydown(row, toggle) {
+  return (e) => {
+    if (togglesRow(e, row)) {
+      e.preventDefault();
+      toggle();
+    }
+  };
+}
+
 /// The threads *Load more* brings in: the ones not shown yet, in the order they came.
 function addedThreads(known, threads) {
   return threads.filter((t) => !known.has(t.id));
@@ -402,6 +413,7 @@ if (typeof module === 'object' && module.exports) {
     askShown,
     focusAfter,
     togglesRow,
+    rowKeydown,
     addedThreads,
     short,
     noteTime,
@@ -942,9 +954,7 @@ if (typeof document !== 'undefined') {
       if (String(window.getSelection())) return;
       toggle(t.id);
     };
-    a.onkeydown = (e) => {
-      if (togglesRow(e, a)) { e.preventDefault(); toggle(t.id); }
-    };
+    a.onkeydown = rowKeydown(a, () => toggle(t.id));
     return a;
   }
 
