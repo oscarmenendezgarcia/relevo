@@ -992,6 +992,31 @@ async fn a_server_that_does_not_answer_holds_up_the_exit_only_briefly() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Every request of `relevo mcp` says `Relevo-Client: mcp/<this version>`.
+#[tokio::test(flavor = "multi_thread")]
+async fn connect_and_mcp_report_their_client_and_version() {
+    let s = server(&["ana"]).await;
+    let home = s.dir.join("home");
+    let out = relevo(&home)
+        .args(["connect", &s.url, &s.tokens["ana"]])
+        .output()
+        .await
+        .unwrap();
+    assert!(out.status.success());
+    let mut cmd = relevo(&home);
+    cmd.arg("mcp").env("RELEVO_CONTEXT", "");
+    let mut mcp = Mcp::spawn(cmd).await;
+    mcp.ok("inbox", json!({})).await;
+    let mine = format!("mcp/{}", env!("CARGO_PKG_VERSION"));
+    let sessions = db::list_sessions(&s.app.db(), Some("ana"), db::now_unix()).unwrap();
+    // `connect` ends its session once it has checked the token: that of `mcp` is left.
+    assert_eq!(sessions.len(), 1);
+    for session in sessions {
+        assert_eq!(session.client.as_deref(), Some(mine.as_str()));
+        assert!(!session.client_inferred);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn connect_checks_the_token_and_saves_it_privately() {
     let s = server(&["ana", "bob"]).await;
