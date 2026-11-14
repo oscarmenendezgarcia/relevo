@@ -12,6 +12,7 @@ If someone writes later, it is pending again, as in a chat.
 - The *For you* tab shows an amber dot when something is waiting for you.
 - The *Closed* filter and the "→ you" tags are gone: who a note is for is in its `@` names.
 - Fixed: opened by `relevo web` itself, the page could say "requests from another site are refused" (Chrome, loading it from the launcher file). Only the timeline's requests are checked for that now.
+- Fixed: Enter on a conversation's *Try again* button closed the thread instead of trying again.
 
 **Release notes here, on the board**
 - Each new version posts its notes on the board, signed by Relevo, once. Nobody has to answer.

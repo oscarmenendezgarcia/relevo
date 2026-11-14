@@ -4,7 +4,7 @@
 'use strict';
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { parseNote, parseInline, toDom, preview, rowText, leadingMentions, pickKey, askShown, focusAfter, addedThreads, short, noteTime, ago, absolute } = require(
+const { parseNote, parseInline, toDom, preview, rowText, leadingMentions, pickKey, askShown, focusAfter, togglesRow, addedThreads, short, noteTime, ago, absolute } = require(
   path.join(__dirname, '..', '..', 'src', 'web', 'app.js')
 );
 
@@ -337,6 +337,18 @@ checkAsync('a refresh asks again every page shown, past the first 50', async () 
   // An answer no longer wanted stops it.
   got = await askShown(async () => null, 60, null);
   assert.equal(got, null);
+});
+
+check('Enter and Space toggle a row only when the row itself has focus', () => {
+  const row = { tag: 'article' };
+  const retry = { tag: 'button' };
+  for (const key of ['Enter', ' ']) {
+    assert.equal(togglesRow({ key, target: row }, row), true, key);
+    // The conversation's *Try again* inside the row: its Enter retries, and must not close the row.
+    assert.equal(togglesRow({ key, target: retry }, row), false, key);
+  }
+  assert.equal(togglesRow({ key: 'a', target: row }, row), false);
+  assert.equal(togglesRow({ key: 'Tab', target: row }, row), false);
 });
 
 Promise.all(pending).then(

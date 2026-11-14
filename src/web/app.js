@@ -346,6 +346,12 @@ function focusAfter(rows, at) {
   return rows[at] || rows[at - 1] || null;
 }
 
+/// Whether a keydown on a row opens or closes it: Enter or Space on the row itself, not on a
+/// control inside it (the conversation's *Try again*, whose own Enter must not reach the row).
+function togglesRow(e, row) {
+  return (e.key === 'Enter' || e.key === ' ') && e.target === row;
+}
+
 /// The threads *Load more* brings in: the ones not shown yet, in the order they came.
 function addedThreads(known, threads) {
   return threads.filter((t) => !known.has(t.id));
@@ -395,6 +401,7 @@ if (typeof module === 'object' && module.exports) {
     pickKey,
     askShown,
     focusAfter,
+    togglesRow,
     addedThreads,
     short,
     noteTime,
@@ -935,7 +942,7 @@ if (typeof document !== 'undefined') {
       toggle(t.id);
     };
     a.onkeydown = (e) => {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(t.id); }
+      if (togglesRow(e, a)) { e.preventDefault(); toggle(t.id); }
     };
     return a;
   }
