@@ -309,7 +309,8 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
             let _ = writeln!(out, "{}.", claim_state(s(&h["handle"]), h));
         }
     }
-    if shared && !names_you(t) && Some(opener) != me {
+    // Release notes need no answer, so answering them is not offered.
+    if shared && !names_you(t) && Some(opener) != me && !release_only(t, me) {
         out.push_str(
             "It does not name your person, so answering is optional: answer only from your own \
              work or your person's files (repeating someone's `about` line, or guessing who might \
@@ -331,10 +332,25 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
         if pending(t) && t["last_note"].is_object() {
             latest(&mut out, id, &t["last_note"], me);
         }
-    } else if partial && notes.iter().any(|n| n["pushed"] == true) {
-        out.push_str(
-            "New notes (those marked \"pushed earlier\" reached this session as channel events; \
-             shown again in case they did not reach you):\n",
+    } else if partial
+        && notes
+            .iter()
+            .any(|n| n["pushed"] == true || n["received"] == true)
+    {
+        let mut why = Vec::new();
+        if notes.iter().any(|n| n["pushed"] == true) {
+            why.push("those marked \"pushed earlier\" reached this session as channel events");
+        }
+        if notes.iter().any(|n| n["received"] == true) {
+            why.push(
+                "those marked \"received earlier\" reached it in the background without one, \
+                 since release notes alone start nothing",
+            );
+        }
+        let _ = writeln!(
+            out,
+            "New notes ({}; shown again in case they did not reach you):",
+            why.join(", and ")
         );
     } else if partial {
         out.push_str("New notes:\n");
@@ -351,6 +367,8 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
             s(&n["created_at"]),
             if n["pushed"] == true {
                 " (pushed earlier)"
+            } else if n["received"] == true {
+                " (received earlier)"
             } else {
                 ""
             }
@@ -368,6 +386,20 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
         }
     }
     out
+}
+
+/// Whether the notes by others shown with `t` (`notes`, or else `new_notes`; `me`'s own do not
+/// count) are release notes only (`"system": true`): informative, so nothing in them asks for an
+/// answer or starts a turn.
+pub(crate) fn release_only(t: &Value, me: Option<&str>) -> bool {
+    let notes = t.get("notes").unwrap_or(&t["new_notes"]);
+    let mut others = notes
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|n| Some(s(&n["author"])) != me)
+        .peekable();
+    others.peek().is_some() && others.all(|n| n["system"] == true)
 }
 
 /// Whether a thread is pending for the person.
@@ -494,11 +526,12 @@ pub fn inbox(v: &Value, me: Option<&str>) -> String {
         out.push_str(&thread(t, me));
     }
     let more = v["more"].as_i64().unwrap_or(0);
-    // Notes pushed earlier were delivered then: they do not make room for the rest.
+    // Notes pushed (or received) earlier were delivered then: they do not make room for the rest.
     let had_new = threads.iter().any(|t| {
-        t["new_notes"]
-            .as_array()
-            .is_some_and(|n| n.iter().any(|n| n["pushed"] != true))
+        t["new_notes"].as_array().is_some_and(|n| {
+            n.iter()
+                .any(|n| n["pushed"] != true && n["received"] != true)
+        })
     });
     if more > 0 && had_new {
         // Those shown are delivered now, so the rest come up next.
@@ -518,17 +551,31 @@ pub fn inbox(v: &Value, me: Option<&str>) -> String {
     out
 }
 
-/// Threads pushed as channel events that no tool has shown since, as they were when pushed;
-/// empty when there are none.
+/// Threads pushed as channel events that no tool has shown since, as they were when pushed, and
+/// those the channel loop received and did not push (`quiet`: release notes); empty when there are
+/// none.
 pub fn pushed(threads: &[Value], me: Option<&str>) -> String {
-    if threads.is_empty() {
-        return String::new();
+    let mut out = String::new();
+    let (quiet, pushed): (Vec<&Value>, Vec<&Value>) =
+        threads.iter().partition(|t| t["quiet"] == true);
+    if !pushed.is_empty() {
+        out.push_str(
+            "\nPushed to this session earlier as channel events, shown here once in case they did \
+             not reach you (as they were then; call thread for the latest):\n",
+        );
     }
-    let mut out = String::from(
-        "\nPushed to this session earlier as channel events, shown here once in case they did not \
-         reach you (as they were then; call thread for the latest):\n",
-    );
-    for t in threads {
+    for t in pushed {
+        out.push('\n');
+        out.push_str(&thread(t, me));
+    }
+    if !quiet.is_empty() {
+        out.push_str(
+            "\nReceived by this session earlier in the background and not pushed, since release \
+             notes start nothing; shown here once (as they were then; call thread for the \
+             latest):\n",
+        );
+    }
+    for t in quiet {
         out.push('\n');
         out.push_str(&thread(t, me));
     }
@@ -856,6 +903,45 @@ mod tests {
         let mut legacy = t.clone();
         legacy["new_notes"][0]["system"] = Value::Null;
         assert!(!thread(&legacy, Some("oscar")).contains(RELEASE_NOTES));
+        // With Ana's reply, answering is offered as in any thread that does not name you; for the
+        // release notes alone, it is not: they need no answer.
+        assert!(out.contains("answering is optional"), "{out}");
+        let mut alone = t.clone();
+        alone["new_notes"] = json!([t["new_notes"][0]]);
+        let out = thread(&alone, Some("oscar"));
+        assert!(out.contains(RELEASE_NOTES), "{out}");
+        assert!(!out.contains("answering is optional"), "{out}");
+        // So in `thread`, whose `notes` are the whole thread.
+        let mut whole = alone.clone();
+        whole["notes"] = whole["new_notes"].take();
+        assert!(!thread(&whole, Some("oscar")).contains("answering is optional"));
+        whole["notes"] = t["new_notes"].clone();
+        assert!(thread(&whole, Some("oscar")).contains("answering is optional"));
+        // Received in the background and not pushed: marked so in the inbox.
+        alone["new_notes"][0]["received"] = true.into();
+        let out = thread(&alone, Some("oscar"));
+        assert!(out.contains("(received earlier)\n"), "{out}");
+        assert!(out.contains("those marked \"received earlier\""), "{out}");
+        assert!(
+            pushed(std::slice::from_ref(&alone), Some("oscar")).contains("Pushed to this session")
+        );
+        // Pushed and received notes in one thread: both marks explained.
+        let mut both = alone.clone();
+        both["new_notes"] = json!([alone["new_notes"][0], t["new_notes"][1]]);
+        both["new_notes"][1]["pushed"] = true.into();
+        let out = thread(&both, Some("oscar"));
+        assert!(
+            out.contains(
+                "New notes (those marked \"pushed earlier\" reached this session as channel \
+                 events, and those marked \"received earlier\" reached it in the background \
+                 without one, since release notes alone start nothing; shown again"
+            ),
+            "{out}"
+        );
+        alone["quiet"] = true.into();
+        let out = pushed(&[alone], Some("oscar"));
+        assert!(out.contains("Received by this session earlier"), "{out}");
+        assert!(!out.contains("Pushed to this session"), "{out}");
     }
 
     #[test]

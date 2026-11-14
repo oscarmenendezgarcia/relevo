@@ -85,7 +85,8 @@ first, claim it with send(thread=\"<thread id>\", claim=true) and no text before
 if it needs nothing, mark it seen with send(thread=\"<thread id>\", seen=true) and no text; if \
 not, stay silent and leave it: it stays pending for your person. \
 Events may not reach you, so still look at your inbox when you start a task and before you \
-finish one: `inbox` also lists what was pushed since you last looked.";
+finish one: `inbox` also lists what was pushed since you last looked, and the release notes \
+Relevo posts, which are never pushed on their own: they need no answer.";
 
 /// How long ending the session may hold up the exit once stdin closes.
 const END_TIMEOUT: Duration = Duration::from_secs(2);
@@ -246,11 +247,18 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Keeps `thread` (as pushed) for `inbox`, its new notes after those of an earlier push.
-fn remember(pushed: &Mutex<Vec<Value>>, thread: &Value) {
+/// Keeps `thread` (as pushed) for `inbox`, its new notes after those of an earlier push. With
+/// `quiet` (release notes alone, which are not pushed), its new notes are marked `received`; the
+/// thread is `quiet` while every note it keeps is.
+fn remember(pushed: &Mutex<Vec<Value>>, thread: &Value, quiet: bool) {
     let mut pushed = lock(pushed);
     let id = &thread["id"];
     let mut thread = thread.clone();
+    if quiet {
+        for n in thread["new_notes"].as_array_mut().into_iter().flatten() {
+            n["received"] = true.into();
+        }
+    }
     if let Some(i) = pushed.iter().position(|t| &t["id"] == id) {
         let earlier = pushed.remove(i);
         let mut notes = earlier["new_notes"].as_array().cloned().unwrap_or_default();
@@ -261,6 +269,10 @@ fn remember(pushed: &Mutex<Vec<Value>>, thread: &Value) {
         }
         thread["new_notes"] = Value::Array(notes);
     }
+    let all_received = thread["new_notes"]
+        .as_array()
+        .is_some_and(|n| !n.is_empty() && n.iter().all(|n| n["received"] == true));
+    thread["quiet"] = all_received.into();
     pushed.push(thread);
     let excess = pushed.len().saturating_sub(MAX_PUSHED);
     pushed.drain(..excess);
@@ -280,6 +292,7 @@ fn merge_pushed(v: &mut Value, pushed: Vec<Value>) -> Vec<Value> {
             continue;
         };
         let new = t["new_notes"].as_array().cloned().unwrap_or_default();
+        // Release notes kept without a push are marked `received` already.
         let mut notes: Vec<Value> = p["new_notes"]
             .as_array()
             .into_iter()
@@ -287,7 +300,9 @@ fn merge_pushed(v: &mut Value, pushed: Vec<Value>) -> Vec<Value> {
             .filter(|n| !new.iter().any(|m| m["id"] == n["id"]))
             .map(|n| {
                 let mut n = n.clone();
-                n["pushed"] = true.into();
+                if n["received"] != true {
+                    n["pushed"] = true.into();
+                }
                 n
             })
             .collect();
@@ -666,8 +681,12 @@ fn stop_signal() -> std::io::Result<impl Future<Output = ()>> {
     })
 }
 
-/// The channel event for a thread with notes by others that are new for this session.
+/// The channel event for a thread with notes by others that are new for this session; none for
+/// release notes alone (`render::release_only`), which need no answer and start no turn.
 pub fn channel_event(thread: &Value, me: Option<&str>) -> Option<Value> {
+    if render::release_only(thread, me) {
+        return None;
+    }
     let new = thread["new_notes"].as_array()?;
     let from = new
         .iter()
@@ -762,6 +781,14 @@ async fn push_news(
         let me = client.known_you();
         let mut events = 0;
         for t in v["threads"].as_array().into_iter().flatten() {
+            if render::release_only(t, me.as_deref()) {
+                // Release notes alone: no event, so no turn. Kept for `inbox` (delivered now, it
+                // would not list them as new), and shown, so they are not handed over again.
+                remember(&pushed, t, true);
+                show(&shown, t);
+                events += 1;
+                continue;
+            }
             let (thread, event) = match channel_event(t, me.as_deref()) {
                 Some(event) => (t.clone(), event),
                 None => match handover(&shown, t, me.as_deref()) {
@@ -770,7 +797,7 @@ async fn push_news(
                 },
             };
             // Kept before sending: nothing tells whether the client shows the event.
-            remember(&pushed, &thread);
+            remember(&pushed, &thread, false);
             show(&shown, &thread);
             events += 1;
             if !push(event).await {
@@ -932,6 +959,40 @@ mod tests {
         assert!(!content.contains("If your own work"), "{content}");
     }
 
+    /// Release notes alone push nothing: they need no answer, so they start no turn. With a
+    /// reply by someone, the thread is pushed as any other.
+    #[test]
+    fn release_notes_alone_push_no_event() {
+        let release = json!({ "id": "n_1", "author": "relevo", "via": "release notes",
+                              "created_at": "t", "text": "Relevo 0.5.0\n\nNews.",
+                              "truncated": false, "system": true });
+        let mut t = json!({
+            "id": "r_1", "kind": "global", "title": "Relevo 0.5.0", "from": "relevo",
+            "participants": ["ana", "oscar"], "status": "open", "pending": false,
+            "named": false, "teams": [], "context": null, "claimed": null,
+            "new_notes": [release]
+        });
+        assert!(channel_event(&t, Some("oscar")).is_none());
+        assert!(channel_event(&t, None).is_none());
+        // The person's own notes beside them (from another of their sessions) do not count.
+        let own = json!({ "id": "n_3", "author": "oscar", "via": "x", "created_at": "t",
+                          "text": "Read them.", "truncated": false });
+        t["new_notes"] = json!([release, own]);
+        assert!(channel_event(&t, Some("oscar")).is_none());
+        assert!(!render::thread(&t, Some("oscar")).contains("answering is optional"));
+        t["new_notes"] = json!([release, { "id": "n_2", "author": "ana", "via": "x",
+                                           "created_at": "t", "text": "Nice.", "truncated": false }]);
+        let content = channel_event(&t, Some("oscar")).unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            content.contains("If your own work or your person's files answer it"),
+            "{content}"
+        );
+        assert!(content.contains(render::RELEASE_NOTES), "{content}");
+    }
+
     #[test]
     fn channel_events_offer_seen_and_pending_only_while_pending() {
         let t = json!({
@@ -1073,9 +1134,13 @@ mod tests {
         let pushed = Mutex::new(vec![]);
         let note = |id: &str| json!({ "id": id, "author": "ana", "text": id });
         let t = |notes: Vec<Value>| json!({ "id": "r_1", "kind": "team", "new_notes": notes });
-        remember(&pushed, &t(vec![note("n_1")]));
-        remember(&pushed, &json!({ "id": "r_2", "new_notes": [note("n_9")] }));
-        remember(&pushed, &t(vec![note("n_1"), note("n_2")]));
+        remember(&pushed, &t(vec![note("n_1")]), false);
+        remember(
+            &pushed,
+            &json!({ "id": "r_2", "new_notes": [note("n_9")] }),
+            false,
+        );
+        remember(&pushed, &t(vec![note("n_1"), note("n_2")]), false);
         {
             let p = lock(&pushed);
             assert_eq!(p.len(), 2);
@@ -1084,8 +1149,46 @@ mod tests {
         }
         forget(&pushed, "r_1");
         assert_eq!(lock(&pushed).len(), 1);
+        // Kept without a push (`quiet`): its notes are marked received, not pushed, and stay so
+        // when a pushed note of the same thread joins them before `inbox`.
+        remember(&pushed, &t(vec![note("n_3")]), true);
+        assert_eq!(lock(&pushed)[1]["quiet"], true);
+        remember(&pushed, &t(vec![note("n_5")]), false);
+        assert_eq!(lock(&pushed)[1]["quiet"], false);
+        let mut v = json!({ "threads": [t(vec![note("n_4")])] });
+        assert!(merge_pushed(&mut v, std::mem::take(&mut *lock(&pushed)))[0]["id"] == "r_2");
+        let notes = &v["threads"][0]["new_notes"];
+        let flags = |n: &Value| {
+            (
+                n["id"].clone(),
+                n.get("received").cloned(),
+                n.get("pushed").cloned(),
+            )
+        };
+        assert_eq!(
+            notes
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(flags)
+                .collect::<Vec<_>>(),
+            vec![
+                (json!("n_3"), Some(json!(true)), None),
+                (json!("n_5"), None, Some(json!(true))),
+                (json!("n_4"), None, None),
+            ]
+        );
+        remember(
+            &pushed,
+            &json!({ "id": "r_2", "new_notes": [note("n_9")] }),
+            false,
+        );
         for i in 0..MAX_PUSHED + 5 {
-            remember(&pushed, &json!({ "id": format!("r_{i}"), "new_notes": [] }));
+            remember(
+                &pushed,
+                &json!({ "id": format!("r_{i}"), "new_notes": [] }),
+                false,
+            );
         }
         assert_eq!(lock(&pushed).len(), MAX_PUSHED);
     }

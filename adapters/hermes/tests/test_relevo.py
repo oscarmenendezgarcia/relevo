@@ -423,6 +423,42 @@ class Inbound(Base):
         self.assertNotIn("cut at 4,000", self.events[0].text)
 
 
+class ReleaseNotes(Base):
+    async def test_release_notes_alone_start_no_turn_and_are_not_offered_again(self):
+        """A thread whose new notes are all release notes is handed over without a turn: no MessageEvent,
+        but remembered, so it is not offered again. A reply by someone in it is a turn as any note."""
+        a = self.make_adapter()
+        a._me = "oscar"
+        release = {"id": "n_rel1", "author": "relevo", "via": "release notes", "created_at": "t",
+                   "text": "Relevo 0.5.0\n\nNews.", "truncated": False, "system": True}
+        thread = {"id": "r_release0001", "kind": "global", "status": "open", "from": "relevo", "participants": [],
+                  "teams": [], "named": False, "pending": False, "title": "Relevo 0.5.0", "claimed": None,
+                  "new_notes": [release], "last_note": release}
+        with self.assertLogs(_PKG, level="INFO") as logs:
+            await a._dispatch(thread, {})
+        self.assertEqual(self.events, [])
+        self.assertIn("n_rel1", a._seen)
+        self.assertTrue(any("release notes in thread r_release0001: informative, no turn" in line
+                            for line in logs.output), logs.output)
+        await a._dispatch(thread, {})
+        self.assertEqual(self.events, [])
+        # The person's own note beside new release notes (from another of their sessions) does not count.
+        later = {**release, "id": "n_rel0"}
+        own = {"id": "n_own1", "author": "oscar", "via": "pi", "created_at": "t", "text": "Read them.",
+               "truncated": False}
+        await a._dispatch({**thread, "new_notes": [later, own], "last_note": own}, {})
+        self.assertEqual(self.events, [])
+        self.assertTrue(client.release_only({**thread, "new_notes": [later, own]}, "oscar"))
+        self.assertNotIn(client.OPTIONAL, client.render_thread_head({**thread, "new_notes": [later, own]}, "oscar"))
+        # Ana answers on the board: that is a turn, with her note, as today.
+        reply = {"id": "n_rel2", "author": "ana", "via": "pi", "created_at": "t", "text": "Nice, thanks.",
+                 "truncated": False}
+        await a._dispatch({**thread, "new_notes": [release, reply], "last_note": reply}, {})
+        self.assertEqual(len(self.events), 1)
+        self.assertIn("Nice, thanks.", self.events[0].text)
+        self.assertIn(client.OPTIONAL, self.events[0].text)
+
+
 class Outbound(Base):
     async def test_a_reply_lands_in_the_thread(self):
         a = self.make_adapter()
@@ -523,6 +559,11 @@ class Outbound(Base):
             ("@Equipo and @zzz should know.", "Equipo and zzz should know."),
             # A person with two contexts, then a name it does not know.
             ("@zzz: @ana/x or @ana/y?", "@zzz: ana/x or ana/y?", "zzz: ana/x or ana/y?"),
+            # Attempts at a name that are none: the server names each whole run, and each goes as plain text.
+            ("Ask @josé, @angular.io, @a, @user@mastodon.social or @ana.b; @" + "x" * 33 + ".",
+             "Ask josé, angular.io, a, user@mastodon.social or ana.b; " + "x" * 33 + "."),
+            # A letter the server counts and Python does not (U+093F): what the server named still goes.
+            ("Thanks @रवि.", "Thanks रवि."),
             # More than 20, then the 20 it does not know.
             ("Ask " + " ".join(f"@p{i:02}" for i in range(21)),
              "Ask " + " ".join(f"@p{i:02}" for i in range(20)) + " p20",
@@ -571,7 +612,7 @@ class Outbound(Base):
 
         self.assertEqual(found("@ana, (@bob) @Carl/Pagos-API@feat/x: and @team."),
                          ["@ana", "@bob", "@Carl/Pagos-API@feat/x", "@team"])
-        for text in ("pedro@empresa.com", "https://x.com/@ana", "@@ana", "`@ana`", "```\n@ana\n```", "@a", "@1",
+        for text in ("pedro@empresa.com", "https://x.com/@ana", "@@ana", "`@ana`", "```\n@ana\n```", "@1", "@2024 @ @",
                      "x`@ana", "~~~\n@ana", "`a\n@ana\nb`", "`a\n\n`@ana`"):
             self.assertEqual(found(text), [], text)
         # An inline span does not cross a blank line: a stray backtick does not hide the next paragraph.
@@ -592,6 +633,40 @@ class Outbound(Base):
         self.assertEqual(client.refused_mentions(refused, text, "oscar"), {"p20", "p21"})
         other = client.RelevoError(400, "BAD_REQUEST", "text is empty")
         self.assertEqual(client.refused_mentions(other, text, "oscar"), set())
+
+    def test_an_attempt_at_a_name_is_read_whole_as_the_server_reads_it(self):
+        """`@` and a letter (any script) begin an attempt at a name: a run over letters, digits, `_`, `-`, `.`,
+        `@` and `/`. When it is no name (with an optional context), UNKNOWN_PERSON lists the whole run, so
+        client.mentions names the whole run too, or the reply's plain-text retry would match nothing."""
+        long = "x" * 33
+
+        def found(text):
+            return [(text[start:end], name) for start, end, name in client.mentions(text)]
+
+        self.assertEqual(found(f"@josé, @angular.io. @a @user@mastodon.social (@ana.b) @{long}!"),
+                         [("@josé", "josé"), ("@angular.io", "angular.io"), ("@a", "a"),
+                          ("@user@mastodon.social", "user@mastodon.social"), ("@ana.b", "ana.b"), (f"@{long}", long)])
+        # Lowercased, as the server lists them; a name with a context is still the name.
+        self.assertEqual(found("@JOSÉ @Ana/pagos-api@main @ana-/x @Zoë"),
+                         [("@JOSÉ", "josé"), ("@Ana/pagos-api@main", "ana"), ("@ana-/x", "ana-/x"), ("@Zoë", "zoë")])
+        # In code, after a letter or digit, or before a digit or a space: no attempt.
+        for text in ("`@josé`", "```\n@angular.io\n```", "x@josé", "@1a", "@ josé", "`@a` and ``@user@x.y``"):
+            self.assertEqual(found(text), [], text)
+        # The plain-text retry wraps exactly what the server named.
+        text = "Ask @josé or @angular.io, not `@josé`; cc @a."
+        self.assertEqual(client.as_plain_text(text, {"josé", "angular.io", "a"}),
+                         ("Ask josé or angular.io, not `@josé`; cc a.", 3))
+        # A name the server gave that starts a longer one is not that one: `@zzzé` is no mention of zzz.
+        self.assertEqual(client.as_plain_text("Ask @x, `@zzz` and @zzzé", {"zzz"}), ("Ask @x, `@zzz` and @zzzé", 0))
+        # Python's tables count fewer letters than the server's (U+093F, a vowel sign, is a letter there):
+        # the names the server gave still go, outside code, ending as a mention ends; and in a reply,
+        # where every team is among the names, a team `dev` is not `@devon`.
+        self.assertEqual([n for _, _, n in client.mentions("@रवि")], ["रव"])
+        refused = client.RelevoError(400, "UNKNOWN_PERSON", "no active person or team is named रवि",
+                                     {"unknown": ["रवि"], "teams": [{"name": "dev"}]})
+        text = "@रवि, `@रवि` and @रविन, ask @devon or @dev-x; @रवि/x and @रवि."
+        self.assertEqual(client.as_plain_text(text, client.refused_mentions(refused, text, "oscar")),
+                         ("रवि, `@रवि` and @रविन, ask @devon or @dev-x; रवि/x and रवि.", 3))
 
     def test_a_mention_made_plain_text_leaves_no_mention(self):
         """However the text is written, leaving out the @ of the mentions of some names leaves none of
@@ -1137,6 +1212,28 @@ class Tools(Base):
         # A person who had the handle `relevo` writes as anyone: no line without the server's flag.
         legacy = {k: v for k, v in note.items() if k != "system"}
         self.assertNotIn(client.RELEASE_NOTES, client.render_note(legacy, "oscar"))
+
+    def test_release_notes_alone_offer_no_answer(self):
+        """A thread whose notes shown are all release notes is informative only: no line offering an
+        answer, in the inbox (new notes) or relevo_thread (notes). With someone's reply, it reads as any
+        board thread."""
+        release = {"id": "n_1", "author": "relevo", "via": "release notes", "created_at": "t",
+                   "text": "Relevo 0.5.0\n\nNews.", "system": True}
+        reply = {"id": "n_2", "author": "ana", "via": "pi", "created_at": "t", "text": "Nice."}
+        thread = {"id": "r_1", "kind": "global", "status": "open", "from": "relevo", "participants": [],
+                  "teams": [], "named": False, "pending": False, "title": "Relevo 0.5.0", "new_notes": [release]}
+        inbox = client.render_inbox({"session": {"label": "Hermes", "you": "oscar"}, "team": [], "teams": [],
+                                     "threads": [thread]}, "oscar")
+        self.assertIn(client.RELEASE_NOTES, inbox)
+        self.assertNotIn(client.OPTIONAL, inbox)
+        whole = {**{k: v for k, v in thread.items() if k != "new_notes"}, "notes": [release], "delivery": []}
+        self.assertNotIn(client.OPTIONAL, client.render_thread(whole, "oscar"))
+        self.assertTrue(client.release_only(thread) and client.release_only(whole))
+        for mixed in ({**thread, "new_notes": [release, reply]}, {**whole, "notes": [release, reply]},
+                      {**thread, "new_notes": [reply]}):
+            self.assertFalse(client.release_only(mixed))
+            self.assertIn(client.OPTIONAL, client.render_thread_head(mixed, "oscar"))
+        self.assertFalse(client.release_only({**thread, "new_notes": []}))
 
     def test_more_threads_than_shown(self):
         session = {"label": "Hermes", "context": None, "you": "oscar"}
