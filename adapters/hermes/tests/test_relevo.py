@@ -423,6 +423,34 @@ class Inbound(Base):
         self.assertNotIn("cut at 4,000", self.events[0].text)
 
 
+class ReleaseNotes(Base):
+    async def test_release_notes_alone_start_no_turn_and_are_not_offered_again(self):
+        """A thread whose new notes are all release notes is handed over without a turn: no MessageEvent,
+        but remembered, so it is not offered again. A reply by someone in it is a turn as any note."""
+        a = self.make_adapter()
+        a._me = "oscar"
+        release = {"id": "n_rel1", "author": "relevo", "via": "release notes", "created_at": "t",
+                   "text": "Relevo 0.5.0\n\nNews.", "truncated": False, "system": True}
+        thread = {"id": "r_release0001", "kind": "global", "status": "open", "from": "relevo", "participants": [],
+                  "teams": [], "named": False, "pending": False, "title": "Relevo 0.5.0", "claimed": None,
+                  "new_notes": [release], "last_note": release}
+        with self.assertLogs(_PKG, level="INFO") as logs:
+            await a._dispatch(thread, {})
+        self.assertEqual(self.events, [])
+        self.assertIn("n_rel1", a._seen)
+        self.assertTrue(any("release notes in thread r_release0001: informative, no turn" in line
+                            for line in logs.output), logs.output)
+        await a._dispatch(thread, {})
+        self.assertEqual(self.events, [])
+        # Ana answers on the board: that is a turn, with her note, as today.
+        reply = {"id": "n_rel2", "author": "ana", "via": "pi", "created_at": "t", "text": "Nice, thanks.",
+                 "truncated": False}
+        await a._dispatch({**thread, "new_notes": [release, reply], "last_note": reply}, {})
+        self.assertEqual(len(self.events), 1)
+        self.assertIn("Nice, thanks.", self.events[0].text)
+        self.assertIn(client.OPTIONAL, self.events[0].text)
+
+
 class Outbound(Base):
     async def test_a_reply_lands_in_the_thread(self):
         a = self.make_adapter()
@@ -1166,6 +1194,28 @@ class Tools(Base):
         # A person who had the handle `relevo` writes as anyone: no line without the server's flag.
         legacy = {k: v for k, v in note.items() if k != "system"}
         self.assertNotIn(client.RELEASE_NOTES, client.render_note(legacy, "oscar"))
+
+    def test_release_notes_alone_offer_no_answer(self):
+        """A thread whose notes shown are all release notes is informative only: no line offering an
+        answer, in the inbox (new notes) or relevo_thread (notes). With someone's reply, it reads as any
+        board thread."""
+        release = {"id": "n_1", "author": "relevo", "via": "release notes", "created_at": "t",
+                   "text": "Relevo 0.5.0\n\nNews.", "system": True}
+        reply = {"id": "n_2", "author": "ana", "via": "pi", "created_at": "t", "text": "Nice."}
+        thread = {"id": "r_1", "kind": "global", "status": "open", "from": "relevo", "participants": [],
+                  "teams": [], "named": False, "pending": False, "title": "Relevo 0.5.0", "new_notes": [release]}
+        inbox = client.render_inbox({"session": {"label": "Hermes", "you": "oscar"}, "team": [], "teams": [],
+                                     "threads": [thread]}, "oscar")
+        self.assertIn(client.RELEASE_NOTES, inbox)
+        self.assertNotIn(client.OPTIONAL, inbox)
+        whole = {**{k: v for k, v in thread.items() if k != "new_notes"}, "notes": [release], "delivery": []}
+        self.assertNotIn(client.OPTIONAL, client.render_thread(whole, "oscar"))
+        self.assertTrue(client.release_only(thread) and client.release_only(whole))
+        for mixed in ({**thread, "new_notes": [release, reply]}, {**whole, "notes": [release, reply]},
+                      {**thread, "new_notes": [reply]}):
+            self.assertFalse(client.release_only(mixed))
+            self.assertIn(client.OPTIONAL, client.render_thread_head(mixed, "oscar"))
+        self.assertFalse(client.release_only({**thread, "new_notes": []}))
 
     def test_more_threads_than_shown(self):
         session = {"label": "Hermes", "context": None, "you": "oscar"}
