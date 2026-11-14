@@ -464,8 +464,40 @@ pub fn open_migrating(path: &str) -> Result<Connection> {
     open_with(path, true)
 }
 
+/// How long opening waits, in all, for other processes opening the same file at the same time
+/// (two servers started at once on a new database, or on a copy not yet in WAL mode).
+const OPEN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(15);
+
 fn open_with(path: &str, migrate: bool) -> Result<Connection> {
     create_private(path).with_context(|| format!("creating database {path}"))?;
+    // SQLite answers "database is locked" at once, without waiting, to a switch to WAL mode while
+    // another process reads the file, and in a few other moments of another one making it or
+    // switching it: an attempt that met one is tried again (it wrote nothing: its transaction
+    // was rolled back), with a new connection, for a while.
+    let start = std::time::Instant::now();
+    let mut pause = std::time::Duration::from_millis(5);
+    loop {
+        match try_open(path, migrate) {
+            Err(e) if busy(&e) && start.elapsed() < OPEN_PATIENCE => {
+                std::thread::sleep(pause);
+                pause = (pause * 2).min(std::time::Duration::from_millis(100));
+            }
+            done => return done,
+        }
+    }
+}
+
+/// Whether `e` is SQLite's "database is locked".
+fn busy(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        c.downcast_ref::<rusqlite::Error>()
+            .and_then(rusqlite::Error::sqlite_error_code)
+            == Some(rusqlite::ErrorCode::DatabaseBusy)
+    })
+}
+
+/// One attempt of `open_with`.
+fn try_open(path: &str, migrate: bool) -> Result<Connection> {
     let mut conn = Connection::open(path).with_context(|| format!("opening database {path}"))?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     // A layout it refuses is left as it is: found before anything is written, WAL mode included.
@@ -628,7 +660,15 @@ impl Layout {
 
 /// The layout of the database `conn` has open, or why this version refuses it.
 fn layout(conn: &Connection, path: &str) -> Result<Layout> {
-    let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    // The version and the tables in one statement, so of the same moment: read apart, a file
+    // another process made in between would show its tables and not yet its version, as a file
+    // of before 0.1.0 does.
+    let (version, tables): (i64, i64) = conn.query_row(
+        "SELECT (SELECT user_version FROM pragma_user_version),
+                (SELECT count(*) FROM sqlite_master)",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
     if version == SCHEMA_VERSION {
         return Ok(Layout::Current);
     }
@@ -638,7 +678,6 @@ fn layout(conn: &Connection, path: &str) -> Result<Layout> {
     if (5..=7).contains(&version) {
         return Ok(Layout::Migrates(version));
     }
-    let tables: i64 = conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))?;
     if tables > 0 {
         bail!(
             "database {path} was made by an older version of relevo (before 0.1.0), which \
@@ -1344,6 +1383,49 @@ mod tests {
                 .permissions()
                 .mode();
             assert_eq!(mode & 0o777, 0o600, "{file}");
+        }
+        drop(conn);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Opens `path` from `n` threads at once, each with its own connection, as servers started
+    /// together: every one must get it, at this layout.
+    fn open_at_once(path: &std::path::Path, n: usize) {
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(n));
+        let opens: Vec<_> = (0..n)
+            .map(|_| {
+                let gate = gate.clone();
+                let path = path.to_str().unwrap().to_string();
+                std::thread::spawn(move || {
+                    gate.wait();
+                    open_migrating(&path).map(drop)
+                })
+            })
+            .collect();
+        for open in opens {
+            if let Err(e) = open.join().unwrap() {
+                panic!("{}: {e:#}", path.display());
+            }
+        }
+        assert_eq!(check(path.to_str().unwrap()).unwrap(), Layout::Current);
+    }
+
+    #[test]
+    fn servers_starting_at_once_on_a_new_file_all_open_it() {
+        let dir = std::env::temp_dir().join(random_id("relevo-test-"));
+        std::fs::create_dir(&dir).unwrap();
+        for round in 0..20 {
+            open_at_once(&dir.join(format!("new-{round}.db")), 6);
+        }
+        // A copy not in WAL mode (as `relevo backup` writes one), opened at once.
+        let source = dir.join("source.db");
+        let conn = open(source.to_str().unwrap()).unwrap();
+        invite(&conn, "ana", "Ana", None, "laptop", 0).unwrap();
+        for round in 0..20 {
+            let copy = dir.join(format!("copy-{round}.db"));
+            conn.execute("VACUUM INTO ?1", [copy.to_str().unwrap()])
+                .unwrap();
+            open_at_once(&copy, 6);
         }
         drop(conn);
         std::fs::remove_dir_all(&dir).unwrap();
