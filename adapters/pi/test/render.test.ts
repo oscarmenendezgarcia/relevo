@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import type { Note, Thread } from "../src/client.ts";
-import { RELEASE_NOTES, neutralize, renderArrival, renderInbox, renderThread, untrusted } from "../src/render.ts";
+import { RELEASE_NOTES, neutralize, releaseOnly, renderArrival, renderInbox, renderThread, untrusted } from "../src/render.ts";
 import { loadExtension } from "./mock-pi.ts";
 import { api, startServer, type TestServer } from "./server.ts";
 
@@ -500,4 +500,16 @@ test("a note by relevo, the server's own person, says it is the release notes an
   // A person who had the handle `relevo` writes as anyone: no line without the server's flag.
   const legacy = { ...t, new_notes: t.new_notes!.map((n) => ({ ...n, system: undefined })) };
   assert.ok(!renderThread(legacy, { me: "oscar" }).includes(RELEASE_NOTES));
+  // With Ana's reply, answering is offered as in any board thread; for the release notes alone it
+  // is not, in the inbox (new notes) and in relevo_thread (notes), and their arrival says so.
+  assert.match(out, /answering is optional/);
+  const alone: Thread = { ...t, new_notes: [t.new_notes![0]] };
+  assert.ok(releaseOnly(alone) && !releaseOnly(t) && !releaseOnly(arrivalThread("global")));
+  assert.doesNotMatch(renderThread(alone, { me: "oscar" }), /answering is optional/);
+  const whole: Thread = { ...alone, new_notes: undefined, notes: alone.new_notes };
+  assert.doesNotMatch(renderThread(whole, { me: "oscar" }), /answering is optional/);
+  const arrival = renderArrival(alone, "oscar");
+  assert.match(arrival, /^Relevo: release notes in thread [^\n]*No answer needed: do not reply to them, claim them or mark them seen\./);
+  assert.doesNotMatch(arrival, /answering is optional|If your own work|relevo_send/);
+  assert.match(renderArrival(t, "oscar"), /If your own work or your person's files answer it/);
 });

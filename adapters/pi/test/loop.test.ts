@@ -110,6 +110,46 @@ test("notes only by the person, from another of their sessions, are not handed o
   }
 });
 
+test("release notes alone start no turn: they are added to the session, informative only", async () => {
+  // A server whose first answer brings the release notes, then a reply in their thread.
+  const note = (id: string, author: string, text: string, system?: boolean) => ({
+    id, author, via: author === "relevo" ? "release notes" : "pi", created_at: `2026-11-14T10:00:0${id.slice(-1)}Z`, text, truncated: false, ...(system ? { system } : {}),
+  });
+  const release = { id: "r_release00001", kind: "global", title: "Relevo 0.5.0", from: "relevo", participants: [], teams: [], named: false,
+    status: "open", pending: false, context: null, claimed: null };
+  const answers = [
+    [{ ...release, new_notes: [note("n_1", "relevo", "Relevo 0.5.0\n\nNews for everyone.", true)] }],
+    [{ ...release, new_notes: [note("n_2", "ana", "Nice, thanks.")] }],
+  ];
+  const fake = createServer((req, res) => {
+    res.setHeader("Content-Type", "application/json");
+    if (req.method !== "GET") return void res.end(JSON.stringify({ ok: true }));
+    const threads = answers.shift() ?? [];
+    const answer = () => res.end(JSON.stringify({ session: { label: "pi", context: null, you: "oscar" }, team: [], teams: [], threads, more: 0 }));
+    threads.length ? answer() : setTimeout(answer, 200);
+  });
+  await new Promise<void>((r) => fake.listen(0, "127.0.0.1", r));
+  const { port } = fake.address() as any;
+  const ext = loadExtension({ env: { RELEVO_URL: `http://127.0.0.1:${port}`, RELEVO_TOKEN: "rlv_fake" }, home, wait: 1, minBackoffMs: 50 });
+  try {
+    await ext.emit("session_start", { reason: "startup" }, ext.ctx(home, "rpc"));
+    await until(() => ext.sent.length === 2);
+    const [quiet, reply] = ext.sent;
+    assert.deepEqual(quiet.options, { triggerTurn: false });
+    assert.match(quiet.message.content, /^Relevo: release notes in thread r_release00001, on the global board[^\n]*No answer needed: do not reply/);
+    assert.match(quiet.message.content, /News for everyone\.\n<\/untrusted>\nThese are the release notes of the Relevo server's new version: they need no answer\./);
+    assert.doesNotMatch(quiet.message.content, /answering is optional|If your own work/);
+    // In the session all the same, as pi adds a message that starts no turn.
+    assert.ok(ext.seen.some((m) => m.content === quiet.message.content));
+    // A reply by someone in their thread is handed over as any note.
+    assert.deepEqual(reply.options, { triggerTurn: true });
+    assert.match(reply.message.content, /answering is optional\.[^\n]*If your own work or your person's files answer it/);
+  } finally {
+    await ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, "rpc"));
+    fake.close();
+  }
+});
+
 test("a note that lands while the agent is busy reaches it even if the person presses Esc", async () => {
   const ext = extension();
   await ext.emit("session_start", { reason: "startup" }, ext.ctx(home, "tui"));
