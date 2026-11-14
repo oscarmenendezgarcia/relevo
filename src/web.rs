@@ -607,16 +607,16 @@ mod tests {
     }
 
     /// One word for each thing (docs/web.md): what is pending is *Needs you* (the filter and the
-    /// group), the pill on a pending thread says what to do, *Reply needed*, the person is *You*,
+    /// group), the pill on a pending thread says where it is, *Waiting on you*, the person is *You*,
     /// and the group under *Needs you* is *The rest*. The words that were there before are
     /// gone from the page, and the tests would not notice them coming back.
     #[test]
     fn the_page_says_the_one_word_for_each_thing() {
-        for gone in ["Waiting for you", "Your agent", "Earlier"] {
+        for gone in ["Waiting for you", "Reply needed", "Your agent", "Earlier"] {
             assert!(!SCRIPT.contains(gone), "the page says {gone}");
         }
         assert!(
-            SCRIPT.contains("el('span', 'status', 'Reply needed')"),
+            SCRIPT.contains("el('span', 'status', 'Waiting on you')"),
             "the pill"
         );
         assert!(SCRIPT.contains("['needs', 'Needs you',"), "the group");
