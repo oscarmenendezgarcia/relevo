@@ -177,6 +177,41 @@ pub fn newer(a: &str, b: &str) -> bool {
     }
 }
 
+/// How a client's version stands against the server's (`relevo clients`), in the order the admin
+/// reads them: what needs updating first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Standing {
+    /// Older than the server.
+    Outdated,
+    /// No version reported, or one that cannot be read.
+    Unknown,
+    /// Ahead of the server.
+    Newer,
+    /// The server's version.
+    Current,
+}
+
+impl Standing {
+    /// `version` (none: not reported) against the `server`'s, in semver order.
+    pub fn of(version: Option<&str>, server: &str) -> Standing {
+        match version {
+            Some(v) if newer(server, v) => Standing::Outdated,
+            Some(v) if newer(v, server) => Standing::Newer,
+            Some(v) if readable(v) && readable(server) => Standing::Current,
+            _ => Standing::Unknown,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Standing::Outdated => "outdated",
+            Standing::Unknown => "unknown",
+            Standing::Newer => "newer",
+            Standing::Current => "current",
+        }
+    }
+}
+
 /// The note: `Relevo <version>`, a blank line, then the section, cut at a line to fit a note,
 /// with a last line saying where the rest is.
 pub fn note_text(version: &str, section: &str) -> String {

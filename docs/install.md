@@ -200,7 +200,8 @@ Day to day:
 
 ```
 relevo people                     # everyone, active or not
-relevo sessions [ana]             # agents seen in the last 7 days, with their context
+relevo sessions [ana]             # agents seen in the last 7 days, with their context and client
+relevo clients [--outdated]       # which client and version each agent runs; outdated ones first
 relevo token list [ana]
 relevo token revoke t_…           # a lost laptop
 relevo deactivate ana             # someone leaves: every token of theirs stops working
@@ -277,11 +278,12 @@ After the migration, every question to the whole team (`@team` in 0.3.x) is a th
 
 To go back to 0.3.x, as for 0.2.x above: the backup from step 1 in place of the database, then the 0.3.x binary. Notes written since the backup are lost.
 
-**From 0.4.x to 0.5.0.** Threads no longer close, and `done` is now called `seen`. 0.5.0 moves the database from layout 7 to 8, in place (and one of layout 5 or 6 through the earlier steps first): people, tokens, teams, threads and notes stay.
+**From 0.4.x to 0.5.0.** Threads no longer close, and `done` is now called `seen`. 0.5.0 moves the database from layout 7 to 9, in place, through layout 8 (and one of layout 5 or 6 through the earlier steps first): people, tokens, teams, threads and notes stay. A database of layout 8, made by a development build of 0.5.0, moves to 9 the same way: each session then keeps the client and version its agent reports (`relevo clients`, below).
 
 1. Back up, with the server running: `relevo backup ~/relevo-before-0.5.0.db`. It stays readable by 0.4.x.
 2. Replace the binary from the 0.5.0 deploy files, as above: `deploy/install.sh --enable ./relevo-<0.5.0>`. It backs the database up again, installs, and restarts the server.
-3. The server migrates the database as it starts, and logs how many closed threads it opened. Then it posts the release notes of 0.5.0 on the global board, as **Relevo**, and logs it. Check: `systemctl --user status relevo`, then `relevo people`.
+3. The server migrates the database as it starts, and logs a line per step (with how many closed threads it opened). Then it posts the release notes of 0.5.0 on the global board, as **Relevo**, and logs it. Check: `systemctl --user status relevo`, then `relevo people`.
+4. As teammates' agents make their next requests, `relevo clients` shows which client and version each session runs, outdated ones first; `relevo clients --outdated` lists only those still to update, and those that do not say (`unknown`: pi and Hermes before 0.5.0 send nothing; `relevo mcp` before 0.5.0 shows its version with a `?`, read from its User-Agent).
 
 After the migration, every thread closed under 0.4.x is open, and handled by each of its named participants up to its latest note: nothing becomes pending. Its notes also count as reached by everyone in it, named or not, and by every session of theirs, so none of these threads comes back to anyone's inbox as new, even with notes someone had not fetched. (Where that handles or delivers a note for someone, their delivery says so as of when the thread was closed, from no particular session.) Anyone in it may write there again; a new note makes it pending for whom it names, as in any thread. Clients before 0.5.0 keep working: `done` and `close` are read as `seen` through 0.x (a close never fails), and the timeline's `show=closed` lists nothing. Teammates' clients update themselves (docs/update.md).
 

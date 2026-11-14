@@ -86,8 +86,16 @@ enum Command {
     },
     /// List everyone, active or not.
     People,
-    /// List sessions seen in the last 7 days: label, session id, context, last seen.
+    /// List sessions seen in the last 7 days: label, session id, context, last seen, client.
     Sessions { handle: Option<String> },
+    /// List the client and version each session seen in the last 7 days runs, and whether it is
+    /// older than this server (outdated first), with a summary line.
+    Clients {
+        handle: Option<String>,
+        /// Only the sessions that are outdated or say no version.
+        #[arg(long)]
+        outdated: bool,
+    },
     /// Set the one line on what a person (or their agent) knows or looks after.
     About { handle: String, about: String },
     /// Stop a person from using Relevo (every token of theirs is revoked).
@@ -461,6 +469,51 @@ fn release_notes(conn: &rusqlite::Connection, no_release_notes: bool, now: i64) 
     }
 }
 
+/// `relevo clients`: a tab-separated line per session (handle, label, session, context, client,
+/// version, last seen, standing), outdated first, and a summary of them all. With `outdated`,
+/// only the outdated and unknown ones are listed.
+fn clients(sessions: Vec<db::SessionInfo>, server: &str, outdated: bool) -> (Vec<String>, String) {
+    use relevo::release::Standing;
+    let mut rows: Vec<(Standing, db::SessionInfo)> = sessions
+        .into_iter()
+        .map(|s| {
+            let version = s.client.as_deref().and_then(|c| c.split_once('/'));
+            (Standing::of(version.map(|(_, v)| v), server), s)
+        })
+        .collect();
+    // Stable: within a standing, by handle, most recently seen first.
+    rows.sort_by_key(|(standing, _)| *standing);
+    let count = |which| rows.iter().filter(|(s, _)| *s == which).count();
+    let plural = |n| if n == 1 { "" } else { "s" };
+    let current = count(Standing::Current);
+    let mut summary = format!("{current} session{} on {server}", plural(current));
+    for which in [Standing::Outdated, Standing::Unknown, Standing::Newer] {
+        let n = count(which);
+        if n > 0 || which != Standing::Newer {
+            summary.push_str(&format!(", {n} {}", which.as_str()));
+        }
+    }
+    let lines = rows
+        .iter()
+        .filter(|(standing, _)| {
+            !outdated || matches!(standing, Standing::Outdated | Standing::Unknown)
+        })
+        .map(|(standing, s)| {
+            let (name, version) = s.client_version().unwrap_or(("unknown", "-".to_string()));
+            format!(
+                "{}\t{}\t{}\t{}\t{name}\t{version}\t{}\t{}",
+                s.handle,
+                s.label,
+                s.session.as_deref().unwrap_or("default"),
+                s.context.as_deref().unwrap_or("general"),
+                db::rfc3339(s.last_seen),
+                standing.as_str()
+            )
+        })
+        .collect();
+    (lines, summary)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -639,14 +692,27 @@ async fn main() -> Result<()> {
         Command::Sessions { handle } => {
             for s in db::list_sessions(&conn, handle.as_deref(), now)? {
                 println!(
-                    "{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}",
                     s.handle,
                     s.label,
                     s.session.as_deref().unwrap_or("default"),
                     s.context.as_deref().unwrap_or("general"),
-                    db::rfc3339(s.last_seen)
+                    db::rfc3339(s.last_seen),
+                    s.client_version()
+                        .map_or("unknown".to_string(), |(name, v)| format!("{name}/{v}"))
                 );
             }
+        }
+        Command::Clients { handle, outdated } => {
+            let (lines, summary) = clients(
+                db::list_sessions(&conn, handle.as_deref(), now)?,
+                env!("CARGO_PKG_VERSION"),
+                outdated,
+            );
+            for line in lines {
+                println!("{line}");
+            }
+            println!("{summary}");
         }
         Command::About { handle, about } => {
             db::set_about(&conn, &handle, &about)?;
