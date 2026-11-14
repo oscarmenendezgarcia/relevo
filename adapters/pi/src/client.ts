@@ -1,8 +1,24 @@
 // A small client for the Relevo HTTP API (docs/protocol.md).
 
 import { randomBytes, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import type { Config } from "./config.ts";
 import { pinnedRequest, type Answer } from "./pinned.ts";
+
+/**
+ * What every request says of this client (`Relevo-Client`, docs/protocol.md): `pi/<version>`, the
+ * version in this extension's package.json, as it was when pi loaded it. `null` when it cannot be
+ * read: the header is left out, which the server takes as an unknown client.
+ */
+export const CLIENT: string | null = (() => {
+  try {
+    const { version } = JSON.parse(readFileSync(resolve(import.meta.dirname, "..", "package.json"), "utf8"));
+    return typeof version === "string" && version ? `pi/${version}` : null;
+  } catch {
+    return null;
+  }
+})();
 
 export interface Person {
   handle: string;
@@ -173,6 +189,7 @@ export class Client {
       // A reply's @ mentions name people (docs/protocol.md, `send`): this client knows it.
       "Relevo-Mentions": "1",
     };
+    if (CLIENT) headers["Relevo-Client"] = CLIENT;
     const context = await this.context();
     if (context) headers["Relevo-Context"] = context;
     if (body !== undefined) headers["Content-Type"] = "application/json";
