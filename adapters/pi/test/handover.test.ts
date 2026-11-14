@@ -225,6 +225,43 @@ test("a note written after a lost answer comes as new, saying earlier ones may b
   }
 });
 
+test("after a lost answer, a thread whose only new note is the person's own still comes, saying to read it whole", async () => {
+  const proxy = await lossyProxy(server.url);
+  // A back-off long enough for another session of oscar's to write before the next request.
+  const ext = loadExtension({
+    env: { RELEVO_URL: proxy.url, RELEVO_TOKEN: oscar, RELEVO_CONTEXT: "" },
+    home,
+    wait: 1,
+    minBackoffMs: 1500,
+  });
+  await ext.emit("session_start", { reason: "startup" }, ext.ctx(home, "tui"));
+  try {
+    const opened = await api(server, ana, "POST", "/api/send", { text: "@oscar Own after loss: which branch?" });
+    await until(() => ext.seen.length === 1);
+    await api(server, oscar, "GET", "/api/inbox", undefined, "own-after-loss"); // It has the first note only.
+    proxy.drop = true;
+    await api(server, ana, "POST", "/api/send", { thread: opened.thread, text: "Lost: and which commit?" });
+    await until(() => proxy.dropped === 1);
+    // That session writes and ends: Ana's second note stays pending, and is no longer new here.
+    await api(server, oscar, "POST", "/api/send", { thread: opened.thread, text: "Own: main." }, "own-after-loss");
+    await api(server, oscar, "DELETE", "/api/session", undefined, "own-after-loss");
+    await until(() => ext.seen.length === 2, 5000);
+    const message = ext.seen[1].content;
+    assert.match(message, /Own: main\./);
+    assert.ok(
+      message.includes(
+        "A request for news failed just before this answer, and its answer may have carried earlier notes of this thread " +
+          `that never reached you: read it whole with relevo_thread { id: "${opened.thread}" } before acting.`,
+      ),
+      message,
+    );
+  } finally {
+    await ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, "tui"));
+    proxy.server.closeAllConnections();
+    proxy.server.close();
+  }
+});
+
 test("a thread the agent left alone is not handed over again in the same process", async () => {
   const ext = loadExtension({ env: { RELEVO_URL: server.url, RELEVO_TOKEN: oscar, RELEVO_CONTEXT: "" }, home, wait: 1 });
   await ext.emit("session_start", { reason: "startup" }, ext.ctx(home, "tui"));
