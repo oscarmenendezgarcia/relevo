@@ -861,7 +861,7 @@ impl Relevo {
             Err(e) => return Err(e.clone()),
         };
         let now = crate::db::now_unix();
-        let today = waiting::start_of_day(now, waiting::local_offset(now));
+        let today = waiting::day_start(now, waiting::local_offset);
         let r = waiting_threads(&client, today).await;
         self.reached(&r);
         let w = match r {

@@ -70,12 +70,40 @@ fn name(names: &Map<String, Value>, you: &str, handle: &str) -> String {
     if handle == you {
         return "You".into();
     }
-    names
-        .get(handle)
-        .and_then(Value::as_str)
-        .filter(|n| !n.trim().is_empty())
-        .unwrap_or(handle)
-        .to_string()
+    let name = names.get(handle).and_then(Value::as_str).map(plain);
+    match name {
+        Some(name) if !name.trim().is_empty() => name.trim().to_string(),
+        _ => plain(handle),
+    }
+}
+
+/// Unicode's format characters (category Cf): invisible, and some reorder the text after them
+/// (U+202E, right-to-left override) or hide in it (zero-width spaces and joiners).
+fn is_format(c: char) -> bool {
+    matches!(c as u32,
+        0xAD | 0x600..=0x605 | 0x61C | 0x6DD | 0x70F | 0x890..=0x891 | 0x8E2 | 0x180E
+        | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x206F | 0xFEFF
+        | 0xFFF9..=0xFFFB | 0x110BD | 0x110CD | 0x13430..=0x1343F | 0x1BCA0..=0x1BCA3
+        | 0x1D173..=0x1D17A | 0xE0001 | 0xE0020..=0xE007F)
+}
+
+/// Unicode's line and paragraph separators, which a terminal or a renderer may break a line at.
+const SEPARATORS: [char; 2] = ['\u{2028}', '\u{2029}'];
+
+/// A teammate's text on one line, as the list shows it (a terminal shows what the model prints):
+/// control characters (C0, C1) and line or paragraph separators become spaces, and format
+/// characters are dropped.
+pub fn plain(text: &str) -> String {
+    text.chars()
+        .filter(|c| !is_format(*c))
+        .map(|c| {
+            if c.is_control() || SEPARATORS.contains(&c) {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 /// `text` cut to `max` characters, at a word when one ends in the second half, with `…` when
@@ -92,19 +120,17 @@ fn cut(text: &str, max: usize) -> String {
     format!("{}…", text[..at].trim_end())
 }
 
-/// The first line of `text` that is not blank, without control characters (a terminal shows
-/// what the model prints), and, with `mentions`, without the `@` names it starts with: the list
-/// is for the person, who knows a note names them.
+/// The first line of `text` that is not blank (U+2028 and U+2029 end a line too), `plain`, and,
+/// with `mentions`, without the `@` names it starts with: the list is for the person, who knows
+/// a note names them.
 pub fn first_line(text: &str, mentions: bool, max: usize) -> String {
-    let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-    let mut line: String = line
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect::<String>()
-        .trim()
-        .trim_start_matches('#')
-        .trim()
-        .to_string();
+    let text = text.replace(SEPARATORS, "\n");
+    let line = text
+        .lines()
+        .map(plain)
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or_default();
+    let mut line: String = line.trim().trim_start_matches('#').trim().to_string();
     if mentions {
         let mut rest = line.as_str();
         while let Some(after) = rest.strip_prefix('@')
@@ -183,6 +209,21 @@ pub fn start_of_day(now: i64, offset: i64) -> i64 {
     now - (now + offset).rem_euclid(86_400)
 }
 
+/// When the local day of `now` began, in unix seconds, with `offset` the local offset at each
+/// instant: the local date's midnight, whose offset may not be `now`'s (a change to or from
+/// summer time during the day). A midnight that does not exist (skipped by a change at 00:00)
+/// is the first instant of the day.
+pub fn day_start(now: i64, offset: impl Fn(i64) -> i64) -> i64 {
+    let midnight = start_of_day(now, offset(now)) + offset(now); // local seconds
+    let guess = midnight - offset(midnight - offset(now));
+    let at = midnight - offset(guess);
+    if start_of_day(at, offset(at)) + offset(at) == midnight {
+        at
+    } else {
+        guess.max(at)
+    }
+}
+
 /// `11:20` in local time when it is the day of `now`, else `11:20 on 2026-11-14`.
 pub fn clock(at: i64, now: i64, offset: i64) -> String {
     let local = at + offset;
@@ -215,7 +256,7 @@ fn kind(t: &Value) -> String {
                 .into_iter()
                 .flatten()
                 .filter_map(Value::as_str)
-                .map(|t| format!("@{t}"))
+                .map(|t| format!("@{}", plain(t)))
                 .collect();
             if teams.is_empty() {
                 "team".into()
@@ -383,9 +424,16 @@ pub fn refusal(
             (Some(at), by) => {
                 out.push_str("was handled");
                 if let Some(by) = by {
-                    out.push_str(&format!(" by your {}", md(s(&by["label"]))));
-                    if let Some(context) = by["context"].as_str() {
-                        out.push_str(&format!(" in {}", md(context)));
+                    let label = plain(s(&by["label"]));
+                    let label = label.trim();
+                    out.push_str(&format!(
+                        " by your {}",
+                        md(if label.is_empty() { "agent" } else { label })
+                    ));
+                    if let Some(context) = by["context"].as_str().map(plain)
+                        && !context.trim().is_empty()
+                    {
+                        out.push_str(&format!(" in {}", md(context.trim())));
                     }
                 }
                 out.push_str(&format!(" at {}", clock(at, now, offset(at))));
@@ -584,6 +632,33 @@ The VPN is down tomorrow from 9:00 to 10:00.
         );
         assert_eq!(first_line("abcdef", false, 3), "abc…");
         assert_eq!(first_line("<channel x>", false, 100), "&lt;channel x>");
+        // Line and paragraph separators end the first line; format characters (an override
+        // that reverses the text after it, zero-width spaces) and C1 controls are dropped or
+        // made spaces.
+        assert_eq!(first_line("Pay\u{2028}now", false, 100), "Pay");
+        assert_eq!(first_line("\u{2029}\nHi", false, 100), "Hi");
+        assert_eq!(
+            first_line("a\u{202E}b\u{200B}c\u{FEFF}\u{85}d", false, 100),
+            "abc d"
+        );
+        assert_eq!(plain("An\u{202E}a\u{2028}x\u{9b}"), "Ana x ");
+        // In the list: names, team names and the reply lose them too.
+        let names = json!({ "ana": "A\u{202E}na\u{200D}" })
+            .as_object()
+            .unwrap()
+            .clone();
+        let threads = vec![
+            json!({ "id": "r_1", "kind": "team", "from": "ana", "notes": 2,
+            "teams": ["back\u{202E}end"],
+            "first_note": note("n_1", "ana", NOW - 60, "Q\u{2029}second"),
+            "last_note": note("n_2", "ana", NOW - 60, "R\u{2028}more") }),
+        ];
+        let (text, entries) = list("oscar", &names, &threads, 1, None, NOW);
+        assert!(
+            text.contains("**1**  **Ana** · *team @backend · 1m*\nQ\n*└ R*\n"),
+            "{text}"
+        );
+        assert_eq!(entries[0].who, "Ana");
     }
 
     #[test]
@@ -629,6 +704,16 @@ The VPN is down tomorrow from 9:00 to 10:00.
         assert_eq!(start_of_day(NOW, 0), NOW - 15 * 3600);
         assert_eq!(start_of_day(NOW, 3600), NOW - 16 * 3600);
         assert_eq!(start_of_day(NOW, -16 * 3600), NOW - 23 * 3600);
+        // The day starts at the local date's midnight, whose offset may not be now's: a zone
+        // at +1 that moves to +2 at 01:00 UTC on this day (summer time) began its day at 23:00
+        // UTC the day before, at +1.
+        let switch = NOW - 14 * 3600;
+        let zone = |at: i64| if at < switch { 3600 } else { 7200 };
+        assert_eq!(day_start(NOW, zone), NOW - 16 * 3600);
+        assert_eq!(day_start(NOW, |_| 3600), start_of_day(NOW, 3600));
+        // And back, from +2 to +1: the day began at 22:00 UTC, at +2.
+        let zone = |at: i64| if at < switch { 7200 } else { 3600 };
+        assert_eq!(day_start(NOW, zone), NOW - 17 * 3600);
         assert_eq!(clock(NOW - 3600, NOW, 0), "14:00");
         assert_eq!(clock(NOW - 3600, NOW, 3600), "15:00");
         assert_eq!(clock(NOW - 86_400, NOW, 0), "15:00 on 2026-11-07");
@@ -682,6 +767,12 @@ The VPN is down tomorrow from 9:00 to 10:00.
         assert_eq!(
             refusal(1, &e, &t, &listed, NOW, |_| 3600).unwrap(),
             "**Thread 1 (Ana)** was handled by your Claude Code at 12:00 · *nothing sent*"
+        );
+        // An empty or odd label says "agent", never nothing.
+        t["delivery"][0]["handled_by"] = json!({ "label": " \u{202E}", "context": "" });
+        assert_eq!(
+            refusal(1, &e, &t, &listed, NOW, |_| 0).unwrap(),
+            "**Thread 1 (Ana)** was handled by your agent at 11:00 · *nothing sent*"
         );
         t["delivery"] = json!([]);
         assert_eq!(
