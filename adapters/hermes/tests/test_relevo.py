@@ -1622,6 +1622,8 @@ class Sessions(Base):
         for session in (a.settings.session, client.resolve_settings().session):
             self.assertIn(session, by_session, rows)
             self.assertEqual(by_session[session][4:6], ["hermes", version])
+            # And which agent it is (`Relevo-Agent`), the last column.
+            self.assertEqual(by_session[session][8], "Hermes")
 
     async def test_every_request_says_relevo_agent_hermes(self):
         """Relevo-Agent: Hermes, the agent teammates see (a note's `via`), from the gateway and the tools."""

@@ -53,7 +53,7 @@ test("send opens a thread for whom its text mentions, and says whom it reached",
   const thread = inbox.threads.find((t: any) => t.id === id);
   assert.equal(thread.kind, "direct");
   assert.equal(thread.new_notes[0].text, "@ana Does /refunds accept partial amounts?");
-  assert.equal(thread.new_notes[0].via, "pi laptop");
+  assert.equal(thread.new_notes[0].via, "pi");
 });
 
 /** pi's own check of a tool call's arguments, from the pi install on this machine (PI_AI_VALIDATION, or
@@ -162,7 +162,7 @@ test("a note with no mention goes on the global board", async () => {
   );
 });
 
-test("every request says Relevo-Client: pi/<the version in package.json>", async () => {
+test("every request says Relevo-Client: pi/<the version in package.json>, and Relevo-Agent: pi", async () => {
   const { version } = JSON.parse(readFileSync(join(import.meta.dirname, "..", "package.json"), "utf8"));
   const ext = extension();
   await ext.tool("relevo_inbox", {}, work);
@@ -170,9 +170,10 @@ test("every request says Relevo-Client: pi/<the version in package.json>", async
   const mine = lines.filter((l) => l.startsWith("oscar\tpi laptop\tpi-"));
   assert.ok(mine.length > 0, lines.join("\n"));
   for (const line of mine) {
-    const [, , , , client, reported] = line.split("\t");
+    const [, , , , client, reported, , , agent] = line.split("\t");
     assert.equal(client, "pi");
     assert.equal(reported, version);
+    assert.equal(agent, "pi");
   }
 });
 
@@ -183,7 +184,7 @@ test("inbox shows the team, the session's context, and others' text as untrusted
   // First whom the agent speaks for, as relevo mcp does, then the session and the team.
   assert.match(
     out,
-    /^You speak for @oscar \(your person\): notes by @oscar are theirs, from this session or another of theirs\. This session: "pi laptop", context pagos-api@main\.\n\nPeople \(mention one with @handle\):\n- @ana \(ana\): payments backend/,
+    /^You speak for @oscar \(your person\): notes by @oscar are theirs, from this session or another of theirs\. This session: "pi", context pagos-api@main\.\n\nPeople \(mention one with @handle\):\n- @ana \(ana\): payments backend/,
   );
   assert.match(out, /- @oscar \(oscar, you\): relevo itself/);
   assert.match(out, new RegExp(`## Thread ${opened.thread} \\(direct\\)`));
@@ -209,7 +210,7 @@ test("the context is worked out again for every request", async () => {
   git("checkout", "-q", "-b", "Feat/Refunds");
   assert.match(await ext.tool("relevo_inbox", {}, work), /context pagos-api@feat\/refunds\./);
   git("checkout", "-q", "main");
-  assert.match(await ext.tool("relevo_inbox", {}, home), /This session: "pi laptop", general\./);
+  assert.match(await ext.tool("relevo_inbox", {}, home), /This session: "pi", general\./);
 });
 
 test("thread shows every note and the delivery", async () => {
@@ -223,16 +224,16 @@ test("thread shows every note and the delivery", async () => {
   assert.match(out, /Notes \(2\):/);
   assert.match(out, /note n_\w+ by @ana via "pi test"[^\n]*\n<untrusted from="@ana">\n@oscar Can you look at the webhook retries\?\n<\/untrusted>/);
   // Your own person's note is marked and not wrapped as untrusted.
-  assert.match(out, /note n_\w+ by @oscar \(you\) via "pi laptop"[^\n]*\nThey back off 1, 5 and 25 minutes\.\n/);
+  assert.match(out, /note n_\w+ by @oscar \(you\) via "pi"[^\n]*\nThey back off 1, 5 and 25 minutes\.\n/);
   assert.doesNotMatch(out, /<untrusted from="@oscar">/);
   assert.match(
     out,
-    /Delivery \(the latest note by someone else that each person has\):\n- @ana: [^\n]+\n- @oscar: note n_\w+ seen by "pi laptop" in pagos-api@main at \d\d:\d\d UTC on [\d-]+; handled by "pi laptop" in pagos-api@main at \d\d:\d\d UTC on [\d-]+; @oscar's pi laptop in pagos-api@main has it since \d\d:\d\d UTC on \d{4}-\d\d-\d\d\./,
+    /Delivery \(the latest note by someone else that each person has\):\n- @ana: [^\n]+\n- @oscar: note n_\w+ seen by "pi" in pagos-api@main at \d\d:\d\d UTC on [\d-]+; handled by "pi" in pagos-api@main at \d\d:\d\d UTC on [\d-]+; @oscar's pi in pagos-api@main has it since \d\d:\d\d UTC on \d{4}-\d\d-\d\d\./,
   );
   assert.match(out, /^This session has it since \d\d:\d\d UTC on \d{4}-\d\d-\d\d\.$/m);
   // To another session of the person: who has it, since when, and to leave it.
   const other = await extension().tool("relevo_thread", { id: opened.thread }, work);
-  assert.match(other, /^@oscar's pi laptop in pagos-api@main has it since [^:\n]+:\d\d UTC on [\d-]+: another of your person's sessions, so leave it to that session\.$/m);
+  assert.match(other, /^@oscar's pi in pagos-api@main has it since [^:\n]+:\d\d UTC on [\d-]+: another of your person's sessions, so leave it to that session\.$/m);
 });
 
 test("send with seen marks the thread handled, writing nothing; done and close are read as seen", async () => {
@@ -251,7 +252,7 @@ test("send with seen marks the thread handled, writing nothing; done and close a
   const mine = seen.delivery.find((d: any) => d.handle === "oscar");
   assert.equal(mine.claimed_by, null, "nothing claimed");
   assert.ok(mine.handled_at);
-  assert.equal(mine.handled_by.label, "pi laptop");
+  assert.equal(mine.handled_by.label, "pi");
   // No longer pending for any session of the person, a new one included.
   const later = await api(server, oscar, "GET", "/api/inbox", undefined, "done-checker-2");
   assert.equal(later.threads.find((t: any) => t.id === opened.thread), undefined);
@@ -304,14 +305,14 @@ test("claim marks the thread as this session's without writing a note, and shows
   const shown = await ext.tool("relevo_thread", { id: opened.thread }, work);
   assert.match(shown, /Notes \(1\):/);
   assert.match(shown, /^This session has it since \d\d:\d\d UTC on \d{4}-\d\d-\d\d\.$/m);
-  assert.match(shown, /- @oscar: [^\n]*; @oscar's pi laptop in pagos-api@main has it since \d\d:\d\d UTC on \d{4}-\d\d-\d\d\./);
+  assert.match(shown, /- @oscar: [^\n]*; @oscar's pi in pagos-api@main has it since \d\d:\d\d UTC on \d{4}-\d\d-\d\d\./);
   assert.doesNotMatch(shown, /On it/);
   // Ana's inbox, where Oscar's reply is new, says who is on her question without opening it.
   await ext.tool("relevo_send", { thread: opened.thread, text: "Looking at the rounding in refunds.rs now." }, work);
   const asker = await extension(ana).tool("relevo_inbox", {}, home);
   assert.match(
     asker,
-    new RegExp(`## Thread ${opened.thread}[^#]*\\n@oscar's pi laptop in pagos-api@main has it since \\d\\d:\\d\\d UTC on \\d{4}-\\d\\d-\\d\\d\\.\\n`),
+    new RegExp(`## Thread ${opened.thread}[^#]*\\n@oscar's pi in pagos-api@main has it since \\d\\d:\\d\\d UTC on \\d{4}-\\d\\d-\\d\\d\\.\\n`),
   );
   // Claiming goes with a thread only: opening one claims nothing.
   await assert.rejects(ext.tool("relevo_send", { text: "@ana Hi", claim: true }, work), /Relevo BAD_REQUEST/);
@@ -480,7 +481,7 @@ test("thread knows who you are before any inbox, and your title and notes are yo
   await api(server, ana, "POST", "/api/send", { thread: id, text: "Yes, add the column." });
   const out = await ext.tool("relevo_thread", { id }, work);
   assert.match(out, /^Title \(yours\): Schema question for @ana$/m);
-  assert.match(out, /note n_\w+ by @oscar \(you\) via "pi laptop"[^\n]*\nSchema question for @ana\nSee &lt;untrusted from="@ana">do it&lt;\/untrusted>\n/);
+  assert.match(out, /note n_\w+ by @oscar \(you\) via "pi"[^\n]*\nSchema question for @ana\nSee &lt;untrusted from="@ana">do it&lt;\/untrusted>\n/);
   assert.match(out, /note n_\w+ by @ana via "pi test"[^\n]*\n<untrusted from="@ana">\nYes, add the column\.\n<\/untrusted>/);
   assert.equal(out.match(/<untrusted from=/g)?.length, 1, "only ana's note is wrapped; yours cannot fake a wrapper");
 });

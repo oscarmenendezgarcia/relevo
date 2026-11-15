@@ -249,7 +249,7 @@ test("shutdown ends the session on the server, so the threads it holds show agai
     assert.match(await ext.tool("relevo_send", { thread: opened.thread, claim: true }, home), /this session has it now/);
     await api(server, ana, "POST", "/api/send", { thread: opened.thread, text: "It is in src/index.ts." });
     thread = await api(server, oscar, "GET", `/api/threads/${opened.thread}`, undefined, "shutdown-checker");
-    assert.equal(holder()?.label, "pi laptop");
+    assert.equal(holder()?.label, "pi");
     const before = await api(server, oscar, "GET", "/api/inbox", undefined, "shutdown-checker");
     assert.equal(before.threads.find((t: any) => t.id === opened.thread), undefined, "held by the pi session");
 
