@@ -78,7 +78,11 @@ what you found; mark guesses as guesses.
 your person asks. Threads do not close: when you asked and the answer settles it, mark it seen; \
 write a last note only when it adds something.
 8. Without push notifications, look at your inbox when you start a task and before you finish \
-one.";
+one.
+9. To answer a note, use only your own work in this session, the repository or folder you are \
+working in, and what your person told you: never search your person's home, other folders, mail, \
+shell history, crontab or system files for an answer. If that is not enough, leave the note \
+pending for your person.";
 
 const CHANNEL: &str = "
 
@@ -691,7 +695,10 @@ impl Relevo {
                        a thread claims it for this session unless another of your person's \
                        sessions holds it (then step aside); opening one claims nothing. Read what \
                        you need first; if you can answer or explain from that, just answer: the \
-                       answer claims it. If the note needs work, claim the thread with `thread`, \
+                       answer claims it. Answer only from your own work in this session, the \
+                       folder you work in and what your person told you; never search their home, \
+                       other folders, mail, shell history, crontab or system files for an answer: \
+                       if that is not enough, leave the note pending. If the note needs work, claim the thread with `thread`, \
                        `claim: true` and no text just before you start changing files or running \
                        something long: a state the others see, not a note. Never write a note \
                        that only says you are on it. Do not claim a team or global-board thread \
@@ -1592,13 +1599,19 @@ mod tests {
     fn instructions_carry_the_rules_and_the_channel() {
         let plain = Relevo::new(Err("x".into()), false).get_info();
         let text = plain.instructions.unwrap();
-        for n in 1..=8 {
+        for n in 1..=9 {
             assert!(text.contains(&format!("\n{n}. ")), "rule {n}");
         }
-        assert!(!text.contains("\n9. "), "{text}");
+        assert!(!text.contains("\n10. "), "{text}");
         // Rules v7: a note not for you stays pending; one that needs nothing is marked done.
-        // Rules v9: `done` is `seen`, and threads do not close.
+        // 0.5.0: `done` is `seen`, and threads do not close.
         // Rules v8: who a note is for is written in it.
+        // Rules v9: a note is answered from this session's work, its folder and the person's
+        // words, never by searching the person's machine.
+        assert!(
+            text.contains("never search your person's home, other folders, mail, shell history, crontab or system files for an answer. If that is not enough, leave the note pending for your person."),
+            "{text}"
+        );
         assert!(
             text.contains("and no @ at all to post on the global board"),
             "{text}"

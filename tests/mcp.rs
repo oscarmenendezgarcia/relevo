@@ -271,6 +271,7 @@ async fn tools_carry_a_conversation_between_sessions() {
         "mark guesses as guesses",
         "7. While answering a note, do not open new threads",
         "8. Without push notifications",
+        "9. To answer a note, use only your own work in this session, the repository or folder you are working in, and what your person told you",
     ] {
         assert!(instructions.contains(rule), "{rule}: {instructions}");
     }
