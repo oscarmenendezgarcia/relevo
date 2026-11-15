@@ -1,18 +1,30 @@
 # Changelog
 
-## 0.6.0 (unreleased)
+## 0.6.0 (15-nov-2026)
 
-**`/relevo` in Claude Code.** A command that lists what is waiting on you, numbered and oldest first, and acts on it from the terminal: `/relevo 1 <your answer>` (your agent writes it in your words and shows exactly what it sent), `/relevo 2` (open a thread), `/relevo seen 1 3`, `/relevo @ana …`. Listing only reads, like `relevo web`; a number whose thread another of your sessions handled since sends nothing and says so. `relevo connect` offers to install it (`--command`, `--no-command`), and `relevo update` keeps it current. The list comes as markdown that Claude prints as it is (bold names, the numbers to type in code), with your teammates' text escaped so it cannot break it, and its title says how many threads your agents handled today ("Waiting on you · 3 · your agents handled 5 today"), in pi and Hermes too. For MCP clients: the new read-only tool `waiting`, `send` and `thread` take its numbers, the prompt `relevo` carries the command for clients that make prompts into commands (Gemini CLI's `/relevo`, Claude Code's `/mcp__relevo__relevo`), and the timeline takes `handled_since`.
+**`/relevo`: what waits on you, where you work.**
+Your agents answer what they can; `/relevo` shows you the rest and lets you deal with it, in Claude Code, pi and Hermes.
+- `/relevo` lists what waits on you, oldest first: "Waiting on you · 3 · your agents handled 5 today".
+- `/relevo 1 <your answer>` (your agent writes it in your words and shows what it sent), `/relevo 2` to open a thread, `/relevo seen 1 3`, `/relevo @ana …`.
+- Listing only reads. A number never answers twice: if another of your sessions handled that thread, nothing is sent.
+- `relevo connect` offers to install it for Claude Code, and `relevo update` keeps it current. Other MCP clients get it as the prompt `relevo` (Gemini CLI's `/relevo`).
+- In Hermes chats it works in private chats only. Handing an answer to Hermes needs `plugins.entries.relevo.allow_gateway_injection: true`; without it, `/relevo` tells you what to say.
 
-**Relevo in Claude Code's status line.** `relevo statusline` shows what waits on you under Claude Code's prompt: `relevo` in grey when nothing does, `relevo ● 2` in amber when 2 threads wait on you, `relevo ● offline 11:20` in red when the server is out of reach (`relevo ● config error` when your Relevo config can't be read), and nothing when Relevo isn't set up. It only reads (like `relevo web`: your agents see nothing of it), about once every 15 seconds, shared by all your sessions, and never takes more than about 2 seconds. `relevo connect` offers to set it when Claude Code has no status line yet (`--statusline`, `--no-statusline`), leaving the rest of your settings as they were; a status line of your own is never changed, and `connect` says how to add Relevo to it.
+**See what waits on you at a glance.**
+- Claude Code: `relevo statusline` under the prompt: `relevo` in grey, `relevo ● 2` in amber, `relevo ● offline 11:20` in red. `relevo connect` offers to set it if you have no status line of your own.
+- pi: the same in pi's footer.
 
-**`/relevo` in pi.** The same command in pi: the list drawn in pi's colours and added to the session for your agent, the numbers in `relevo_send` and `relevo_thread` with the same checks, and a footer item, `relevo ● 3`, that says how many threads wait on you (or that the server is offline since when). After `/relevo 1 <your answer>` (or `seen`) your agent replies with what the tool said and nothing more, in pi as in Claude Code: no reasoning shown, no recap of the other threads.
+**"via" says which agent wrote the note.**
+- "via Claude Code", "via pi", "via Hermes", no longer the token's label. The label is now only the admin's name for a token.
 
-**`/relevo` in Hermes.** The same command in the Hermes CLI and in your Hermes chats (Telegram, Discord…): the list in colour in the terminal and as markdown in a chat, with your teammates' text kept as text (Telegram included, whose converter misreads escaped markdown), its numbers kept per Hermes session (per chat in the gateway) in `relevo_send` and `relevo_thread` with the same checks, and `/relevo 1 <your answer>`, `/relevo 2`, `/relevo seen 1 3` and `/relevo @ana …` handed to Hermes, which replies with what the tool said. Handing it over needs the owner's `plugins.entries.relevo.allow_gateway_injection: true`, in the CLI as in a chat; without it `/relevo` tells you what to say to Hermes ("Tell me: reply to 1 that …").
+**Agents are more careful (rules v9).**
+- They answer only from their own work, the folder they work in and what you told them, never by searching your machine.
+- They never answer personal matters for you (availability, decisions, commitments, opinions): those stay pending for you.
 
-**Agents answer from what they know, not by searching your machine.** Rules v9, in `relevo mcp`, pi and Hermes: to answer a teammate's note, an agent uses only its own work in this session, the repository or folder it works in, and what you told it; it never looks outside that folder for an answer (your home, other folders, mail, shell history, crontab, system files), and if that is not enough it leaves the note pending for you. `send`'s description says the same. And it never answers personal matters for you (your availability, decisions, commitments, opinions or private life): those stay pending for you.
-
-**"via" says which agent wrote the note.** A note shows the agent that actually wrote it, "via Claude Code", "via pi", "via Hermes", "via Gemini CLI", no longer the token's label, which was wrong when one token serves several agents and said "via agent" when unset. `relevo mcp` takes the name from your MCP client, pi and Hermes say their own, and the "handled by your … in …" lines follow. The token's label is now only the admin's name for it (`relevo token list`, `relevo sessions`, `relevo clients`, which also show each session's agent). Notes already written keep theirs, and a client before 0.6.0 still shows its label. The database moves to layout 10 when the server starts.
+**For admins**
+- Take a `relevo backup` first. The database moves to layout 10 when `relevo serve` starts.
+- `relevo clients` and `relevo sessions` show each session's agent.
+- MCP: the read-only tool `waiting`; `send` and `thread` take its numbers; the timeline takes `handled_since`.
 
 ## 0.5.0 (14-nov-2026)
 
