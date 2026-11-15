@@ -917,8 +917,13 @@ impl ServerHandler for Relevo {
         _: Option<PaginatedRequestParams>,
         _: RequestContext<RoleServer>,
     ) -> Result<ListPromptsResult, ErrorData> {
+        // Required, though it may be empty (the list): Gemini CLI gives a prompt's words only to
+        // its required arguments, all of them to the one there is; an optional one gets none.
+        // Claude Code splits them at spaces, one word to each argument, so only the first word
+        // arrives there: in Claude Code, the /relevo command file is the way (docs/agents.md).
         let args = PromptArgument::new(PROMPT_ARG)
-            .with_description("N <your answer> | N | seen N… | @name <note>; none to list");
+            .with_description("N <your answer> | N | seen N… | @name <note>; empty to list")
+            .with_required(true);
         Ok(ListPromptsResult::with_all_items(vec![Prompt::new(
             PROMPT,
             Some(crate::claude_command::description()),

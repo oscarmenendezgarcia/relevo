@@ -2526,7 +2526,10 @@ async fn the_relevo_prompt_is_the_command() {
         "Relevo · what is waiting on you, and answer it from here"
     );
     assert_eq!(prompts[0]["arguments"][0]["name"], "args");
-    assert_ne!(prompts[0]["arguments"][0]["required"], true);
+    // Required, so Gemini CLI passes it the whole text after the command (it gives positional
+    // words to required arguments only); empty or missing still lists.
+    assert_eq!(prompts[0]["arguments"][0]["required"], true);
+    assert_eq!(prompts[0]["arguments"].as_array().unwrap().len(), 1);
     let got = mcp
         .request(
             "prompts/get",
@@ -2543,15 +2546,18 @@ async fn the_relevo_prompt_is_the_command() {
         "{text}"
     );
     assert!(text.contains("NOT inside a code block"), "{text}");
-    // No arguments: the list.
-    let got = mcp
-        .request("prompts/get", json!({ "name": "relevo" }))
-        .await;
-    let text = got["messages"][0]["content"]["text"].as_str().unwrap();
-    assert!(
-        text.starts_with("This is my /relevo command. Arguments: ``\n"),
-        "{text}"
-    );
+    // No arguments, or an empty one: the list.
+    for params in [
+        json!({ "name": "relevo" }),
+        json!({ "name": "relevo", "arguments": { "args": "" } }),
+    ] {
+        let got = mcp.request("prompts/get", params).await;
+        let text = got["messages"][0]["content"]["text"].as_str().unwrap();
+        assert!(
+            text.starts_with("This is my /relevo command. Arguments: ``\n"),
+            "{text}"
+        );
+    }
     // Another name is an error.
     mcp.write(json!({ "jsonrpc": "2.0", "id": 99, "method": "prompts/get",
                       "params": { "name": "nope" } }))
