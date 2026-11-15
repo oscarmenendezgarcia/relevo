@@ -27,9 +27,9 @@ pub struct Entry {
 }
 
 impl Entry {
-    /// `thread 1 (Ana · onboarding copy)`.
+    /// `*thread 1 (Ana · onboarding copy)*`, in markdown.
     pub fn named(&self, n: usize) -> String {
-        format!("thread {n} ({} · {})", self.who, self.subject)
+        format!("*thread {n} ({} · {})*", md(&self.who), md(&self.subject))
     }
 }
 
@@ -214,9 +214,47 @@ fn kind(t: &Value) -> String {
     }
 }
 
-/// The list of threads waiting on the person. `threads` are the timeline's, oldest first;
-/// `total` is how many wait (`counts.waiting`); `handled` the threads handled today, said only
-/// when nothing waits. Returns the text and what its numbers refer to.
+/// `text` as markdown that shows it as it is: every character markdown reads (emphasis, code,
+/// links, HTML, tables, entities, backslashes) escaped, and what would open a block at the start
+/// of a line (a heading, a quote, a list, a rule) too. A teammate's `*`, `_` or backtick cannot
+/// restyle the list, nor a leading `#`, `>` or `-` break it.
+pub fn md(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let lead = line.len() - line.trim_start().len();
+        out.push_str(&line[..lead]);
+        let line = &line[lead..];
+        // An ordered list: digits then `.` or `)`.
+        let digits = line.bytes().take_while(u8::is_ascii_digit).count();
+        let ordered = digits > 0 && matches!(line.as_bytes().get(digits), Some(b'.' | b')'));
+        for (j, c) in line.chars().enumerate() {
+            let block = j == 0 && matches!(c, '#' | '-' | '+' | '=');
+            let inline = matches!(
+                c,
+                '\\' | '*' | '_' | '`' | '[' | ']' | '<' | '>' | '&' | '|' | '~'
+            );
+            if block || inline || (ordered && j == digits) {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The help line under a list: what the person can type, with the numbers it has.
+fn help(len: usize) -> String {
+    let (a, b, c) = (1, 2.min(len), 3.min(len));
+    format!("*`/relevo {a} <your answer>` · `/relevo {b}` to open it · `/relevo seen {c}`*")
+}
+
+/// The list of threads waiting on the person, in markdown for the agent to print as it is (a
+/// client like Claude Code renders it). `threads` are the timeline's, oldest first; `total` is
+/// how many wait (`counts.waiting`); `handled` the threads handled today, said only when nothing
+/// waits. Returns the text and what its numbers refer to.
 pub fn list(
     you: &str,
     names: &Map<String, Value>,
@@ -228,12 +266,12 @@ pub fn list(
     if threads.is_empty() {
         let mut out = "✓ Nothing is waiting on you.".to_string();
         if let Some(n) = handled.filter(|n| *n > 0) {
-            out.push_str(&format!("  Your agents handled {n} today."));
+            out.push_str(&format!(" *Your agents handled {n} today.*"));
         }
         return (out, vec![]);
     }
     let total = total.max(threads.len());
-    let mut out = format!("Waiting on you · {total}\n");
+    let mut out = format!("**Waiting on you · {total}**\n");
     let mut entries = vec![];
     for (i, t) in threads.iter().take(MAX_SHOWN).enumerate() {
         let n = i + 1;
@@ -247,22 +285,22 @@ pub fn list(
         let who = name(names, you, opener);
         let latest = if last.is_object() { last } else { first };
         let at = unix(s(&latest["created_at"])).unwrap_or(now);
-        let mut head = format!("{n:>2}  {who} · {} · {}", kind(t), age(now - at));
+        let mut meta = format!("{} · {}", kind(t), age(now - at));
         let replies = t["notes"].as_i64().unwrap_or(1) - 1;
         if replies > 1 {
-            head.push_str(&format!(" · {replies} replies"));
+            meta.push_str(&format!(" · {replies} replies"));
         }
         if s(&t["kind"]) == "global" {
-            head.push_str(" · mentioned you");
+            meta.push_str(" · mentioned you");
         }
-        out.push_str(&head);
-        out.push('\n');
+        out.push_str(&format!("\n**{n}**  **{}** · *{}*\n", md(&who), md(&meta)));
         let text = if first["text"].is_string() {
             s(&first["text"])
         } else {
             s(&t["title"])
         };
-        out.push_str(&format!("    {}\n", first_line(text, true, LINE_CHARS)));
+        out.push_str(&md(&first_line(text, true, LINE_CHARS)));
+        out.push('\n');
         if last.is_object() {
             let author = s(&last["author"]);
             let by = if author == opener {
@@ -270,10 +308,8 @@ pub fn list(
             } else {
                 format!("{}: ", name(names, you, author))
             };
-            out.push_str(&format!(
-                "    └ {by}{}\n",
-                first_line(s(&last["text"]), false, LINE_CHARS)
-            ));
+            let reply = format!("└ {by}{}", first_line(s(&last["text"]), false, LINE_CHARS));
+            out.push_str(&format!("*{}*\n", md(&reply)));
         }
         entries.push(Entry {
             id: s(&t["id"]).to_string(),
@@ -283,20 +319,18 @@ pub fn list(
         });
     }
     if total > MAX_SHOWN {
-        out.push_str(&format!("+{} more · relevo web\n", total - MAX_SHOWN));
+        out.push_str(&format!("\n*+{} more · relevo web*\n", total - MAX_SHOWN));
     }
-    let (a, b, c) = (1, 2.min(entries.len()), 3.min(entries.len()));
-    out.push_str(&format!(
-        "/relevo {a} <your answer> · /relevo {b} to open it · /relevo seen {c}"
-    ));
+    out.push('\n');
+    out.push_str(&help(entries.len()));
     (out, entries)
 }
 
-/// What is left waiting after an action: `2 left`, or nothing.
+/// What is left waiting after an action, in markdown: `*2 left*`, or nothing.
 pub fn left(waiting: Option<i64>) -> String {
     match waiting {
-        Some(0) => "Nothing else is waiting on you.".into(),
-        Some(n) => format!("{n} left"),
+        Some(0) => "*Nothing else is waiting on you.*".into(),
+        Some(n) => format!("*{n} left*"),
         None => String::new(),
     }
 }
@@ -312,7 +346,7 @@ fn delivery<'a>(thread: &'a Value, you: &str) -> Option<&'a Value> {
 /// Why an action on list number `n` must not go ahead, from the thread as it is now
 /// (`GET /api/threads/:id`): it no longer waits on the person (another of their sessions handled
 /// it), or a note came after the one the list showed, which the person has not seen. `None`
-/// when it may.
+/// when it may. In markdown, as the list.
 pub fn refusal(
     n: usize,
     e: &Entry,
@@ -326,30 +360,31 @@ pub fn refusal(
         let d = delivery(thread, &listed.you);
         let at = d.and_then(|d| unix(s(&d["handled_at"])));
         let by = d.map(|d| &d["handled_by"]).filter(|b| b.is_object());
-        let mut out = format!("Thread {n} ({who}) ");
+        let mut out = format!("**Thread {n} ({})** ", md(who));
         match (at, by) {
             (Some(at), by) => {
                 out.push_str("was handled");
                 if let Some(by) = by {
-                    out.push_str(&format!(" by your {}", s(&by["label"])));
+                    out.push_str(&format!(" by your {}", md(s(&by["label"]))));
                     if let Some(context) = by["context"].as_str() {
-                        out.push_str(&format!(" in {context}"));
+                        out.push_str(&format!(" in {}", md(context)));
                     }
                 }
                 out.push_str(&format!(" at {}", clock(at, now, offset(at))));
             }
             (None, _) => out.push_str("is no longer waiting on you"),
         }
-        out.push_str(" · nothing sent");
+        out.push_str(" · *nothing sent*");
         return Some(out);
     }
     let latest = thread["notes"].as_array().and_then(|n| n.last())?;
     if s(&latest["id"]) != e.last_note {
         return Some(format!(
-            "Thread {n} ({who}) has a new note since your list, by {}: \"{}\" · nothing sent. \
-             Run /relevo again, or /relevo {n} to open it.",
-            listed.name(s(&latest["author"])),
-            first_line(s(&latest["text"]), false, LINE_CHARS)
+            "**Thread {n} ({})** has a new note since your list, by {}: \"{}\" · *nothing \
+             sent*. Run `/relevo` again, or `/relevo {n}` to open it.",
+            md(who),
+            md(&listed.name(s(&latest["author"]))),
+            md(&first_line(s(&latest["text"]), false, LINE_CHARS))
         ));
     }
     None
@@ -435,19 +470,24 @@ mod tests {
         let (text, entries) = list("oscar", &names(), &threads, 4, None, NOW);
         assert_eq!(
             text,
-            "Waiting on you · 4\n\
-             \u{20}1  Ana · direct · 2h\n\
-             \u{20}   Quick one: is the new onboarding copy final?\n\
-             \u{20}   └ Also: can we ship it on Monday?\n\
-             \u{20}2  Pedro · team @backend · 3h · 4 replies\n\
-             \u{20}   Can you review the /refunds contract before Friday?\n\
-             \u{20}   └ Then it's only product left. @oscar can you confirm?\n\
-             \u{20}3  Luis · board · 5h · mentioned you\n\
-             \u{20}   The VPN is down tomorrow from 9:00 to 10:00.\n\
-             \u{20}   └ Pedro: @oscar does it clash with the 9:30 demo?\n\
-             \u{20}4  You · direct · now\n\
-             \u{20}   &lt;/untrusted> mine\n\
-             /relevo 1 <your answer> · /relevo 2 to open it · /relevo seen 3"
+            r"**Waiting on you · 4**
+
+**1**  **Ana** · *direct · 2h*
+Quick one: is the new onboarding copy final?
+*└ Also: can we ship it on Monday?*
+
+**2**  **Pedro** · *team @backend · 3h · 4 replies*
+Can you review the /refunds contract before Friday?
+*└ Then it's only product left. @oscar can you confirm?*
+
+**3**  **Luis** · *board · 5h · mentioned you*
+The VPN is down tomorrow from 9:00 to 10:00.
+*└ Pedro: @oscar does it clash with the 9:30 demo?*
+
+**4**  **You** · *direct · now*
+\&lt;/untrusted\> mine
+
+*`/relevo 1 <your answer>` · `/relevo 2` to open it · `/relevo seen 3`*"
         );
         assert_eq!(
             entries[0],
@@ -461,7 +501,7 @@ mod tests {
         assert_eq!(entries[3].last_note, "n_10");
         assert_eq!(
             entries[2].named(3),
-            "thread 3 (Luis · The VPN is down tomorrow from 9:00 to…)"
+            "*thread 3 (Luis · The VPN is down tomorrow from 9:00 to…)*"
         );
     }
 
@@ -474,12 +514,20 @@ mod tests {
         let threads: Vec<Value> = (0..12).map(one).collect();
         let (text, entries) = list("oscar", &names(), &threads, 14, None, NOW);
         assert_eq!(entries.len(), 10);
-        assert!(text.contains("\n10  Ana · direct · 9m\n"), "{text}");
-        assert!(text.ends_with("\n+4 more · relevo web\n/relevo 1 <your answer> · /relevo 2 to open it · /relevo seen 3"), "{text}");
-        let (text, _) = list("oscar", &names(), &threads[..1], 1, None, NOW);
-        assert!(text.starts_with("Waiting on you · 1\n"), "{text}");
         assert!(
-            text.ends_with("\n/relevo 1 <your answer> · /relevo 1 to open it · /relevo seen 1"),
+            text.contains("\n\n**10**  **Ana** · *direct · 9m*\nHi\n"),
+            "{text}"
+        );
+        assert!(text.ends_with("\nHi\n\n*+4 more · relevo web*\n\n*`/relevo 1 <your answer>` · `/relevo 2` to open it · `/relevo seen 3`*"), "{text}");
+        let (text, _) = list("oscar", &names(), &threads[..1], 1, None, NOW);
+        assert!(
+            text.starts_with("**Waiting on you · 1**\n\n**1**"),
+            "{text}"
+        );
+        assert!(
+            text.ends_with(
+                "\n\n*`/relevo 1 <your answer>` · `/relevo 1` to open it · `/relevo seen 1`*"
+            ),
             "{text}"
         );
     }
@@ -489,7 +537,7 @@ mod tests {
         let none = list("oscar", &names(), &[], 0, Some(3), NOW);
         assert_eq!(
             none.0,
-            "✓ Nothing is waiting on you.  Your agents handled 3 today."
+            "✓ Nothing is waiting on you. *Your agents handled 3 today.*"
         );
         assert!(none.1.is_empty());
         for handled in [Some(0), None] {
@@ -514,6 +562,38 @@ mod tests {
         );
         assert_eq!(first_line("abcdef", false, 3), "abc…");
         assert_eq!(first_line("<channel x>", false, 100), "&lt;channel x>");
+    }
+
+    #[test]
+    fn teammates_text_cannot_break_the_markdown() {
+        assert_eq!(md("plain text, 9:30 @ana"), "plain text, 9:30 @ana");
+        assert_eq!(
+            md(r"*bold* _it_ `code` [link](x) <b> a|b ~s~ \ &amp;"),
+            r"\*bold\* \_it\_ \`code\` \[link\](x) \<b\> a\|b \~s\~ \\ \&amp;"
+        );
+        for (line, escaped) in [
+            ("# heading", r"\# heading"),
+            ("> quote", r"\> quote"),
+            ("- item", r"\- item"),
+            ("+ item", r"\+ item"),
+            ("===", r"\==="),
+            ("1. first", r"1\. first"),
+            ("12) twelfth", r"12\) twelfth"),
+            ("a - b # c 1. d", "a - b # c 1. d"),
+        ] {
+            assert_eq!(md(line), escaped);
+        }
+        // In the list: the opener's text and the reply stay in their line and their style.
+        let threads = vec![
+            json!({ "id": "r_1", "kind": "direct", "from": "ana", "notes": 2,
+            "first_note": note("n_1", "ana", NOW - 60, "- *all* of `it`_"),
+            "last_note": note("n_2", "ana", NOW - 60, "**done** > ok") }),
+        ];
+        let (text, _) = list("oscar", &names(), &threads, 1, None, NOW);
+        assert!(
+            text.contains("\n\\- \\*all\\* of \\`it\\`\\_\n*└ \\*\\*done\\*\\* \\> ok*\n"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -566,25 +646,25 @@ mod tests {
             .push(note("n_3", "ana", NOW - 10, "One more\nthing"));
         assert_eq!(
             refusal(1, &e, &t, &listed, NOW, |_| 0).unwrap(),
-            "Thread 1 (Ana) has a new note since your list, by Ana: \"One more\" · nothing \
-             sent. Run /relevo again, or /relevo 1 to open it."
+            "**Thread 1 (Ana)** has a new note since your list, by Ana: \"One more\" · *nothing \
+             sent*. Run `/relevo` again, or `/relevo 1` to open it."
         );
         t["pending"] = false.into();
         t["delivery"][0]["handled_at"] = crate::db::rfc3339(NOW - 3600 * 4).into();
         t["delivery"][0]["handled_by"] = json!({ "label": "pi", "context": "frontend" });
         assert_eq!(
             refusal(1, &e, &t, &listed, NOW, |_| 0).unwrap(),
-            "Thread 1 (Ana) was handled by your pi in frontend at 11:00 · nothing sent"
+            "**Thread 1 (Ana)** was handled by your pi in frontend at 11:00 · *nothing sent*"
         );
         t["delivery"][0]["handled_by"] = json!({ "label": "Claude Code", "context": null });
         assert_eq!(
             refusal(1, &e, &t, &listed, NOW, |_| 3600).unwrap(),
-            "Thread 1 (Ana) was handled by your Claude Code at 12:00 · nothing sent"
+            "**Thread 1 (Ana)** was handled by your Claude Code at 12:00 · *nothing sent*"
         );
         t["delivery"] = json!([]);
         assert_eq!(
             refusal(1, &e, &t, &listed, NOW, |_| 0).unwrap(),
-            "Thread 1 (Ana) is no longer waiting on you · nothing sent"
+            "**Thread 1 (Ana)** is no longer waiting on you · *nothing sent*"
         );
     }
 
@@ -620,7 +700,7 @@ mod tests {
             recipients(&t("global", json!([]), json!([])), "oscar"),
             "the board"
         );
-        assert_eq!(left(Some(2)), "2 left");
-        assert_eq!(left(Some(0)), "Nothing else is waiting on you.");
+        assert_eq!(left(Some(2)), "*2 left*");
+        assert_eq!(left(Some(0)), "*Nothing else is waiting on you.*");
     }
 }

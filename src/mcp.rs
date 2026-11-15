@@ -1,5 +1,6 @@
-//! `relevo mcp`: a stdio MCP server with the tools `send`, `inbox`, `thread` and `waiting`, and with
-//! `--channel`, Claude Code channel events for new notes.
+//! `relevo mcp`: a stdio MCP server with the tools `send`, `inbox`, `thread` and `waiting`, the
+//! prompt `relevo` (the /relevo command), and with `--channel`, Claude Code channel events for
+//! new notes.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,9 +9,11 @@ use std::time::Duration;
 
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::model::{
-    CustomNotification, Implementation, ServerCapabilities, ServerConfig, ServerNotification,
+    CustomNotification, ErrorData, GetPromptRequestParams, GetPromptResponse, GetPromptResult,
+    Implementation, ListPromptsResult, PaginatedRequestParams, Prompt, PromptArgument,
+    PromptMessage, Role, ServerCapabilities, ServerConfig, ServerNotification,
 };
-use rmcp::service::{Peer, RoleServer};
+use rmcp::service::{Peer, RequestContext, RoleServer};
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -445,9 +448,9 @@ fn error(e: Error) -> String {
     out
 }
 
-/// What `waiting` says when this machine has no server or token.
-const NOT_CONNECTED: &str = "Relevo isn't connected on this machine. Run relevo connect <server> \
-                             with the token your admin gave you.";
+/// What `waiting` says when this machine has no server or token (markdown, as the list).
+const NOT_CONNECTED: &str = "**Relevo isn't connected on this machine.** Run `relevo connect \
+                             <server>` with the token your admin gave you.";
 
 /// The most pages of 50 `waiting` reads (the oldest come last).
 const MAX_PAGES: usize = 200;
@@ -511,7 +514,8 @@ impl Relevo {
         }
     }
 
-    /// A failed call, for `/relevo`: the server out of reach in a line, else as `error` says.
+    /// A failed call, for `/relevo`: the server out of reach in a line of markdown, else as
+    /// `error` says.
     fn failure(&self, client: &Client, e: Error) -> String {
         if !e.unreachable() {
             if let Error::Api { status: 404, .. } = e {
@@ -524,8 +528,8 @@ impl Relevo {
         let now = crate::db::now_unix();
         let since = lock(&self.unreachable_since).unwrap_or(now);
         format!(
-            "Relevo can't reach {} since {}. Notes you send now will fail; nothing is lost on \
-             the server.",
+            "**Relevo can't reach {} since {}.** *Notes you send now will fail; nothing is lost \
+             on the server.*",
             waiting::host(client.url()),
             waiting::clock(since, now, waiting::local_offset(since))
         )
@@ -597,8 +601,8 @@ impl Relevo {
                 Ok(v) => v,
                 Err(err) => {
                     notes.push(format!(
-                        "Thread {n} ({}): {}",
-                        e.who,
+                        "**Thread {n} ({}):** {}",
+                        waiting::md(&e.who),
                         self.failure(client, err)
                     ));
                     continue;
@@ -608,8 +612,9 @@ impl Relevo {
             done.push(match &text {
                 Some(text) => {
                     let mut line = format!(
-                        "Sent to {}: \"{text}\" · {}",
-                        waiting::recipients(&t, &listed.you),
+                        "Sent to {}: \"{}\" · {}",
+                        waiting::md(&waiting::recipients(&t, &listed.you)),
+                        waiting::md(text),
                         e.named(n)
                     );
                     let added: Vec<String> = v["added"]
@@ -619,7 +624,10 @@ impl Relevo {
                         .filter_map(|h| h.as_str().map(|h| format!("@{h}")))
                         .collect();
                     if !added.is_empty() {
-                        line.push_str(&format!(" · added {} to the thread", added.join(", ")));
+                        line.push_str(&format!(
+                            " · added {} to the thread",
+                            waiting::md(&added.join(", "))
+                        ));
                     }
                     if v["claimed"] == "other-session" {
                         line.push_str(" · another of your sessions holds this thread");
@@ -792,8 +800,8 @@ impl Relevo {
     #[tool(
         description = "Read only: the threads waiting on your person (direct ones, and team and \
                        global-board threads that name them), oldest first, numbered, as the \
-                       /relevo command shows them. Show its text to your person exactly as it \
-                       is. It delivers, handles and claims nothing. To act on one, give its \
+                       /relevo command shows them, in markdown. Show its text to your person \
+                       exactly as it is, as markdown and not in a code block. It delivers, handles and claims nothing. To act on one, give its \
                        number as `thread` to `send` (an answer in your person's words, or \
                        `seen: true`, several numbers for `seen`) or as `id` to `thread`: \
                        numbers refer to the last list of this session, and `send` sends nothing \
@@ -838,10 +846,11 @@ impl ServerHandler for Relevo {
             let mut experimental = std::collections::BTreeMap::new();
             experimental.insert("claude/channel".to_string(), Map::new());
             caps.enable_experimental_with(experimental)
+                .enable_prompts()
                 .enable_tools()
                 .build()
         } else {
-            caps.enable_tools().build()
+            caps.enable_prompts().enable_tools().build()
         };
         let mut instructions = RULES.to_string();
         if self.channel {
@@ -851,7 +860,49 @@ impl ServerHandler for Relevo {
             .with_server_info(Implementation::new("relevo", env!("CARGO_PKG_VERSION")))
             .with_instructions(instructions)
     }
+
+    /// The prompt `relevo`: the /relevo command's text (`adapters/claude-code/commands/relevo.md`),
+    /// for clients that turn MCP prompts into commands (Gemini CLI's `/relevo`, Claude Code's
+    /// `/mcp__relevo__relevo`).
+    async fn list_prompts(
+        &self,
+        _: Option<PaginatedRequestParams>,
+        _: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, ErrorData> {
+        let args = PromptArgument::new(PROMPT_ARG)
+            .with_description("N <your answer> | N | seen N… | @name <note>; none to list");
+        Ok(ListPromptsResult::with_all_items(vec![Prompt::new(
+            PROMPT,
+            Some(crate::claude_command::description()),
+            Some(vec![args]),
+        )]))
+    }
+
+    async fn get_prompt(
+        &self,
+        p: GetPromptRequestParams,
+        _: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResponse, ErrorData> {
+        if p.name != PROMPT {
+            return Err(ErrorData::invalid_params(
+                format!("no prompt {:?}: the only one is \"{PROMPT}\"", p.name),
+                None,
+            ));
+        }
+        let args = p.arguments.unwrap_or_default();
+        let args = args.get(PROMPT_ARG).and_then(Value::as_str).unwrap_or("");
+        let text = crate::claude_command::prompt(args);
+        Ok(
+            GetPromptResult::new(vec![PromptMessage::new_text(Role::User, text)])
+                .with_description(crate::claude_command::description())
+                .into(),
+        )
+    }
 }
+
+/// The MCP prompt with the /relevo command, and its one argument.
+const PROMPT: &str = "relevo";
+const PROMPT_ARG: &str = "args";
 
 /// Serves MCP on stdin and stdout until stdin closes or SIGTERM or SIGINT comes (Claude Code
 /// kills its MCP servers when it exits), then ends the session on the server (best effort, for

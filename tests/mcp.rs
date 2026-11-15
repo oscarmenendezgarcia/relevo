@@ -2076,17 +2076,21 @@ async fn waiting_lists_what_waits_oldest_first_and_changes_nothing() {
     let list = oscar.ok("waiting", json!({})).await;
     assert_eq!(
         list,
-        "Waiting on you · 3\n\
-         \u{20}1  Luis · board · 5h · mentioned you\n\
-         \u{20}   The VPN is down tomorrow from 9:00 to 10:00.\n\
-         \u{20}   └ Pedro: @oscar does it clash with the 9:30 product demo?\n\
-         \u{20}2  Pedro · team @backend · 3h · 4 replies\n\
-         \u{20}   Can you review the /refunds contract before Friday?\n\
-         \u{20}   └ Then it's only product left. @oscar can you confirm the app shows the error?\n\
-         \u{20}3  Ana · direct · 2h\n\
-         \u{20}   Quick one: is the new onboarding copy final?\n\
-         \u{20}   └ Also: can we ship it on Monday?\n\
-         /relevo 1 <your answer> · /relevo 2 to open it · /relevo seen 3"
+        "**Waiting on you · 3**
+
+**1**  **Luis** · *board · 5h · mentioned you*
+The VPN is down tomorrow from 9:00 to 10:00.
+*└ Pedro: @oscar does it clash with the 9:30 product demo?*
+
+**2**  **Pedro** · *team @backend · 3h · 4 replies*
+Can you review the /refunds contract before Friday?
+*└ Then it's only product left. @oscar can you confirm the app shows the error?*
+
+**3**  **Ana** · *direct · 2h*
+Quick one: is the new onboarding copy final?
+*└ Also: can we ship it on Monday?*
+
+*`/relevo 1 <your answer>` · `/relevo 2` to open it · `/relevo seen 3`*"
     );
     // Read only: no delivery, nothing handled or claimed, no session made or seen.
     oscar.ok("waiting", json!({})).await;
@@ -2147,8 +2151,8 @@ async fn list_numbers_reply_open_and_refuse_what_was_handled_since() {
         .await;
     assert_eq!(
         out,
-        "Sent to @ana: \"Yes, the onboarding copy is final, and Monday is fine.\" · thread 3 \
-         (Ana · Quick one: is the new onboarding copy…)\n2 left"
+        "Sent to @ana: \"Yes, the onboarding copy is final, and Monday is fine.\" · *thread 3 \
+         (Ana · Quick one: is the new onboarding copy…)*\n*2 left*"
     );
     assert!(!pending(&s, "oscar", &direct));
     let last: String = s
@@ -2197,7 +2201,8 @@ async fn list_numbers_reply_open_and_refuse_what_was_handled_since() {
     assert_eq!(
         out,
         format!(
-            "Thread 1 (Luis) was handled by your Claude Code in frontend at {hm} · nothing sent"
+            "**Thread 1 (Luis)** was handled by your Claude Code in frontend at {hm} · *nothing \
+             sent*"
         )
     );
     assert_eq!(notes(&board), before);
@@ -2214,8 +2219,8 @@ async fn list_numbers_reply_open_and_refuse_what_was_handled_since() {
         .await;
     assert_eq!(
         out,
-        "Thread 2 (Pedro) has a new note since your list, by Pedro: \"@oscar ping?\" · nothing \
-         sent. Run /relevo again, or /relevo 2 to open it."
+        "**Thread 2 (Pedro)** has a new note since your list, by Pedro: \"@oscar ping?\" · \
+         *nothing sent*. Run `/relevo` again, or `/relevo 2` to open it."
     );
     assert!(pending(&s, "oscar", &team));
     other.close().await;
@@ -2233,7 +2238,7 @@ async fn seen_takes_several_numbers_and_the_list_says_what_was_handled_today() {
     let mut oscar = Mcp::start(&s, "oscar", &s.dir, None, &[]).await;
     let list = oscar.ok("waiting", json!({})).await;
     assert!(
-        list.starts_with("Waiting on you · 3\n 1  Ana · direct · now\n"),
+        list.starts_with("**Waiting on you · 3**\n\n**1**  **Ana** · *direct · now*\n"),
         "{list}"
     );
     let out = oscar
@@ -2241,7 +2246,8 @@ async fn seen_takes_several_numbers_and_the_list_says_what_was_handled_today() {
         .await;
     assert_eq!(
         out,
-        "Marked seen: thread 1 (Ana · first), thread 3 (Luis · third). Nothing was written. 1 left"
+        "Marked seen: *thread 1 (Ana · first)*, *thread 3 (Luis · third)*. Nothing was written. \
+         *1 left*"
     );
     assert!(!pending(&s, "oscar", &ids[0]) && !pending(&s, "oscar", &ids[2]));
     assert!(pending(&s, "oscar", &ids[1]));
@@ -2251,12 +2257,13 @@ async fn seen_takes_several_numbers_and_the_list_says_what_was_handled_today() {
         .await;
     assert_eq!(
         out,
-        "Marked seen: thread 2 (Pedro · second). Nothing was written. Nothing else is waiting on you."
+        "Marked seen: *thread 2 (Pedro · second)*. Nothing was written. *Nothing else is waiting \
+         on you.*"
     );
     let list = oscar.ok("waiting", json!({})).await;
     assert_eq!(
         list,
-        "✓ Nothing is waiting on you.  Your agents handled 3 today."
+        "✓ Nothing is waiting on you. *Your agents handled 3 today.*"
     );
     let (failed, err) = oscar
         .call("send", json!({ "thread": "1", "seen": true }))
@@ -2276,16 +2283,16 @@ async fn waiting_shows_ten_then_counts_the_rest() {
     let mut oscar = Mcp::start(&s, "oscar", &s.dir, None, &[]).await;
     let list = oscar.ok("waiting", json!({})).await;
     assert!(
-        list.starts_with("Waiting on you · 12\n 1  Ana · direct · 1h\n    question 0\n"),
+        list.starts_with("**Waiting on you · 12**\n\n**1**  **Ana** · *direct · 1h*\nquestion 0\n"),
         "{list}"
     );
     assert!(
-        list.contains("\n10  Ana · direct · 51m\n    question 9\n"),
+        list.contains("\n**10**  **Ana** · *direct · 51m*\nquestion 9\n"),
         "{list}"
     );
     assert!(!list.contains("question 10"), "{list}");
     assert!(
-        list.ends_with("\n+2 more · relevo web\n/relevo 1 <your answer> · /relevo 2 to open it · /relevo seen 3"),
+        list.ends_with("\n\n*+2 more · relevo web*\n\n*`/relevo 1 <your answer>` · `/relevo 2` to open it · `/relevo seen 3`*"),
         "{list}"
     );
     oscar.close().await;
@@ -2320,8 +2327,8 @@ async fn waiting_says_when_the_server_is_out_of_reach_or_not_connected() {
     assert!(
         [hm(now), hm(now + 60)].iter().any(|hm| out
             == format!(
-                "Relevo can't reach 127.0.0.1:{port} since {hm}. Notes you send now will fail; \
-                 nothing is lost on the server."
+                "**Relevo can't reach 127.0.0.1:{port} since {hm}.** *Notes you send now will \
+                 fail; nothing is lost on the server.*"
             )),
         "{out}"
     );
@@ -2336,8 +2343,74 @@ async fn waiting_says_when_the_server_is_out_of_reach_or_not_connected() {
     assert!(!failed);
     assert_eq!(
         out,
-        "Relevo isn't connected on this machine. Run relevo connect <server> with the token your \
-         admin gave you."
+        "**Relevo isn't connected on this machine.** Run `relevo connect <server>` with the token \
+         your admin gave you."
+    );
+    mcp.close().await;
+}
+
+/// The prompt `relevo` carries the /relevo command's text, for clients that make MCP prompts
+/// into commands.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_relevo_prompt_is_the_command() {
+    let s = server(&["oscar"]).await;
+    let mut mcp = Mcp::start(&s, "oscar", &s.dir, None, &[]).await;
+    assert!(
+        mcp.init["capabilities"]["prompts"].is_object(),
+        "{}",
+        mcp.init
+    );
+    let list = mcp.request("prompts/list", json!({})).await;
+    let prompts = list["prompts"].as_array().unwrap();
+    assert_eq!(prompts.len(), 1, "{list}");
+    assert_eq!(prompts[0]["name"], "relevo");
+    assert_eq!(
+        prompts[0]["description"],
+        "Relevo · what is waiting on you, and answer it from here"
+    );
+    assert_eq!(prompts[0]["arguments"][0]["name"], "args");
+    assert_ne!(prompts[0]["arguments"][0]["required"], true);
+    let got = mcp
+        .request(
+            "prompts/get",
+            json!({ "name": "relevo", "arguments": { "args": "1 yes, final" } }),
+        )
+        .await;
+    let messages = got["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["role"], "user");
+    let text = messages[0]["content"]["text"].as_str().unwrap();
+    assert_eq!(text, relevo::claude_command::prompt("1 yes, final"));
+    assert!(
+        text.starts_with("This is my /relevo command. Arguments: `1 yes, final`\n"),
+        "{text}"
+    );
+    assert!(text.contains("NOT inside a code block"), "{text}");
+    // No arguments: the list.
+    let got = mcp
+        .request("prompts/get", json!({ "name": "relevo" }))
+        .await;
+    let text = got["messages"][0]["content"]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("This is my /relevo command. Arguments: ``\n"),
+        "{text}"
+    );
+    // Another name is an error.
+    mcp.write(json!({ "jsonrpc": "2.0", "id": 99, "method": "prompts/get",
+                      "params": { "name": "nope" } }))
+        .await;
+    let answer = loop {
+        let msg = mcp.read().await;
+        if msg["id"] == 99 {
+            break msg;
+        }
+    };
+    assert!(
+        answer["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no prompt"),
+        "{answer}"
     );
     mcp.close().await;
 }

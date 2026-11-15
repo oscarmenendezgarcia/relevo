@@ -49,6 +49,24 @@ pub fn contents(version: &str) -> String {
     }
 }
 
+/// The command's prompt for `args` (what follows `/relevo`), as `relevo mcp`'s MCP prompt
+/// `relevo` gives it: the file without its front matter, `$ARGUMENTS` replaced.
+pub fn prompt(args: &str) -> String {
+    let body = TEMPLATE
+        .strip_prefix("---\n")
+        .and_then(|t| t.split_once("\n---\n"))
+        .map_or(TEMPLATE, |(_, body)| body);
+    body.replace("$ARGUMENTS", args.trim())
+}
+
+/// The command's one-line description, from its front matter.
+pub fn description() -> &'static str {
+    TEMPLATE
+        .lines()
+        .find_map(|l| l.strip_prefix("description: "))
+        .unwrap_or("Relevo")
+}
+
 /// What is at the command's place.
 #[derive(Debug, PartialEq)]
 pub enum Installed {
@@ -138,6 +156,17 @@ mod tests {
         // Short, as a prompt that runs on every /relevo should be.
         assert!(body.len() < 2000, "{}", body.len());
         assert_eq!(ours(&text).as_deref(), Some("9.9.9"));
+        // The MCP prompt is the same text, with the arguments in place.
+        let prompt = prompt(" 1 yes ");
+        assert!(
+            prompt.starts_with("This is my /relevo command. Arguments: `1 yes`"),
+            "{prompt}"
+        );
+        assert_eq!(prompt, body.replace("$ARGUMENTS", "1 yes"));
+        assert_eq!(
+            description(),
+            "Relevo · what is waiting on you, and answer it from here"
+        );
         // Edited, or another file: not Relevo's.
         assert_eq!(ours(&text.replace("first person", "third person")), None);
         assert_eq!(ours(TEMPLATE), None);
