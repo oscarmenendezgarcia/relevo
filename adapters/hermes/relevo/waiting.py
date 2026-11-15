@@ -746,8 +746,9 @@ def thread_head(keys: list, ns: list, bound: Any = None):
     found = bind(listed_for(keys), ns, bound)
     if isinstance(found, str):
         return "Error: " + found
+    # Who opened it and its title are teammates' text: the thread below shows them fenced (rule 5).
     row = found[0]
-    return row.id, f"Thread {row.n} of your list ({row.who} · {row.subject}):\n"
+    return row.id, f"Thread {row.n} of your list:\n"
 
 
 # -- /relevo N, seen, @name: the request for the agent --------------------------------------------------

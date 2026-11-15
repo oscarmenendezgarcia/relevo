@@ -3227,9 +3227,11 @@ class Command(Base):
         self.assertIn("several list numbers go only with `seen: true`",
                       self.tool("relevo_send", {"thread": "1 2", "text": "x"}))
         opened = self.tool("relevo_thread", {"id": "2"})
-        self.assertTrue(opened.startswith("Thread 2 of your list (Ana · > Can you review `/refunds`? |…):\n"),
-                        opened)
+        # The opener and title come only fenced, in the thread below the line.
+        self.assertTrue(opened.startswith("Thread 2 of your list:\n"), opened)
         self.assertIn("Can you review", opened)
+        before = opened.split("Can you review")[0]
+        self.assertIn('<untrusted from="@ana2" field="title">', before)
         # A reply by number: in the person's words, shown as sent, with what is left.
         out = self.tool("relevo_send", {"thread": "3", "text": "Yes, the copy is final."})
         self.assertEqual(out, 'Sent to @ana2: "Yes, the copy is final." · thread 3 (Ana · Quick one: is the new '
@@ -3258,7 +3260,7 @@ class Command(Base):
         self.run_command(key="agent:main:telegram:dm:42", platform="telegram")
         with scoped_session_key("agent:main:telegram:dm:42"):
             out = registry.dispatch("relevo_thread", {"id": "1"}, session_id="20261115_x")
-        self.assertTrue(out.startswith("Thread 1 of your list (Bob · "), out)
+        self.assertTrue(out.startswith("Thread 1 of your list:\n"), out)
 
     def test_actions_go_to_the_agent_when_a_turn_can_start(self):
         b, c, a = self.three()
