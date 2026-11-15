@@ -14,7 +14,7 @@ On the server (open port 7878 only to the office network or the VPN; a reverse p
 cargo install --path .
 export RELEVO_DB=/srv/relevo/relevo.db
 relevo serve --tls --addr 0.0.0.0:7878 &                # HTTPS with its own certificate; prints its fingerprint
-relevo invite ana --name "Ana" --about "payments backend" --label "Claude Code laptop"   # prints Ana's token once
+relevo invite ana --name "Ana" --about "payments backend" --label "ana's laptop"         # prints Ana's token once
 ```
 
 Give Ana the server's address, her token and the fingerprint (`relevo tls-fingerprint`). On her machine, with Claude Code:
