@@ -50,6 +50,8 @@ struct Params {
     /// The `cursor` of the last thread of the previous page: its latest note's `seq`.
     before: Option<i64>,
     limit: usize,
+    /// Unix seconds: count the threads the person has handled since then (`counts.handled`).
+    handled_since: Option<i64>,
 }
 
 fn parse_params(
@@ -59,6 +61,7 @@ fn parse_params(
     let mut seen: Vec<String> = Vec::new();
     let (mut tab, mut show, mut team, mut with, mut before, mut limit) =
         (None, None, None, None, None, None);
+    let mut handled_since = None;
     for (name, value) in pairs {
         if seen.contains(&name) {
             return Err(ApiError::bad_request(format!("'{name}' given twice")));
@@ -106,6 +109,11 @@ fn parse_params(
                         .ok_or_else(|| ApiError::bad_request("'limit' must be 1 to 50"))?,
                 )
             }
+            "handled_since" => {
+                handled_since = Some(value.parse::<i64>().ok().filter(|t| *t >= 0).ok_or_else(
+                    || ApiError::bad_request("'handled_since' is not a time in unix seconds"),
+                )?)
+            }
             _ => return Err(ApiError::bad_request(format!("unknown parameter '{name}'"))),
         }
     }
@@ -122,6 +130,7 @@ fn parse_params(
         with,
         before,
         limit: limit.unwrap_or(DEFAULT_LIMIT),
+        handled_since,
     })
 }
 
@@ -273,6 +282,11 @@ fn counts_sql() -> String {
          WHERE p.person_id = ?1"
     )
 }
+
+/// The threads the person (`?1`) has handled (answered, or marked seen, a note by someone else)
+/// since `?2`: by `handled_at`, which says when they last did.
+const HANDLED_SQL: &str = "
+SELECT count(*) FROM participants p WHERE p.person_id = ?1 AND p.handled_at >= ?2";
 
 const TEAM_COUNTS_SQL: &str = "
 SELECT tt.name, count(*) FROM participants p
@@ -532,6 +546,17 @@ pub async fn list(
         let (name, n) = counted?;
         team_counts.insert(name, n);
     }
+    let mut counts = json!({
+        "board": board,
+        "threads": threads_count,
+        "waiting": waiting,
+        "answered": answered,
+        "teams": team_counts,
+    });
+    if let Some(since) = params.handled_since {
+        let handled: i64 = conn.query_row(HANDLED_SQL, params![me, since], |r| r.get(0))?;
+        counts["handled"] = handled.into();
+    }
     let people: Vec<String> = conn
         .prepare(PEOPLE_SQL)?
         .query_map([me], |r| r.get(0))?
@@ -552,13 +577,7 @@ pub async fn list(
     Ok(Json(json!({
         "you": reader.handle,
         "teams": teams,
-        "counts": {
-            "board": board,
-            "threads": threads_count,
-            "waiting": waiting,
-            "answered": answered,
-            "teams": team_counts,
-        },
+        "counts": counts,
         "people": people,
         "names": names,
         "threads": threads,
@@ -628,6 +647,7 @@ mod tests {
                     with: None,
                     before: None,
                     limit: 20,
+                    handled_since: None,
                 };
                 let plan = plan(&page_sql(&params), 4);
                 assert!(
@@ -645,8 +665,13 @@ mod tests {
     /// The counts read the person's rows by index, and each thread by its key.
     #[test]
     fn counts_read_only_the_persons_threads() {
-        for sql in [&counts_sql(), TEAM_COUNTS_SQL, PEOPLE_SQL] {
-            let plan = plan(sql, 1);
+        for (sql, n) in [
+            (counts_sql().as_str(), 1),
+            (TEAM_COUNTS_SQL, 1),
+            (PEOPLE_SQL, 1),
+            (HANDLED_SQL, 2),
+        ] {
+            let plan = plan(sql, n);
             assert!(plan.iter().any(|s| s.contains("person_id=?")), "{plan:#?}");
             assert!(
                 !plan.iter().any(|s| s.starts_with("SCAN p")
