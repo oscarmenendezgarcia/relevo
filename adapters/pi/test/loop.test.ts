@@ -268,8 +268,10 @@ test("shutdown ends the session on the server, so the threads it holds show agai
 
 test("ending the session on shutdown is best effort: a server that never answers holds it up 2 seconds at most", async () => {
   const deletes: unknown[] = [];
+  const agents = new Set<unknown>();
   // Answers nothing, not even the waiting inbox request.
   const fake = createServer((req) => {
+    agents.add(req.headers["relevo-agent"]);
     if (req.method === "DELETE" && req.url === "/api/session") deletes.push(req.headers["relevo-session"]);
   });
   await new Promise<void>((r) => fake.listen(0, "127.0.0.1", r));
@@ -284,6 +286,8 @@ test("ending the session on shutdown is best effort: a server that never answers
     assert.ok(took >= 1500 && took < 3500, `shutdown took ${took} ms`);
     assert.equal(deletes.length, 1);
     assert.match(String(deletes[0]), /^pi-[A-Za-z0-9_-]+$/);
+    // Every request says which agent this is.
+    assert.deepEqual([...agents], ["pi"]);
     await ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, "tui")); // twice: no second request
     assert.equal(deletes.length, 1);
   } finally {

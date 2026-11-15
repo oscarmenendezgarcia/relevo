@@ -191,6 +191,8 @@ export class Client {
       "Relevo-Mentions": "1",
     };
     if (CLIENT) headers["Relevo-Client"] = CLIENT;
+    // Which agent this is, as teammates see it (a note's `via`: "via pi").
+    headers["Relevo-Agent"] = "pi";
     const context = await this.context();
     if (context) headers["Relevo-Context"] = context;
     if (body !== undefined) headers["Content-Type"] = "application/json";
