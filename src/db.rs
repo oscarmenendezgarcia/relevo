@@ -1532,8 +1532,10 @@ mod tests {
         let took = start.elapsed();
         assert!(busy(&err), "{err:#}");
         assert!(took >= patience, "{took:?}");
+        // Bounded, not exact: SQLite's busy handler sleeps in coarser steps on macOS (about
+        // 1.1-1.3 s here for 400 ms on GitHub's runners), so allow 2 s over the patience.
         assert!(
-            took < patience + std::time::Duration::from_millis(500),
+            took < patience + std::time::Duration::from_secs(2),
             "{took:?}"
         );
         holder.execute_batch("ROLLBACK").unwrap();
