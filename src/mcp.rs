@@ -1009,7 +1009,7 @@ pub async fn run(channel: bool) -> anyhow::Result<()> {
     let service = server.serve(rmcp::transport::stdio()).await?;
     // Every request from now on says which agent this is, as its MCP client named itself.
     if let (Ok(client), Some(info)) = (&client, service.peer().peer_info())
-        && let Some(agent) = agent_name(&info.client_info.name)
+        && let Some(agent) = agent_name(info.client_info.title.as_deref(), &info.client_info.name)
     {
         let _ = client.agent.set(agent);
     }
@@ -1056,22 +1056,28 @@ pub async fn run(channel: bool) -> anyhow::Result<()> {
     }
 }
 
-/// The agent's name for teammates (`Relevo-Agent`, a note's `via`), from the `clientInfo.name` its
-/// MCP client gave at `initialize`: the known ones as their makers write them, any other as given,
-/// trimmed. `None` when there is no name to say (empty, too long, or with characters the server
-/// would refuse).
-fn agent_name(client: &str) -> Option<String> {
-    let client = client.trim();
-    let known = match client.to_lowercase().as_str() {
+/// The agent's name for teammates (`Relevo-Agent`, a note's `via`), from the `clientInfo` its MCP
+/// client gave at `initialize`: its `title` when it has one (Claude Code says "Claude Code"), else
+/// its `name`, the known ones as their makers write them, any other as given. Trimmed; `None` when
+/// there is no name to say (empty, too long, or with characters the server would refuse).
+fn agent_name(title: Option<&str>, name: &str) -> Option<String> {
+    let said = |s: &str| {
+        let s = s.trim();
+        let chars = s.chars().count();
+        ((1..=40).contains(&chars) && crate::waiting::plain(s) == s).then(|| s.to_string())
+    };
+    if let Some(title) = title.and_then(said) {
+        return Some(title);
+    }
+    let name = name.trim();
+    said(match name.to_lowercase().as_str() {
         "claude-code" => "Claude Code",
         "gemini-cli" | "gemini" => "Gemini CLI",
         "codex" | "codex-mcp-client" => "Codex",
         "opencode" => "OpenCode",
-        c if c.starts_with("cursor") => "Cursor",
-        _ => client,
-    };
-    let chars = known.chars().count();
-    ((1..=40).contains(&chars) && crate::waiting::plain(known) == known).then(|| known.to_string())
+        n if n.starts_with("cursor") => "Cursor",
+        _ => name,
+    })
 }
 
 /// Resolves when SIGTERM or SIGINT comes.
@@ -1257,7 +1263,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_agent_is_named_from_the_mcp_clients_name() {
+    fn the_agent_is_named_from_the_mcp_clients_title_or_name() {
         let cases = [
             ("claude-code", Some("Claude Code")),
             ("Claude-Code", Some("Claude Code")),
@@ -1274,10 +1280,15 @@ mod tests {
             ("tab\there", None),
         ];
         for (name, agent) in cases {
-            assert_eq!(agent_name(name).as_deref(), agent, "{name:?}");
+            assert_eq!(agent_name(None, name).as_deref(), agent, "{name:?}");
         }
-        assert_eq!(agent_name(&"x".repeat(40)), Some("x".repeat(40)));
-        assert_eq!(agent_name(&"x".repeat(41)), None);
+        assert_eq!(agent_name(None, &"x".repeat(40)), Some("x".repeat(40)));
+        assert_eq!(agent_name(None, &"x".repeat(41)), None);
+        // The title first, when it is one; else the name.
+        let title = |t| agent_name(Some(t), "claude-code");
+        assert_eq!(title(" My Agent ").as_deref(), Some("My Agent"));
+        assert_eq!(title("").as_deref(), Some("Claude Code"));
+        assert_eq!(title("a\u{202E}b").as_deref(), Some("Claude Code"));
     }
 
     #[test]
