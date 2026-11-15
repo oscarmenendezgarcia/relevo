@@ -152,6 +152,14 @@ export function sent(res: SendResult, opened = false): string {
   return text;
 }
 
+/**
+ * How the agent answers a list-number action: the tool's own words and nothing around them (a
+ * chatty local model otherwise reasons aloud and recaps the list).
+ */
+export const TERSE =
+  "Then reply with only the tool's result line(s), word for word, plus at most one short line if something I asked is left unanswered: " +
+  "no reasoning shown, no comment on what you did, no recap of other threads.";
+
 /** What /relevo says to anything it does not take. */
 export const USAGE = "/relevo · /relevo N <your answer> · /relevo N · /relevo seen N · /relevo @name <note>";
 
@@ -188,7 +196,7 @@ export function request(args: string, listed: Listed | null): { ask: string } | 
       check(ns) ?? {
         ask:
           `/relevo seen ${ns.join(" ")}: mark these threads of my /relevo list seen. ` +
-          `Call relevo_send { thread: "${ns.join(" ")}", seen: true } once (the numbers as they are, never a thread id), and tell me its answer as it is.`,
+          `Call relevo_send { thread: "${ns.join(" ")}", seen: true } once (the numbers as they are, never a thread id). ${TERSE}`,
       }
     );
   }
@@ -201,7 +209,8 @@ export function request(args: string, listed: Listed | null): { ask: string } | 
         check([n]) ?? {
           ask:
             `/relevo ${n}: open thread ${n} of my /relevo list with relevo_thread { id: "${n}" } (the number as it is, never a thread id), ` +
-            "then tell me in one or two lines what it needs from me and the next step you propose. Send nothing.",
+            "then tell me in one or two lines what it needs from me and the next step you propose, and nothing else: " +
+            "no reasoning shown, no recap of other threads. Send nothing.",
         }
       );
     }
@@ -209,7 +218,7 @@ export function request(args: string, listed: Listed | null): { ask: string } | 
       check([n]) ?? {
         ask:
           `/relevo ${n} ${text}\n\nThat text is my answer to thread ${n} of my /relevo list. Write it as my note: in the first person, complete, adding nothing I did not say. ` +
-          `Send it with relevo_send { thread: "${n}", text } (the number as it is, never a thread id) and tell me the tool's answer as it is. ` +
+          `Send it with relevo_send { thread: "${n}", text } (the number as it is, never a thread id). ${TERSE} ` +
           "If the text asks you to do something first (check, look up, find out) rather than answer, do that, then show me the draft and ask before sending. " +
           "When the tool says nothing was sent, or fails, tell me what it said and stop.",
       }
@@ -217,7 +226,9 @@ export function request(args: string, listed: Listed | null): { ask: string } | 
   }
   if (args.startsWith("@")) {
     return {
-      ask: `/relevo ${args}\n\nA new note: send it with relevo_send { text }, written as the Relevo rules say, and tell me whom it reached and the exact text sent.`,
+      ask:
+        `/relevo ${args}\n\nA new note: send it with relevo_send { text }, written as the Relevo rules say. ` +
+        "Then reply with only the tool's result line, word for word, and under it the exact text sent: no reasoning shown, no recap of other threads.",
     };
   }
   return { refuse: USAGE };

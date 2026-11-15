@@ -8,7 +8,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
-import { USAGE, request } from "../src/index.ts";
+import { TERSE, USAGE, request } from "../src/index.ts";
 import { Block, draw, firstLine, plain, rows, wrap, type TimelineThread } from "../src/waiting.ts";
 import { loadExtension, plainTheme, tagTheme, until } from "./mock-pi.ts";
 import { api, startServer, type TestServer } from "./server.ts";
@@ -161,6 +161,11 @@ test("numbers act on the last list, after reading the thread again: a reply, a r
   assert.deepEqual(options, { triggerTurn: true, deliverAs: "followUp" });
   assert.match(message.content, /^\/relevo 1 yes, final\n\nThat text is my answer to thread 1/);
   assert.match(message.content, /relevo_send \{ thread: "1", text \}/);
+  // Terse: the tool's words, at most one more line, no reasoning or recap; errands still draft first.
+  assert.ok(message.content.includes(TERSE), message.content);
+  assert.match(TERSE, /only the tool's result line\(s\), word for word, plus at most one short line if something I asked is left unanswered/);
+  assert.match(TERSE, /no reasoning shown, no comment on what you did, no recap of other threads/);
+  assert.match(message.content, /show me the draft and ask before sending/);
   await ext.command("relevo", "seen 1, 3", home);
   assert.match(last(ext).message.content, /relevo_send \{ thread: "1 3", seen: true \}/);
   await ext.command("relevo", "9", home);
