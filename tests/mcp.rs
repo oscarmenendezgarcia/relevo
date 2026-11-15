@@ -2341,3 +2341,69 @@ async fn waiting_says_when_the_server_is_out_of_reach_or_not_connected() {
     );
     mcp.close().await;
 }
+
+/// `relevo connect` installs the /relevo command for Claude Code with `--command`, skips it
+/// with `--no-command` or without a terminal to ask, and never replaces a file Relevo did not
+/// write.
+#[tokio::test(flavor = "multi_thread")]
+async fn connect_installs_the_relevo_command_for_claude_code() {
+    use relevo::claude_command::contents;
+    let s = server(&["ana"]).await;
+    let home = s.dir.join("home-c");
+    let claude = home.join(".claude");
+    std::fs::create_dir_all(&claude).unwrap();
+    let path = claude.join("commands/relevo.md");
+    let connect = |args: &[&str]| {
+        let mut cmd = relevo(&home);
+        cmd.args(["connect", &s.url, &s.tokens["ana"]])
+            .args(args)
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .stdin(Stdio::null());
+        async move {
+            let out = cmd.output().await.unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).to_string()
+        }
+    };
+    let version = env!("CARGO_PKG_VERSION");
+    // No terminal to ask: skipped, saying how.
+    let out = connect(&[]).await;
+    assert!(
+        out.contains("skipped the /relevo command") && out.contains("--command"),
+        "{out}"
+    );
+    assert!(!path.exists());
+    let out = connect(&["--no-command"]).await;
+    assert!(!out.contains("/relevo command"), "{out}");
+    let out = connect(&["--command"]).await;
+    assert!(
+        out.contains("installed the /relevo command for Claude Code in"),
+        "{out}"
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), contents(version));
+    let out = connect(&[]).await;
+    assert!(out.contains("is up to date"), "{out}");
+    // An older one of Relevo's is updated; someone else's file is left as it is.
+    std::fs::write(&path, contents("0.5.9")).unwrap();
+    assert!(connect(&[]).await.contains("updated the /relevo command"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), contents(version));
+    std::fs::write(&path, "my own /relevo\n").unwrap();
+    let out = connect(&["--command"]).await;
+    assert!(out.contains("as it is: Relevo did not write it"), "{out}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "my own /relevo\n");
+    // CLAUDE_CONFIG_DIR names Claude Code's folder.
+    let other = home.join("claude-config");
+    let mut cmd = relevo(&home);
+    cmd.args(["connect", &s.url, &s.tokens["ana"], "--command"])
+        .env("CLAUDE_CONFIG_DIR", &other)
+        .stdin(Stdio::null());
+    assert!(cmd.output().await.unwrap().status.success());
+    assert_eq!(
+        std::fs::read_to_string(other.join("commands/relevo.md")).unwrap(),
+        contents(version)
+    );
+}

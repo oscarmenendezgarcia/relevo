@@ -1172,3 +1172,67 @@ async fn relevo_mcp_updates_in_the_background_and_keeps_stdout_for_mcp() {
     assert_eq!(v["id"], 2, "{line}");
     let _ = child.kill().await;
 }
+
+/// The /relevo command for Claude Code: refreshed when Relevo wrote it and its copy differs,
+/// never when someone else wrote or edited it, and not installed by an update.
+#[tokio::test]
+async fn the_relevo_command_is_refreshed_only_when_relevo_wrote_it() {
+    use relevo::claude_command::{self as command, contents};
+    let m = Machine::new().await;
+    make_dist(&m.dist(), "0.3.0", &m.key);
+    let file = saved_config(&m);
+    let claude = m.root().join("claude");
+    let env = || {
+        env_of(vec![
+            ("RELEVO_CONFIG", file.to_str().unwrap().to_string()),
+            ("HOME", m.root().to_str().unwrap().to_string()),
+            ("CLAUDE_CONFIG_DIR", claude.to_str().unwrap().to_string()),
+        ])
+    };
+    let path = command::path_in(&claude);
+    let step = |steps: Vec<Step>| -> Option<Outcome> {
+        steps
+            .into_iter()
+            .find(|s| s.what.starts_with("the /relevo command"))
+            .map(|s| s.outcome)
+    };
+    let update = |check| {
+        let req = Request {
+            check,
+            ..Request::default()
+        };
+        let env = env();
+        let setup = m.setup.clone();
+        async move { update::command(&req, &setup, env, 0).await.unwrap() }
+    };
+    let version = env!("CARGO_PKG_VERSION").to_string();
+    // Not installed: an update does not install it.
+    assert_eq!(step(update(false).await), None);
+    assert!(!path.exists());
+    // An older one of Relevo's: --check says so, the update replaces it.
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, contents("0.5.9")).unwrap();
+    assert_eq!(
+        step(update(true).await),
+        Some(Outcome::WouldInstall {
+            from: "0.5.9".into(),
+            to: version.clone()
+        })
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), contents("0.5.9"));
+    let outcome = step(update(false).await).unwrap();
+    assert!(
+        matches!(&outcome, Outcome::Installed { from, to, .. } if from == "0.5.9" && *to == version),
+        "{outcome:?}"
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), contents(&version));
+    assert_eq!(
+        step(update(false).await),
+        Some(Outcome::UpToDate(version.clone()))
+    );
+    // Edited, or someone else's: left alone.
+    let edited = contents("0.5.9").replace("first person", "my own words");
+    std::fs::write(&path, &edited).unwrap();
+    assert!(matches!(step(update(false).await), Some(Outcome::Kept(_))));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
+}

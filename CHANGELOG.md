@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.0 (unreleased)
+
+**`/relevo` in Claude Code.** A command that lists what is waiting on you, numbered and oldest first, and acts on it from the terminal: `/relevo 1 <your answer>` (your agent writes it in your words and shows exactly what it sent), `/relevo 2` (open a thread), `/relevo seen 1 3`, `/relevo @ana …`. Listing only reads, like `relevo web`; a number whose thread another of your sessions handled since sends nothing and says so. `relevo connect` offers to install it (`--command`, `--no-command`), and `relevo update` keeps it current. For MCP clients: the new read-only tool `waiting`, `send` and `thread` take its numbers, and the timeline takes `handled_since`.
+
 ## 0.5.0 (14-nov-2026)
 
 **Threads never close now.**
