@@ -876,6 +876,9 @@ fn refresh_command(env: &impl Fn(&str) -> Option<String>, check: bool) -> Option
             version,
             current: true,
         }) => Outcome::UpToDate(version),
+        Ok(Installed::Ours { version, .. }) if command::newer(&version) => Outcome::Kept(format!(
+            "left as it is: Relevo {version} wrote it, newer than this binary ({to})"
+        )),
         Ok(Installed::Ours { version, .. }) if check => Outcome::WouldInstall { from: version, to },
         Ok(Installed::Ours { version, .. }) => match command::install(&path) {
             Ok(()) => Outcome::Installed {
@@ -957,9 +960,12 @@ pub async fn command(
     {
         return Ok(vec![]);
     }
-    let refreshed = refresh_command(&env, req.check);
     steps.extend(run(&config, setup, req.check).await?);
-    steps.extend(refreshed);
+    // After the binary's own step, so a failed update leaves the command as it was. It is this
+    // binary that writes it, so its copy: when the step above installed a newer binary, the
+    // command comes with that binary's next update run (an older binary never replaces the file
+    // of a newer one: `claude_command::newer`).
+    steps.extend(refresh_command(&env, req.check));
     if req.auto {
         // Quiet unless something was installed or failed.
         steps.retain(|s| s.installed() || s.failed());

@@ -2617,8 +2617,24 @@ async fn connect_installs_the_relevo_command_for_claude_code() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), contents(version));
     let out = connect(&[]).await;
     assert!(out.contains("is up to date"), "{out}");
+    // No terminal: the skip line is one line, with no run of spaces in it.
+    std::fs::remove_file(&path).unwrap();
+    let out = connect(&[]).await;
+    let line = out.lines().find(|l| l.contains("skipped")).unwrap();
+    assert!(
+        line.ends_with("run relevo connect again with --command to install it"),
+        "{line}"
+    );
+    // A newer one of Relevo's is never downgraded.
+    std::fs::write(&path, contents("99.0.0")).unwrap();
+    let out = connect(&["--command"]).await;
+    assert!(
+        out.contains("Relevo 99.0.0 wrote it, newer than this one"),
+        "{out}"
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), contents("99.0.0"));
     // An older one of Relevo's is updated; someone else's file is left as it is.
-    std::fs::write(&path, contents("0.5.9")).unwrap();
+    std::fs::write(&path, contents("0.4.9")).unwrap();
     assert!(connect(&[]).await.contains("updated the /relevo command"));
     assert_eq!(std::fs::read_to_string(&path).unwrap(), contents(version));
     std::fs::write(&path, "my own /relevo\n").unwrap();

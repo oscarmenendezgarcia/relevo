@@ -400,6 +400,11 @@ fn offer_command(force: bool) {
             "the /relevo command for Claude Code is up to date in {}",
             path.display()
         ),
+        Ok(Installed::Ours { version, .. }) if command::newer(&version) => println!(
+            "left {} as it is: Relevo {version} wrote it, newer than this one ({})",
+            path.display(),
+            env!("CARGO_PKG_VERSION")
+        ),
         Ok(Installed::Ours { .. }) => install("updated"),
         Ok(Installed::Missing) => {
             let question = format!(
@@ -410,7 +415,8 @@ fn offer_command(force: bool) {
                 install("installed");
             } else if !terminal {
                 println!(
-                    "skipped the /relevo command for Claude Code (no terminal to ask): run                      relevo connect again with --command to install it"
+                    "skipped the /relevo command for Claude Code (no terminal to ask): run \
+                     relevo connect again with --command to install it"
                 );
             }
         }
@@ -420,7 +426,8 @@ fn offer_command(force: bool) {
                  Relevo's /relevo command? [y/N] ",
                 path.display()
             );
-            if terminal && ask(&question, false) {
+            // A link is written through only to Relevo's own file (`command::install`).
+            if terminal && !command::is_link(&path) && ask(&question, false) {
                 install("installed");
             } else {
                 println!(

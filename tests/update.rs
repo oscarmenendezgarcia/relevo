@@ -1209,20 +1209,33 @@ async fn the_relevo_command_is_refreshed_only_when_relevo_wrote_it() {
     // Not installed: an update does not install it.
     assert_eq!(step(update(false).await), None);
     assert!(!path.exists());
-    // An older one of Relevo's: --check says so, the update replaces it.
+    // A newer one of Relevo's: never downgraded.
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(&path, contents("0.5.9")).unwrap();
+    std::fs::write(&path, contents("99.0.0")).unwrap();
+    for check in [true, false] {
+        assert!(matches!(step(update(check).await), Some(Outcome::Kept(_))));
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), contents("99.0.0"));
+    // An older one of Relevo's: --check says so, the update replaces it.
+    std::fs::write(&path, contents("0.4.9")).unwrap();
     assert_eq!(
         step(update(true).await),
         Some(Outcome::WouldInstall {
-            from: "0.5.9".into(),
+            from: "0.4.9".into(),
             to: version.clone()
         })
     );
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), contents("0.5.9"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), contents("0.4.9"));
+    // An update that fails (clients signed by another key) leaves the command as it was: it is
+    // refreshed after the binary's step, not before.
+    sign(&m.dist(), &key());
+    let req = Request::default();
+    assert!(update::command(&req, &m.setup, env(), 0).await.is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), contents("0.4.9"));
+    sign(&m.dist(), &m.key);
     let outcome = step(update(false).await).unwrap();
     assert!(
-        matches!(&outcome, Outcome::Installed { from, to, .. } if from == "0.5.9" && *to == version),
+        matches!(&outcome, Outcome::Installed { from, to, .. } if from == "0.4.9" && *to == version),
         "{outcome:?}"
     );
     assert_eq!(std::fs::read_to_string(&path).unwrap(), contents(&version));
