@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Config } from "./config.ts";
 import { pinnedRequest, type Answer } from "./pinned.ts";
+import type { Timeline } from "./waiting.ts";
 
 /**
  * What every request says of this client (`Relevo-Client`, docs/protocol.md): `pi/<version>`, the
@@ -235,6 +236,14 @@ export class Client {
     return this.request("GET", "/api/people", undefined, signal, timeoutMs);
   }
 
+  /**
+   * `GET /api/timeline?<query>`: read only, it delivers, handles and claims nothing, and the server
+   * ignores the session headers (docs/protocol.md, "timeline").
+   */
+  timeline(query: string, signal?: AbortSignal): Promise<Timeline> {
+    return this.request("GET", `/api/timeline?${query}`, undefined, signal);
+  }
+
   thread(id: string, signal?: AbortSignal): Promise<Thread> {
     return this.request("GET", `/api/threads/${encodeURIComponent(id)}`, undefined, signal);
   }
@@ -272,6 +281,12 @@ export class Client {
 async function fetched(url: string, init: RequestInit): Promise<Answer> {
   const res = await fetch(url, init);
   return { status: res.status, ok: res.ok, text: await res.text() };
+}
+
+/** Whether `err` came before Relevo answered: no answer at all, or a proxy's 502, 503 or 504 without Relevo's error body. */
+export function unreachable(err: unknown): boolean {
+  if (!(err instanceof RelevoError)) return true;
+  return err.code === "HTTP" && err.status >= 502 && err.status <= 504;
 }
 
 function retryable(err: unknown): boolean {

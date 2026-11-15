@@ -125,6 +125,8 @@ test("release notes alone start no turn: they are added to the session, informat
   const fake = createServer((req, res) => {
     res.setHeader("Content-Type", "application/json");
     if (req.method !== "GET") return void res.end(JSON.stringify({ ok: true }));
+    // The footer's count (/api/timeline) is not the inbox: this server has no timeline.
+    if (!req.url?.startsWith("/api/inbox")) return void ((res.statusCode = 404), res.end(JSON.stringify({ error: { code: "NOT_FOUND", message: "no" } })));
     const threads = answers.shift() ?? [];
     const answer = () => res.end(JSON.stringify({ session: { label: "pi", context: null, you: "oscar" }, team: [], teams: [], threads, more: 0 }));
     threads.length ? answer() : setTimeout(answer, 200);
@@ -356,8 +358,9 @@ test("an invalid RELEVO_CONTEXT falls back to general with a notice, and notes s
 
 test("a request the server calls malformed stops the loop with a notice", async () => {
   let hits = 0;
-  const fake = createServer((_req, res) => {
-    hits++;
+  const fake = createServer((req, res) => {
+    // Inbox requests only: the footer's count (/api/timeline) is another route.
+    if (req.url?.startsWith("/api/inbox")) hits++;
     res.statusCode = 400;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ error: { code: "BAD_REQUEST", message: "malformed Relevo-Context" } }));

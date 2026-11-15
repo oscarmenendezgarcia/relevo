@@ -16,7 +16,7 @@
 // request and asks for nothing until `resume`, so notes that land meanwhile stay
 // new on the server.
 
-import { RelevoError, type Client, type Thread } from "./client.ts";
+import { RelevoError, type Client, type Inbox, type Thread } from "./client.ts";
 
 export interface LoopOptions {
   client: Client;
@@ -27,6 +27,8 @@ export interface LoopOptions {
   shown?: Set<string>;
   /** `you` is the handle of the session's person, when the server says it. */
   deliver: (thread: Thread, you?: string) => void;
+  /** Told about each answer, before its threads are handed over. */
+  onAnswer?: (inbox: Inbox) => void;
   /** Told about each failed request; `fatal` when the loop stops because of it. */
   onError?: (err: unknown, fatal: boolean) => void;
   wait?: number;
@@ -142,6 +144,11 @@ export class InboxLoop {
         const afterLoss = lost;
         backoff = minBackoffMs;
         failed = lost = false;
+        try {
+          this.options.onAnswer?.(inbox);
+        } catch {
+          // What it does with the answer (the footer) never stops the loop.
+        }
         let handed = 0;
         // Handed over even if paused meanwhile: these notes have reached this session on the
         // server now. Oldest first: the first one handed over starts the agent's turn.
