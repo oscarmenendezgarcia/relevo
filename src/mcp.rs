@@ -1007,6 +1007,12 @@ pub async fn run(channel: bool) -> anyhow::Result<()> {
         server.failed.clone(),
     );
     let service = server.serve(rmcp::transport::stdio()).await?;
+    // Every request from now on says which agent this is, as its MCP client named itself.
+    if let (Ok(client), Some(info)) = (&client, service.peer().peer_info())
+        && let Some(agent) = agent_name(&info.client_info.name)
+    {
+        let _ = client.agent.set(agent);
+    }
     // In the background, once serving: stdout is MCP's alone, and nothing waits for it.
     tokio::spawn(auto_update());
     let mut news = None;
@@ -1048,6 +1054,24 @@ pub async fn run(channel: bool) -> anyhow::Result<()> {
         // up the runtime's shutdown, so exit here.
         None => std::process::exit(0),
     }
+}
+
+/// The agent's name for teammates (`Relevo-Agent`, a note's `via`), from the `clientInfo.name` its
+/// MCP client gave at `initialize`: the known ones as their makers write them, any other as given,
+/// trimmed. `None` when there is no name to say (empty, too long, or with characters the server
+/// would refuse).
+fn agent_name(client: &str) -> Option<String> {
+    let client = client.trim();
+    let known = match client.to_lowercase().as_str() {
+        "claude-code" => "Claude Code",
+        "gemini-cli" | "gemini" => "Gemini CLI",
+        "codex" | "codex-mcp-client" => "Codex",
+        "opencode" => "OpenCode",
+        c if c.starts_with("cursor") => "Cursor",
+        _ => client,
+    };
+    let chars = known.chars().count();
+    ((1..=40).contains(&chars) && crate::waiting::plain(known) == known).then(|| known.to_string())
 }
 
 /// Resolves when SIGTERM or SIGINT comes.
@@ -1231,6 +1255,30 @@ fn handover(shown: &Shown, t: &Value, me: Option<&str>) -> Option<(Value, Value)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_agent_is_named_from_the_mcp_clients_name() {
+        let cases = [
+            ("claude-code", Some("Claude Code")),
+            ("Claude-Code", Some("Claude Code")),
+            ("gemini-cli", Some("Gemini CLI")),
+            ("gemini", Some("Gemini CLI")),
+            ("codex", Some("Codex")),
+            ("codex-mcp-client", Some("Codex")),
+            ("opencode", Some("OpenCode")),
+            ("cursor-vscode", Some("Cursor")),
+            ("  zed  ", Some("zed")),
+            ("", None),
+            ("   ", None),
+            ("a\u{202E}b", None),
+            ("tab\there", None),
+        ];
+        for (name, agent) in cases {
+            assert_eq!(agent_name(name).as_deref(), agent, "{name:?}");
+        }
+        assert_eq!(agent_name(&"x".repeat(40)), Some("x".repeat(40)));
+        assert_eq!(agent_name(&"x".repeat(41)), None);
+    }
 
     #[test]
     fn channel_events_name_the_latest_other_author() {

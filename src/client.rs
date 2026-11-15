@@ -2,7 +2,7 @@
 
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -29,6 +29,9 @@ pub struct Client {
     dir: PathBuf,
     /// The handle of the person the token acts for (`you`), once an answer has said it.
     you: Mutex<Option<String>>,
+    /// `Relevo-Agent`, the agent this session runs for (`relevo mcp`: its MCP client, once it
+    /// has said which); never set by `connect`, `update` or `web`.
+    pub agent: OnceLock<String>,
 }
 
 #[derive(Debug)]
@@ -109,6 +112,7 @@ impl Client {
             fixed_context,
             dir,
             you: Mutex::new(None),
+            agent: OnceLock::new(),
         })
     }
 
@@ -130,6 +134,9 @@ impl Client {
             .timeout(timeout);
         if let Some(context) = self.context().await {
             req = req.header("relevo-context", context);
+        }
+        if let Some(agent) = self.agent.get() {
+            req = req.header("relevo-agent", agent);
         }
         let res = req.send().await.map_err(network)?;
         let status = res.status();
