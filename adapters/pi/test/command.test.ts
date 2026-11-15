@@ -4,6 +4,7 @@
 
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
+import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -281,6 +282,116 @@ test("/relevo says when the server is out of reach, and the footer goes offline;
     assert.match(last(none).message.content, /Relevo isn't connected on this machine\. Run relevo connect <server> with the token your admin gave you\.$/);
   } finally {
     rmSync(empty, { recursive: true, force: true });
+  }
+});
+
+/** A fake Relevo answering with `handle`, on a free port of the tests' range from its top down (see server.ts); closed by `close`. */
+async function fake(handle: (req: IncomingMessage, res: ServerResponse) => void) {
+  const server = createHttpServer(handle);
+  const [low, high] = (process.env.RELEVO_TEST_PORTS ?? "7990-7999").split("-").map(Number);
+  let port = 0;
+  for (let p = high; p >= low && !port; p--) {
+    port = await new Promise<number>((r) => {
+      server.once("error", () => r(0));
+      server.listen(p, "127.0.0.1", () => (server.removeAllListeners("error"), r(p)));
+    });
+  }
+  if (!port) throw new Error(`no free port in ${low}-${high}`);
+  return { url: `http://127.0.0.1:${port}`, port, close: () => new Promise<void>((r) => (server.closeAllConnections(), server.close(() => r()))) };
+}
+
+test("the footer is counted again on its own while idle and something waits, at most every recountMs; never while a turn runs", async () => {
+  const oscar = server.invite("oscar5", "", "pi laptop");
+  const ana = server.invite("ana5", "", "ana laptop");
+  const id = await post(ana, { text: "@oscar5 Is the build green?" });
+  const ext = loadExtension({ env: { RELEVO_URL: server.url, RELEVO_TOKEN: oscar }, home, wait: 20, minBackoffMs: 50, recountMs: 400 });
+  await ext.emit("session_start", { reason: "startup" }, ext.ctx(home, "interactive"));
+  const real = globalThis.fetch;
+  let counts = 0;
+  globalThis.fetch = ((url: any, init: any) => {
+    if (String(url).includes("/api/timeline")) counts++;
+    return real(url, init);
+  }) as typeof fetch;
+  try {
+    await until(() => ext.status() === "<muted>relevo</muted><warning> ● 1</warning>");
+    // Another session of Oscar's answers it: the waiting inbox request (20 s here) says nothing,
+    // the recount sets the footer right.
+    await api(server, oscar, "GET", `/api/threads/${id}`, undefined, "claude-session-5");
+    await post(oscar, { thread: id, text: "Yes, green." }, "claude-session-5");
+    await until(() => ext.status() === "<muted>relevo</muted>", 3000);
+    // 0 waiting: no more counts.
+    counts = 0;
+    await new Promise((r) => setTimeout(r, 1000));
+    assert.equal(counts, 0);
+    // Something waits again, but a turn runs: no counts until it settles.
+    await post(ana, { text: "@oscar5 And the deploy?" });
+    ext.session.holdTurns();
+    await ext.session.userPrompt();
+    await until(() => ext.status() === "<muted>relevo</muted><warning> ● 1</warning>").catch(() => {});
+    counts = 0;
+    await new Promise((r) => setTimeout(r, 1000));
+    assert.equal(counts, 0);
+    await ext.session.finishTurn();
+    ext.session.holdTurns(false);
+    // Idle with 1 waiting: about one count per 400 ms, never more often.
+    counts = 0;
+    await new Promise((r) => setTimeout(r, 1300));
+    assert.ok(counts >= 2 && counts <= 4, `${counts}`);
+  } finally {
+    globalThis.fetch = real;
+    await ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, "interactive"));
+  }
+});
+
+test("/relevo says the server is out of reach soon when it does not answer, even while a turn runs", async () => {
+  const hung = await fake(() => {}); // Takes the request, never answers.
+  try {
+    const ext = loadExtension({ env: { RELEVO_URL: hung.url, RELEVO_TOKEN: "rlv_fake" }, home, listTimeoutMs: 300 });
+    ext.session.holdTurns();
+    await ext.session.userPrompt();
+    const start = Date.now();
+    await ext.command("relevo", "", home);
+    assert.ok(Date.now() - start < 3000, `${Date.now() - start} ms`);
+    assert.equal(last(ext).message.details.state, "offline");
+    assert.match(last(ext).message.content, new RegExp(`Relevo can't reach 127\\.0\\.0\\.1:${hung.port} since \\d\\d:\\d\\d\\.`));
+    await ext.session.finishTurn();
+  } finally {
+    await hung.close();
+  }
+});
+
+test("a 0.5.0 server refuses handled_since: the list is asked again without it, read only, with no count of handled", async () => {
+  const asked: string[] = [];
+  const thread = {
+    id: "r_aaaaaaaaaaaa",
+    kind: "direct",
+    title: "Is the build green?",
+    from: "ana",
+    notes: 1,
+    first_note: { id: "n_aaaaaaaaaaaa", author: "ana", created_at: new Date().toISOString(), text: "@oscar Is the build green?" },
+    last_note: null,
+  };
+  const old = await fake((req, res) => {
+    asked.push(`${req.method} ${req.url}`);
+    res.setHeader("Content-Type", "application/json");
+    if (req.url?.includes("handled_since")) {
+      res.statusCode = 400;
+      return void res.end(JSON.stringify({ error: { code: "BAD_REQUEST", message: "unknown parameter 'handled_since'" } }));
+    }
+    res.end(JSON.stringify({ you: "oscar", names: { ana: "Ana" }, counts: { waiting: 1 }, threads: [thread], cursor: null }));
+  });
+  try {
+    const ext = loadExtension({ env: { RELEVO_URL: old.url, RELEVO_TOKEN: "rlv_fake" }, home });
+    await ext.command("relevo", "", home);
+    const { message } = last(ext);
+    assert.equal(message.details.state, "list");
+    assert.equal(message.details.handled, null);
+    assert.match(message.content, /\n\nWaiting on you · 1\n 1  <untrusted from="@ana">Ana<\/untrusted> · direct · /);
+    assert.equal(asked.length, 2, asked.join("\n"));
+    assert.match(asked[0], /^GET \/api\/timeline\?tab=threads&show=waiting&limit=50&handled_since=\d+$/);
+    assert.equal(asked[1], "GET /api/timeline?tab=threads&show=waiting&limit=50");
+  } finally {
+    await old.close();
   }
 });
 

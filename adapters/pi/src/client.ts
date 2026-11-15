@@ -240,8 +240,8 @@ export class Client {
    * `GET /api/timeline?<query>`: read only, it delivers, handles and claims nothing, and the server
    * ignores the session headers (docs/protocol.md, "timeline").
    */
-  timeline(query: string, signal?: AbortSignal): Promise<Timeline> {
-    return this.request("GET", `/api/timeline?${query}`, undefined, signal);
+  timeline(query: string, signal?: AbortSignal, timeoutMs = TIMEOUT_MS): Promise<Timeline> {
+    return this.request("GET", `/api/timeline?${query}`, undefined, signal, timeoutMs);
   }
 
   thread(id: string, signal?: AbortSignal): Promise<Thread> {

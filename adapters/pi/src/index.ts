@@ -72,7 +72,16 @@ export interface Options {
   maxBackoffMs?: number;
   /** The extension's own folder, which the automatic update replaces; this package's by default. */
   folder?: string;
+  /** How often, at most, the footer is counted again while pi is idle and something waits (or the count is unknown); 2 minutes by default. */
+  recountMs?: number;
+  /** How long /relevo waits for each page of its list before it says the server is out of reach; 8 seconds by default. */
+  listTimeoutMs?: number;
 }
+
+/** How often, at most, the footer is counted again on its own while idle. */
+const RECOUNT_MS = 120_000;
+/** How long /relevo waits for a page of its list: the person is looking at the screen. */
+const LIST_TIMEOUT_MS = 8_000;
 
 /**
  * A failed call as an error the agent can act on: the server's code and message, and what to do: for
@@ -306,8 +315,12 @@ export function relevoExtension(options: Options = {}) {
       paint();
     }
 
+    /** When the footer was last counted (ms). */
+    let countedAt = 0;
+
     /** How many threads wait on the person now: one read-only timeline request; null when it cannot say. */
     async function countWaiting(c: Client): Promise<number | null> {
+      countedAt = Date.now();
       try {
         const v = await c.timeline("tab=threads&show=waiting&limit=1");
         reached();
@@ -381,7 +394,7 @@ export function relevoExtension(options: Options = {}) {
         else if (handledSince !== null) q.set("handled_since", String(handledSince));
         let v: Timeline;
         try {
-          v = await c.timeline(q.toString());
+          v = await c.timeline(q.toString(), undefined, options.listTimeoutMs ?? LIST_TIMEOUT_MS);
         } catch (err) {
           if (before || handledSince === null || !(err instanceof RelevoError && err.status === 400)) throw err;
           handledSince = null;
@@ -413,6 +426,7 @@ export function relevoExtension(options: Options = {}) {
       const now = nowSecs();
       try {
         const { you, names, threads, total, handled } = await allWaiting(c, startOfDay(now));
+        countedAt = Date.now();
         reached();
         const shown = rows(you, names, threads, now);
         listed = { you, names, rows: shown };
@@ -778,6 +792,14 @@ export function relevoExtension(options: Options = {}) {
     let turn = false;
     /** Not idle without a turn (compacting, summarizing a branch): look again soon. */
     let retry: ReturnType<typeof setTimeout> | null = null;
+    /**
+     * The footer, counted again on its own: the inbox loop sees a thread handled elsewhere only
+     * when an answer differs, and its answers are capped and routed by context, so the count can
+     * stay wrong. At most every `recountMs`, while pi is idle and something waits or the count
+     * is unknown (offline included); nothing when it is 0, which only a note can change, and the
+     * loop sees notes.
+     */
+    let recounter: ReturnType<typeof setInterval> | null = null;
 
     function idle(): boolean {
       try {
@@ -892,8 +914,15 @@ export function relevoExtension(options: Options = {}) {
       }
       sessionCtx = ctx;
       if (ctx.hasUI) uiCtx = ctx;
-      // The footer: one count now; then again when the inbox loop sees a change.
+      // The footer: one count now; then again when the inbox loop sees a change, and on its own
+      // while idle (see `recounter`).
       void recount();
+      const every = options.recountMs ?? RECOUNT_MS;
+      recounter = setInterval(() => {
+        if (turn || !idle() || waitingNow === 0 || Date.now() - countedAt < every) return;
+        void recount();
+      }, Math.max(10, Math.floor(every / 4)));
+      recounter.unref?.();
       const warning = overrideWarning(env);
       if (warning && ctx.hasUI) ctx.ui.notify(`Relevo: ${warning}`, "warning");
       const loopClient = client(sessionCwd);
@@ -928,6 +957,8 @@ export function relevoExtension(options: Options = {}) {
       loop = null;
       if (retry) clearTimeout(retry);
       retry = null;
+      if (recounter) clearInterval(recounter);
+      recounter = null;
       await current?.stop();
       // End the session on the server, so the threads it holds show again in the
       // person's other sessions now rather than when the claims lapse. Best effort:
