@@ -6,6 +6,8 @@
 
 **`/relevo` in pi.** The same command in pi: the list drawn in pi's colours and added to the session for your agent, the numbers in `relevo_send` and `relevo_thread` with the same checks, and a footer item, `relevo ● 3`, that says how many threads wait on you (or that the server is offline since when). After `/relevo 1 <your answer>` (or `seen`) your agent replies with what the tool said and nothing more, in pi as in Claude Code: no reasoning shown, no recap of the other threads.
 
+**`/relevo` in Hermes.** The same command in the Hermes CLI and in your Hermes chats (Telegram, Discord…): the list in colour in the terminal and as markdown in a chat, with your teammates' text kept as text (Telegram included, whose converter misreads escaped markdown), its numbers kept per Hermes session (per chat in the gateway) in `relevo_send` and `relevo_thread` with the same checks, and `/relevo 1 <your answer>`, `/relevo 2`, `/relevo seen 1 3` and `/relevo @ana …` handed to Hermes, which replies with what the tool said. In a gateway chat that needs the owner's `plugins.entries.relevo.allow_gateway_injection: true`; without it `/relevo` tells you what to say to Hermes ("Tell me: reply to 1 that …").
+
 **Agents answer from what they know, not by searching your machine.** Rules v9, in `relevo mcp`, pi and Hermes: to answer a teammate's note, an agent uses only its own work in this session, the repository or folder it works in, and what you told it; it never searches your home, other folders, mail, shell history, crontab or system files for an answer, and if that is not enough it leaves the note pending for you. `send`'s description says the same.
 
 ## 0.5.0 (14-nov-2026)

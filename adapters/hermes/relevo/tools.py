@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
-from . import client
+from . import client, waiting
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ def _run(name: str, fn, api: Optional[client.Api] = None) -> str:
 _SEND_FIELDS = ("text", "thread", "claim", "seen", "done", "close")
 
 
-def relevo_send(args: dict, **_: Any) -> str:
+def relevo_send(args: dict, session_id: Optional[str] = None, **_: Any) -> str:
     unknown = sorted(k for k in args if k not in _SEND_FIELDS)
     if unknown:
         return ("Error: relevo_send takes text, thread, claim and seen (and, deprecated, done, and close "
@@ -95,6 +95,12 @@ def relevo_send(args: dict, **_: Any) -> str:
             payload["seen"] = payload["done"] = True
         elif seen or done:
             payload["done"] = True
+        ns = waiting.numbers(thread)
+        if ns:
+            # Numbers of the person's last /relevo list in this Hermes session, checked first.
+            del payload["thread"]
+            return waiting.send_listed(api, waiting.tool_keys(session_id), ns, payload, seen or done,
+                                       lambda result: client.describe_send(result))
         if seen or done:
             return client.describe_seen(api.send(payload))
         return client.describe_send(api.send(payload), opened=thread is None)
@@ -116,14 +122,23 @@ def relevo_inbox(args: dict, **_: Any) -> str:
     return _run("relevo_inbox", go)
 
 
-def relevo_thread(args: dict, **_: Any) -> str:
+def relevo_thread(args: dict, session_id: Optional[str] = None, **_: Any) -> str:
     def go() -> str:
         api = _api()
         thread_id = str(args.get("id") or "").strip()
         if not thread_id:
             return "Error: give the thread id (r_…)."
+        head = ""
+        ns = waiting.numbers(thread_id)
+        if ns:
+            found = waiting.thread_head(waiting.tool_keys(session_id), ns)
+            if isinstance(found, str):
+                return found
+            thread_id, head = found
         data = api.thread(thread_id)
-        return client.render_thread(data, _me_for(api))
+        if head and data.get("pending") is not True:
+            head += "It is no longer waiting on your person: they handled it since the list.\n"
+        return head + client.render_thread(data, _me_for(api))
 
     return _run("relevo_thread", go)
 
@@ -132,7 +147,8 @@ _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
     "relevo_send": (
         relevo_send,
         "Send a Relevo note: open a thread (no `thread`) or write in one (`thread`). Fields: `text` (the "
-        "note), `thread` (an existing thread's id, \"r_…\"), `claim` (true, with `thread`, to mark the "
+        "note), `thread` (an existing thread's id, \"r_…\", or a number of the person's last /relevo "
+        "list), `claim` (true, with `thread`, to mark the "
         "thread as this session's), `seen` (true, with `thread` and no text, to mark it seen when it needs "
         "nothing: an answer you have now read, a thank-you, an answer that settles what you asked); `done`, "
         "and `close` without text, deprecated, are read as `seen`. Who the "
@@ -178,7 +194,12 @@ _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
                                                       "\"Re:\". Optional only when claiming or marking "
                                                       "seen. "
                                                       "Never a note that only says you are on it."},
-            "thread": {"type": "string", "description": "Thread id (r_…) to write in. Without it, `text` opens "
+            "thread": {"type": "string", "description": "Thread id (r_…) to write in, or its number in the "
+                                                        "person's last /relevo list as they typed it (\"1\"; with "
+                                                        "`seen: true` and no text, several: \"1 3\"): the tool "
+                                                        "reads the thread first and sends nothing if it was "
+                                                        "handled or got a newer note since. Never guess an id. "
+                                                        "Without it, `text` opens "
                                                         "a new thread, for whom its @ mentions name (none: the "
                                                         "global board)."},
             "claim": {"type": "boolean",
@@ -217,7 +238,8 @@ _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
     "relevo_thread": (
         relevo_thread,
         "A whole Relevo thread: every note in full, who has seen it, who has handled it and who holds it.",
-        {"id": {"type": "string", "description": "Thread id (r_…)."}},
+        {"id": {"type": "string", "description": "Thread id (r_…), or its number in the person's last /relevo "
+                                                 "list (\"2\")."}},
         ["id"],
     ),
 }
