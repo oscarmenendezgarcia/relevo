@@ -7,7 +7,9 @@
 #   (cd /tmp/layout9 && cargo build)
 #   tests/fixtures/make-layout9.sh /tmp/layout9/target/debug/relevo
 #
-# Needs curl, jq and sqlite3. The tokens are throwaway ones, for the test to act as each session.
+# The tokens' labels are not the agents' names, as an admin names them, so that a test tells the
+# agent from the label. Needs curl, jq and sqlite3. The tokens are throwaway ones, for the test to
+# act as each session.
 # PORT picks the port to serve on (default: a random one).
 set -eu
 bin=$1
@@ -22,9 +24,9 @@ token() { "$bin" --db "$db" invite "$1" --name "$2" --about "$3" --label "$4" | 
 server=$!
 trap 'kill $server 2>/dev/null || true; rm -rf "$dir"' EXIT
 for _ in $(seq 50); do curl -sf "$url/health" >/dev/null && break; sleep 0.1; done
-ana=$(token ana Ana "payments backend" "Claude Code")
-bob=$(token bob Bob "infrastructure" "pi")
-carl=$(token carl Carl "billing" "Hermes")
+ana=$(token ana Ana "payments backend" "ana's laptop")
+bob=$(token bob Bob "infrastructure" "bob's desktop")
+carl=$(token carl Carl "billing" "carl's server")
 "$bin" --db "$db" team add backend --title Backend >/dev/null
 "$bin" --db "$db" team join backend bob carl >/dev/null
 

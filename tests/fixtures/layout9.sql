@@ -8,10 +8,10 @@ CREATE TABLE people (
     active     INTEGER NOT NULL DEFAULT 1,
     created_at INTEGER NOT NULL
 );
-INSERT INTO people VALUES(1,'relevo','Relevo','the release notes of each version',0,1794770648);
-INSERT INTO people VALUES(2,'ana','Ana','payments backend',1,1794770648);
-INSERT INTO people VALUES(3,'bob','Bob','infrastructure',1,1794770648);
-INSERT INTO people VALUES(4,'carl','Carl','billing',1,1794770648);
+INSERT INTO people VALUES(1,'relevo','Relevo','the release notes of each version',0,1794772236);
+INSERT INTO people VALUES(2,'ana','Ana','payments backend',1,1794772236);
+INSERT INTO people VALUES(3,'bob','Bob','infrastructure',1,1794772236);
+INSERT INTO people VALUES(4,'carl','Carl','billing',1,1794772236);
 CREATE TABLE tokens (
     id         TEXT PRIMARY KEY,
     person_id  INTEGER NOT NULL REFERENCES people(id),
@@ -20,10 +20,10 @@ CREATE TABLE tokens (
     created_at INTEGER NOT NULL,
     revoked_at INTEGER
 );
-INSERT INTO tokens VALUES('t_mwju5ne7ondt',1,'release notes','system:t_mwju5ne7ondt',1794770648,1794770648);
-INSERT INTO tokens VALUES('t_x4jwhzkgxn76',2,'Claude Code','53bee2fe316bde0ba15838ff96be1a669017250e3cc483b7022b17c15a606ed0',1794770648,NULL);
-INSERT INTO tokens VALUES('t_4mjylzsqlo2w',3,'pi','5a7101036c10bd2a33240f0bdb4da6ce92cbfc07bb2010cb8badb14a65ece802',1794770648,NULL);
-INSERT INTO tokens VALUES('t_owag3lnf26ft',4,'Hermes','c4d39a7036c53174ac12f05cf49f617390ad388bd3567123e1ee069e7ea26347',1794770648,NULL);
+INSERT INTO tokens VALUES('t_yfxln3sszr73',1,'release notes','system:t_yfxln3sszr73',1794772236,1794772236);
+INSERT INTO tokens VALUES('t_6um5k6obu5z5',2,'ana''s laptop','592a67d2762aa5158bf760ca25d2f77eb3fbd2c1618e4a31df16169b6f3d3b9c',1794772236,NULL);
+INSERT INTO tokens VALUES('t_vjfwmnx63ovz',3,'bob''s desktop','9a295cafb8ddb93e3b95eca1a9630cbd24d089960418d31e8b391f6cbb8a0ae4',1794772236,NULL);
+INSERT INTO tokens VALUES('t_exelh34an6e4',4,'carl''s server','3a3cbc963d6f6d4456d60770d7b5cf81d4e49d257bb5af2b553596b2fbc081f7',1794772236,NULL);
 CREATE TABLE threads (
     id         TEXT PRIMARY KEY,
     kind       TEXT NOT NULL CHECK (kind IN ('direct', 'team', 'global')),
@@ -32,10 +32,10 @@ CREATE TABLE threads (
     status     TEXT NOT NULL CHECK (status IN ('open', 'closed')),
     created_at INTEGER NOT NULL
 );
-INSERT INTO threads VALUES('r_v2n6unnwxcwv','direct','@bob Fetched, not answered',2,'open',1794770649);
-INSERT INTO threads VALUES('r_5habdossjz5p','direct','@bob Deploy tonight?',4,'open',1794770649);
-INSERT INTO threads VALUES('r_5wxwobu6732c','team','@backend Is staging down?',2,'open',1794770649);
-INSERT INTO threads VALUES('r_cnhx4nnlozfj','direct','@bob Never fetched.',2,'open',1794770649);
+INSERT INTO threads VALUES('r_nb2pz5ydurvg','direct','@bob Fetched, not answered',2,'open',1794772236);
+INSERT INTO threads VALUES('r_ygjfjmvu6mwm','direct','@bob Deploy tonight?',4,'open',1794772236);
+INSERT INTO threads VALUES('r_gyt7mqpsmnu3','team','@backend Is staging down?',2,'open',1794772236);
+INSERT INTO threads VALUES('r_dcmgiqqwlab4','direct','@bob Never fetched.',2,'open',1794772236);
 CREATE TABLE sessions (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     token_id        TEXT NOT NULL REFERENCES tokens(id),
@@ -48,9 +48,9 @@ CREATE TABLE sessions (
     client_inferred INTEGER NOT NULL DEFAULT 0,
     UNIQUE (token_id, client_id)
 );
-INSERT INTO sessions VALUES(1,'t_x4jwhzkgxn76','ana-cc-0001',2,'pagos-api',1794770649,0,'mcp/0.5.0',0);
-INSERT INTO sessions VALUES(2,'t_4mjylzsqlo2w','bob-term-01',3,'pagos-api',1794770649,1,'pi/0.5.0',0);
-INSERT INTO sessions VALUES(3,'t_owag3lnf26ft','carl-hermes1',4,NULL,1794770649,0,'hermes/0.5.0',0);
+INSERT INTO sessions VALUES(1,'t_6um5k6obu5z5','ana-cc-0001',2,'pagos-api',1794772236,0,'mcp/0.5.0',0);
+INSERT INTO sessions VALUES(2,'t_vjfwmnx63ovz','bob-term-01',3,'pagos-api',1794772236,1,'pi/0.5.0',0);
+INSERT INTO sessions VALUES(3,'t_exelh34an6e4','carl-hermes1',4,NULL,1794772236,0,'hermes/0.5.0',0);
 CREATE TABLE participants (
     thread_id         TEXT NOT NULL REFERENCES threads(id),
     person_id         INTEGER NOT NULL REFERENCES people(id),
@@ -76,15 +76,15 @@ CREATE TABLE participants (
     named_seq         INTEGER,
     PRIMARY KEY (thread_id, person_id)
 );
-INSERT INTO participants VALUES('r_v2n6unnwxcwv',2,NULL,NULL,NULL,NULL,1,NULL,NULL,NULL,1,0,0,0,0,0,1,NULL,NULL,NULL,0,0);
-INSERT INTO participants VALUES('r_v2n6unnwxcwv',3,NULL,NULL,NULL,NULL,1,1794770649,'pi','pagos-api',1,1,0,1,1,0,NULL,NULL,NULL,NULL,1,0);
-INSERT INTO participants VALUES('r_5habdossjz5p',4,NULL,NULL,NULL,NULL,2,NULL,NULL,NULL,3,3,1,1,1,0,2,NULL,NULL,NULL,0,0);
-INSERT INTO participants VALUES('r_5habdossjz5p',3,NULL,2,'pagos-api',1794770649,3,1794770649,'pi','pagos-api',3,2,0,0,0,0,3,1794770649,'pi','pagos-api',0,0);
-INSERT INTO participants VALUES('r_5wxwobu6732c',2,NULL,NULL,NULL,NULL,4,NULL,NULL,NULL,4,0,0,0,0,0,4,NULL,NULL,NULL,0,NULL);
-INSERT INTO participants VALUES('r_5wxwobu6732c',3,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,4,4,1,0,1,0,NULL,NULL,NULL,NULL,0,NULL);
-INSERT INTO participants VALUES('r_5wxwobu6732c',4,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,4,4,1,0,1,0,NULL,NULL,NULL,NULL,0,NULL);
-INSERT INTO participants VALUES('r_cnhx4nnlozfj',2,NULL,NULL,NULL,NULL,5,NULL,NULL,NULL,5,0,0,0,0,0,5,NULL,NULL,NULL,0,0);
-INSERT INTO participants VALUES('r_cnhx4nnlozfj',3,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,5,5,1,1,1,0,NULL,NULL,NULL,NULL,0,0);
+INSERT INTO participants VALUES('r_nb2pz5ydurvg',2,NULL,NULL,NULL,NULL,1,NULL,NULL,NULL,1,0,0,0,0,0,1,NULL,NULL,NULL,0,0);
+INSERT INTO participants VALUES('r_nb2pz5ydurvg',3,NULL,NULL,NULL,NULL,1,1794772236,'bob''s desktop','pagos-api',1,1,0,1,1,0,NULL,NULL,NULL,NULL,1,0);
+INSERT INTO participants VALUES('r_ygjfjmvu6mwm',4,NULL,NULL,NULL,NULL,2,NULL,NULL,NULL,3,3,1,1,1,0,2,NULL,NULL,NULL,0,0);
+INSERT INTO participants VALUES('r_ygjfjmvu6mwm',3,NULL,2,'pagos-api',1794772236,3,1794772236,'bob''s desktop','pagos-api',3,2,0,0,0,0,3,1794772236,'bob''s desktop','pagos-api',0,0);
+INSERT INTO participants VALUES('r_gyt7mqpsmnu3',2,NULL,NULL,NULL,NULL,4,NULL,NULL,NULL,4,0,0,0,0,0,4,NULL,NULL,NULL,0,NULL);
+INSERT INTO participants VALUES('r_gyt7mqpsmnu3',3,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,4,4,1,0,1,0,NULL,NULL,NULL,NULL,0,NULL);
+INSERT INTO participants VALUES('r_gyt7mqpsmnu3',4,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,4,4,1,0,1,0,NULL,NULL,NULL,NULL,0,NULL);
+INSERT INTO participants VALUES('r_dcmgiqqwlab4',2,NULL,NULL,NULL,NULL,5,NULL,NULL,NULL,5,0,0,0,0,0,5,NULL,NULL,NULL,0,0);
+INSERT INTO participants VALUES('r_dcmgiqqwlab4',3,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,5,5,1,1,1,0,NULL,NULL,NULL,NULL,0,0);
 CREATE TABLE session_threads (
     session_id    INTEGER NOT NULL REFERENCES sessions(id),
     thread_id     TEXT NOT NULL REFERENCES threads(id),
@@ -109,11 +109,11 @@ CREATE TABLE notes (
     text       TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
-INSERT INTO notes VALUES(1,'n_x4sbxrn5zwbj','r_v2n6unnwxcwv',2,'t_x4jwhzkgxn76','Claude Code','@bob Fetched, not answered',1794770649);
-INSERT INTO notes VALUES(2,'n_buacq7qzpylm','r_5habdossjz5p',4,'t_owag3lnf26ft','Hermes','@bob Deploy tonight?',1794770649);
-INSERT INTO notes VALUES(3,'n_z5tnyqrbixl6','r_5habdossjz5p',3,'t_4mjylzsqlo2w','pi','Yes, at nine.',1794770649);
-INSERT INTO notes VALUES(4,'n_74fi2s4c4nny','r_5wxwobu6732c',2,'t_x4jwhzkgxn76','Claude Code','@backend Is staging down?',1794770649);
-INSERT INTO notes VALUES(5,'n_txrsaaamxy7k','r_cnhx4nnlozfj',2,'t_x4jwhzkgxn76','Claude Code','@bob Never fetched.',1794770649);
+INSERT INTO notes VALUES(1,'n_y4t5bvgyeggb','r_nb2pz5ydurvg',2,'t_6um5k6obu5z5','ana''s laptop','@bob Fetched, not answered',1794772236);
+INSERT INTO notes VALUES(2,'n_aoxjdgdlaqut','r_ygjfjmvu6mwm',4,'t_exelh34an6e4','carl''s server','@bob Deploy tonight?',1794772236);
+INSERT INTO notes VALUES(3,'n_e5ibowb33ioy','r_ygjfjmvu6mwm',3,'t_vjfwmnx63ovz','bob''s desktop','Yes, at nine.',1794772236);
+INSERT INTO notes VALUES(4,'n_olxmdm66b5ih','r_gyt7mqpsmnu3',2,'t_6um5k6obu5z5','ana''s laptop','@backend Is staging down?',1794772236);
+INSERT INTO notes VALUES(5,'n_6mor7q363gt4','r_dcmgiqqwlab4',2,'t_6um5k6obu5z5','ana''s laptop','@bob Never fetched.',1794772236);
 CREATE TABLE send_keys (
     person_id  INTEGER NOT NULL REFERENCES people(id),
     key        TEXT NOT NULL,
@@ -125,14 +125,14 @@ CREATE TABLE send_keys (
     result     TEXT,
     PRIMARY KEY (person_id, key)
 );
-INSERT INTO send_keys VALUES(2,'k-fetched','r_v2n6unnwxcwv','n_x4sbxrn5zwbj','open',NULL,1794770649,'{"kind":"direct","to":{"people":["bob"],"teams":[]},"added":[],"reached":1}');
+INSERT INTO send_keys VALUES(2,'k-fetched','r_nb2pz5ydurvg','n_y4t5bvgyeggb','open',NULL,1794772236,'{"kind":"direct","to":{"people":["bob"],"teams":[]},"added":[],"reached":1}');
 CREATE TABLE teams (
     id         INTEGER PRIMARY KEY,
     name       TEXT NOT NULL UNIQUE,
     title      TEXT NOT NULL DEFAULT '',
     created_at INTEGER NOT NULL
 );
-INSERT INTO teams VALUES(1,'backend','Backend',1794770648);
+INSERT INTO teams VALUES(1,'backend','Backend',1794772236);
 CREATE TABLE team_members (
     team_id   INTEGER NOT NULL REFERENCES teams(id),
     person_id INTEGER NOT NULL REFERENCES people(id),
@@ -145,7 +145,7 @@ CREATE TABLE thread_teams (
     name      TEXT NOT NULL,
     PRIMARY KEY (thread_id, name)
 );
-INSERT INTO thread_teams VALUES('r_5wxwobu6732c','backend');
+INSERT INTO thread_teams VALUES('r_gyt7mqpsmnu3','backend');
 CREATE TABLE note_contexts (
     seq     INTEGER PRIMARY KEY REFERENCES notes(seq),
     context TEXT NOT NULL

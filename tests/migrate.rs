@@ -1107,5 +1107,6 @@ async fn a_layout_9_database_migrates_and_its_sessions_say_their_agent() {
         .iter()
         .map(|n| n["via"].as_str().unwrap())
         .collect();
-    assert_eq!(via, ["Claude Code", "pi", "Claude Code"]);
+    // Not the token's label, "bob's desktop".
+    assert_eq!(via, ["ana's laptop", "pi", "ana's laptop"]);
 }
