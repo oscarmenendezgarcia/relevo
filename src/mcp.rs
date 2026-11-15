@@ -686,7 +686,7 @@ impl Relevo {
             });
         }
         out.extend(notes);
-        Ok(out.join("\n"))
+        Ok(waiting::for_agent(&out.join("\n")))
     }
 }
 
@@ -802,8 +802,9 @@ impl Relevo {
         let id = match waiting::numbers(&p.id) {
             Some(numbers) if numbers.len() == 1 => {
                 let (_, entries) = self.resolve(&numbers)?;
+                // Who opened it and its title are in the thread below, fenced as rule 5 says.
                 let (n, e) = &entries[0];
-                head = format!("Thread {n} of your list ({} · {}):\n", e.who, e.subject);
+                head = format!("Thread {n} of your list:\n");
                 e.id.clone()
             }
             Some(_) => return Err("Open one thread at a time: one list number.".into()),
@@ -828,7 +829,9 @@ impl Relevo {
         description = "Read only: the threads waiting on your person (direct ones, and team and \
                        global-board threads that name them), oldest first, numbered, as the \
                        /relevo command shows them, in markdown. Show its text to your person \
-                       exactly as it is, as markdown and not in a code block. It delivers, handles and claims nothing. To act on one, give its \
+                       exactly as it is, as markdown and not in a code block, without its first \
+                       paragraph when that starts with \"For the agent\" (it is for you). It \
+                       delivers, handles and claims nothing. To act on one, give its \
                        number as `thread` to `send` (an answer in your person's words, or \
                        `seen: true`, several numbers for `seen`) or as `id` to `thread`: \
                        numbers refer to the last list of this session, and `send` sends nothing \
@@ -852,6 +855,11 @@ impl Relevo {
             Err(e) => return Err(self.failure(&client, e)),
         };
         let (text, entries) = waiting::list(&w.you, &w.names, &w.threads, w.total, w.handled, now);
+        let text = if entries.is_empty() {
+            text
+        } else {
+            waiting::for_agent(&text)
+        };
         *lock(&self.listed) = Some(Listed {
             you: w.you,
             names: w.names,
