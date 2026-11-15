@@ -42,8 +42,7 @@ async fn server_at(handles: &[&str], teams: &[(&str, &[&str])], clock: Clock) ->
         for h in handles {
             let about = format!("{h} things");
             let name = h[..1].to_uppercase() + &h[1..];
-            let t =
-                db::invite(&conn, h, &name, Some(&about), "Claude Code", db::now_unix()).unwrap();
+            let t = db::invite(&conn, h, &name, Some(&about), "laptop", db::now_unix()).unwrap();
             tokens.insert(h.to_string(), t.secret);
         }
         for (name, members) in teams {
@@ -126,8 +125,9 @@ impl Mcp {
                 json!({
                     "protocolVersion": "2025-06-18",
                     "capabilities": {},
-                    // What Claude Code says of itself (checked with Claude Code 2.1.325).
-                    "clientInfo": { "name": "claude-code", "title": "Claude Code", "version": "0" }
+                    // A title, as Claude Code gives, and a name that maps to something else: the
+                    // title is the agent (not the name, nor the token's label, "laptop").
+                    "clientInfo": { "name": "claude-code-test", "title": "Claude Code", "version": "0" }
                 }),
             )
             .await;
@@ -1040,14 +1040,15 @@ async fn connect_and_mcp_report_their_client_and_version() {
 }
 
 /// MCP from 2026-07-28, as Claude Code 2.1.325 speaks it: no `initialize`, the client's
-/// `clientInfo` in each request's `_meta`. The agent is still learnt, from the first tool call.
+/// `clientInfo` in each request's `_meta`. The agent is learnt from its first request,
+/// `server/discover`, before the channel's first inbox request.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_client_without_initialize_says_its_agent_with_each_request() {
     let s = server(&["ana"]).await;
     let home = s.dir.join("home-stateless");
     std::fs::create_dir(&home).unwrap();
     let mut cmd = relevo(&home);
-    cmd.arg("mcp")
+    cmd.args(["mcp", "--channel"])
         .env("RELEVO_URL", &s.url)
         .env("RELEVO_TOKEN", &s.tokens["ana"])
         .env("RELEVO_CONTEXT", "");
@@ -1059,6 +1060,23 @@ async fn a_client_without_initialize_says_its_agent_with_each_request() {
     });
     mcp.request("server/discover", json!({ "_meta": meta }))
         .await;
+    // The session starts with the first other request (rmcp's), and with it the channel, whose
+    // waiting inbox request is the first to reach the server.
+    mcp.request("tools/list", json!({ "_meta": meta })).await;
+    let agents = || {
+        db::list_sessions(&s.app.db(), Some("ana"), db::now_unix())
+            .unwrap()
+            .into_iter()
+            .map(|s| s.agent)
+            .collect::<Vec<_>>()
+    };
+    for _ in 0..100 {
+        if !agents().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(agents(), [Some("Gemini CLI".to_string())]);
     let r = mcp
         .request(
             "tools/call",

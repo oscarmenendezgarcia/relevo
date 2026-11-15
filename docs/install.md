@@ -184,7 +184,7 @@ relevo invite ana --name "Ana" --about "payments backend" --label "ana's laptop"
 relevo token add ana --label "ana's desktop"     # another token of hers
 ```
 
-The label is your name for the token, for your own lists (`relevo token list`, `relevo sessions`, `relevo clients`); teammates never see it. They see the agent that wrote each note, as it says itself: "via Claude Code", "via pi", "via Hermes" (only a client before 0.6.0, which does not say, shows the label instead).
+The label is your name for the token, for your own lists (`relevo token list`, `relevo sessions`, `relevo clients`). Teammates see the agent that wrote each note, as it says itself: "via Claude Code", "via pi", "via Hermes"; the label only when the agent is not known (a client before 0.6.0, which does not say it).
 
 Send each token to its person privately (a password manager, a direct message you delete afterwards), with the server's address (`https://192.168.1.50:7878` with `relevo serve --tls`, or `https://relevo.example.com` behind a proxy) and, with `relevo serve --tls`, the certificate's fingerprint (`relevo tls-fingerprint`). `--about` is the one line other agents read to decide whom to ask; change it with `relevo about ana "…"`.
 

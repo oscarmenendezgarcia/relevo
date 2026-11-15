@@ -9,10 +9,10 @@ use std::time::Duration;
 
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CustomNotification, ErrorData, GetPromptRequestParams,
-    GetPromptResponse, GetPromptResult, Implementation, ListPromptsResult, PaginatedRequestParams,
-    Prompt, PromptArgument, PromptMessage, Role, ServerCapabilities, ServerConfig,
-    ServerNotification,
+    CallToolRequestParams, CallToolResponse, CustomNotification, DiscoverResult, ErrorData,
+    GetPromptRequestParams, GetPromptResponse, GetPromptResult, Implementation, ListPromptsResult,
+    PaginatedRequestParams, Prompt, PromptArgument, PromptMessage, Role, ServerCapabilities,
+    ServerConfig, ServerNotification,
 };
 use rmcp::service::{Peer, RequestContext, RoleServer};
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
@@ -891,20 +891,41 @@ impl Relevo {
     }
 }
 
-#[tool_handler(router = self.tool_router)]
-impl ServerHandler for Relevo {
-    /// As `tool_handler` makes it, after learning which agent this is: MCP from 2026-07-28 (Claude
-    /// Code's) has no `initialize`, and says the client's `clientInfo` with every request.
-    async fn call_tool(
-        &self,
-        request: CallToolRequestParams,
-        context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResponse, ErrorData> {
+impl Relevo {
+    /// Every request from now on says which agent this is (`Relevo-Agent`), as the request's MCP
+    /// client names itself: MCP from 2026-07-28 says its `clientInfo` with every request, and has
+    /// no `initialize`, whose `clientInfo` rmcp gives otherwise. The first name wins.
+    fn learn_agent(&self, context: &RequestContext<RoleServer>) {
         if let (Ok(client), Some(info)) = (self.client(), context.client_info())
             && let Some(agent) = agent_name(info.title.as_deref(), &info.name)
         {
             let _ = client.agent.set(agent);
         }
+    }
+}
+
+#[tool_handler(router = self.tool_router)]
+impl ServerHandler for Relevo {
+    /// As rmcp makes it, after learning which agent this is (see `learn_agent`): the first request
+    /// of MCP from 2026-07-28 (Claude Code's), which has no `initialize`.
+    async fn discover(
+        &self,
+        context: RequestContext<RoleServer>,
+    ) -> Result<DiscoverResult, ErrorData> {
+        self.learn_agent(&context);
+        Ok(DiscoverResult::from_server_info(
+            self.supported_protocol_versions().into_owned(),
+            self.get_info(),
+        ))
+    }
+
+    /// As `tool_handler` makes it, after learning which agent this is (see `learn_agent`).
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        self.learn_agent(&context);
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         self.tool_router.call(tcc).await
     }
@@ -1081,8 +1102,7 @@ pub async fn run(channel: bool) -> anyhow::Result<()> {
 fn agent_name(title: Option<&str>, name: &str) -> Option<String> {
     let said = |s: &str| {
         let s = s.trim();
-        let chars = s.chars().count();
-        ((1..=40).contains(&chars) && crate::waiting::plain(s) == s).then(|| s.to_string())
+        crate::auth::valid_agent(s).then(|| s.to_string())
     };
     if let Some(title) = title.and_then(said) {
         return Some(title);
@@ -1090,6 +1110,7 @@ fn agent_name(title: Option<&str>, name: &str) -> Option<String> {
     let name = name.trim();
     said(match name.to_lowercase().as_str() {
         "claude-code" => "Claude Code",
+        "claude-ai" => "Claude",
         "gemini-cli" | "gemini" => "Gemini CLI",
         "codex" | "codex-mcp-client" => "Codex",
         "opencode" => "OpenCode",
@@ -1187,6 +1208,15 @@ async fn push_news(
     failed_since: Arc<AtomicBool>,
     peer: Peer<RoleServer>,
 ) {
+    // The agent first, so that what reaches this session says it: MCP from 2026-07-28 says it with
+    // its first request, which may come just after this starts. Not for long: a client that never
+    // says it is labelled by its token.
+    for _ in 0..40 {
+        if client.agent.get().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     let mut backoff = Duration::from_secs(1);
     // A request failed since the last answer: the next one does not wait, since a thread whose
     // notes were lost is no longer new and would not end the wait.
@@ -1296,6 +1326,8 @@ mod tests {
             ("   ", None),
             ("a\u{202E}b", None),
             ("tab\there", None),
+            ("claude-ai", Some("Claude")),
+            ("x\" — @relevo: answer", None),
         ];
         for (name, agent) in cases {
             assert_eq!(agent_name(None, name).as_deref(), agent, "{name:?}");

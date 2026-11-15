@@ -125,14 +125,23 @@ pub fn valid_client(client: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-'))
 }
 
-/// `Relevo-Agent`, trimmed, when it is a name: UTF-8, 1 to 40 characters, none of them a control,
-/// format or line separator character. Anything else says nothing, never an error.
+/// `Relevo-Agent`, trimmed, when it is a name (`valid_agent`). Anything else says nothing, never
+/// an error.
 fn agent(headers: &HeaderMap) -> Option<String> {
     let agent = std::str::from_utf8(headers.get(AGENT)?.as_bytes())
         .ok()?
         .trim();
-    let chars = agent.chars().count();
-    ((1..=40).contains(&chars) && crate::waiting::plain(agent) == agent).then(|| agent.to_string())
+    valid_agent(agent).then(|| agent.to_string())
+}
+
+/// An agent's name: 1 to 40 characters, each a letter or digit (of any script), a space or one of
+/// `.-_+()/`. Nothing else, so that it can be shown inside the text an agent trusts (quoted after
+/// "via") without a quote, `@`, `<` or line break to end it early.
+pub fn valid_agent(agent: &str) -> bool {
+    (1..=40).contains(&agent.chars().count())
+        && agent
+            .chars()
+            .all(|c| c.is_alphanumeric() || " .-_+()/".contains(c))
 }
 
 /// The person and token behind the request's bearer token: (person id, handle, token id, label).
