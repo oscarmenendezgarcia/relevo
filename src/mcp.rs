@@ -458,6 +458,10 @@ fn error(e: Error) -> String {
 const NOT_CONNECTED: &str = "**Relevo isn't connected on this machine.** Run `relevo connect \
                              <server>` with the token your admin gave you.";
 
+/// What `waiting` says when the server has no timeline.
+const NO_TIMELINE: &str = "This Relevo server has no timeline, which /relevo reads: it is older \
+                           than 0.4.0. Ask its owner to update it.";
+
 /// The most pages of 50 `waiting` reads (the oldest come last).
 const MAX_PAGES: usize = 200;
 
@@ -542,11 +546,6 @@ impl Relevo {
     /// `error` says.
     fn failure(&self, client: &Client, e: Error) -> String {
         if !e.unreachable() {
-            if let Error::Api { status: 404, .. } = e {
-                return "This Relevo server has no timeline, which /relevo reads: it is older \
-                        than 0.4.0. Ask its owner to update it."
-                    .into();
-            }
             return error(e);
         }
         let now = crate::db::now_unix();
@@ -608,27 +607,43 @@ impl Relevo {
         let mut body = send_body(SendParams { thread: None, ..p });
         let now = crate::db::now_unix();
         let (mut done, mut notes) = (vec![], vec![]);
+        // A thread that fails is said in its line, and the others still go: what was done is
+        // never hidden by a later failure.
+        let failed = |n: usize, e: &waiting::Entry, err: Error| match err {
+            Error::Api { status: 404, .. } => format!(
+                "**Thread {n} ({})** is gone, or not visible to you · *nothing sent*",
+                waiting::md(&e.who)
+            ),
+            err => format!(
+                "**Thread {n} ({}):** {}",
+                waiting::md(&e.who),
+                self.failure(client, err)
+            ),
+        };
         for (n, e) in entries {
             let r = client.thread(&e.id).await;
             self.reached(&r);
-            let t = r.map_err(|err| self.failure(client, err))?;
-            forget(&self.pushed, &e.id);
+            let t = match r {
+                Ok(t) => t,
+                Err(err) => {
+                    notes.push(failed(n, &e, err));
+                    continue;
+                }
+            };
             if let Some(refusal) = waiting::refusal(n, &e, &t, &listed, now, waiting::local_offset)
             {
+                // Still in `inbox` (as pushed): the person has not seen the newer note.
                 notes.push(refusal);
                 continue;
             }
+            forget(&self.pushed, &e.id);
             body.insert("thread".into(), e.id.clone().into());
             let r = client.send(body.clone()).await;
             self.reached(&r);
             let v = match r {
                 Ok(v) => v,
                 Err(err) => {
-                    notes.push(format!(
-                        "**Thread {n} ({}):** {}",
-                        waiting::md(&e.who),
-                        self.failure(client, err)
-                    ));
+                    notes.push(failed(n, &e, err));
                     continue;
                 }
             };
@@ -852,6 +867,8 @@ impl Relevo {
         let w = match r {
             Ok(w) => w,
             Err(e) if e.unreachable() => return Ok(self.failure(&client, e)),
+            // Only the timeline is asked here: a 404 is a server without one.
+            Err(Error::Api { status: 404, .. }) => return Err(NO_TIMELINE.into()),
             Err(e) => return Err(self.failure(&client, e)),
         };
         let (text, entries) = waiting::list(&w.you, &w.names, &w.threads, w.total, w.handled, now);

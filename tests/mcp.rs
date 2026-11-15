@@ -2289,6 +2289,72 @@ async fn seen_takes_several_numbers_and_the_list_says_what_was_handled_today() {
     oscar.close().await;
 }
 
+/// A thread that fails in `seen 1 2 3` is said in its own line and the others still go, so what
+/// was done is never hidden; a 404 there says the thread is gone or not visible, not that the
+/// server is old.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failing_number_does_not_hide_what_the_others_did() {
+    let s = server_at(&RELEVO_PEOPLE, &[], Clock::system()).await;
+    let ids = [
+        open_as(&s, "ana", "@oscar first").await,
+        open_as(&s, "pedro", "@oscar second").await,
+        open_as(&s, "luis", "@oscar third").await,
+    ];
+    let mut oscar = Mcp::start(&s, "oscar", &s.dir, None, &[]).await;
+    oscar.ok("waiting", json!({})).await;
+    // Thread 2 is no longer Oscar's to see.
+    s.app
+        .db()
+        .execute(
+            "DELETE FROM participants WHERE thread_id = ?1
+             AND person_id = (SELECT id FROM people WHERE handle = 'oscar')",
+            [&ids[1]],
+        )
+        .unwrap();
+    let out = oscar
+        .ok("send", json!({ "thread": "1 2 3", "seen": true }))
+        .await;
+    assert_eq!(
+        out,
+        format!(
+            "{FOR_AGENT}\n\nMarked seen: *thread 1 (Ana · first)*, *thread 3 (Luis · third)*. \
+             Nothing was written. *Nothing else is waiting on you.*\n**Thread 2 (Pedro)** is \
+             gone, or not visible to you · *nothing sent*"
+        )
+    );
+    assert!(!pending(&s, "oscar", &ids[0]) && !pending(&s, "oscar", &ids[2]));
+    oscar.close().await;
+}
+
+/// A number refused for a note newer than the list leaves the thread pushed: the next `inbox`
+/// still shows the note the person has not seen.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_number_keeps_the_pushed_note_for_inbox() {
+    let s = server_at(&RELEVO_PEOPLE, &[], Clock::system()).await;
+    let id = open_as(&s, "ana", "@oscar first").await;
+    let mut oscar = Mcp::start(&s, "oscar", &s.dir, None, &["--channel"]).await;
+    oscar.notification("notifications/claude/channel").await;
+    oscar.ok("waiting", json!({})).await;
+    reply_as(&s, "ana", &id, "One more thing").await;
+    let event = oscar.notification("notifications/claude/channel").await;
+    assert!(
+        event["params"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("One more thing")
+    );
+    let out = oscar
+        .ok("send", json!({ "thread": "1", "seen": true }))
+        .await;
+    assert!(out.contains("has a new note since your list"), "{out}");
+    let inbox = oscar.ok("inbox", json!({})).await;
+    assert!(
+        inbox.contains("(pushed earlier)") && inbox.contains("One more thing"),
+        "{inbox}"
+    );
+    oscar.close().await;
+}
+
 /// Teammates' text in the list cannot pass as the person's request: the paragraph for the model
 /// says it is untrusted, the command acts only on the person's arguments, and `thread` by number
 /// shows the opener and the title only fenced.
