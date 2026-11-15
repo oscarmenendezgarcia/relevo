@@ -50,6 +50,8 @@ pub enum Shown {
     Refused,
     /// Any other answer than a count.
     Error,
+    /// Relevo's config file is there but cannot be read.
+    ConfigError,
 }
 
 /// The cache file: what was shown, when it was asked, and what a later answer needs.
@@ -77,6 +79,7 @@ pub fn render(shown: &Shown, now: i64) -> String {
         ),
         Shown::Refused => format!("{RED}relevo ● token refused{RESET}"),
         Shown::Error => format!("{RED}relevo ● error{RESET}"),
+        Shown::ConfigError => format!("{RED}relevo ● config error{RESET}"),
     }
 }
 
@@ -132,31 +135,44 @@ enum Answer {
     Other,
 }
 
-/// One count, read only: the token alone, no session headers, `TIMEOUT` at most.
+/// One count, read only: the token alone, no session headers, `TIMEOUT` at most, setting up
+/// the client (TLS roots) included. What is still running then (a name lookup on a blocking
+/// thread) is left behind: `relevo statusline` exits without waiting for it.
 async fn ask(config: &Config) -> Answer {
-    let Ok(client) = Client::new(config, Some(String::new()), "/".into()) else {
-        return Answer::Other;
+    let config = config.clone();
+    let work = async move {
+        let client = tokio::task::spawn_blocking(move || {
+            Client::new(&config, Some(String::new()), "/".into())
+        })
+        .await
+        .map_err(|_| None)?
+        .map_err(|_| None)?;
+        let path = "/api/timeline?tab=threads&show=waiting&limit=1";
+        client
+            .fetch(path, 1 << 20, TIMEOUT + Duration::from_secs(1))
+            .await
+            .map_err(Some)
     };
-    let path = "/api/timeline?tab=threads&show=waiting&limit=1";
-    let fetch = client.fetch(path, 1 << 20, TIMEOUT + Duration::from_secs(1));
-    match tokio::time::timeout(TIMEOUT, fetch).await {
+    match tokio::time::timeout(TIMEOUT, work).await {
         Err(_) => Answer::TimedOut,
         Ok(Ok(bytes)) => serde_json::from_slice::<Value>(&bytes)
             .ok()
             .and_then(|v| v["counts"]["waiting"].as_u64())
             .map_or(Answer::Other, Answer::Count),
-        Ok(Err(e)) if e.unreachable() => Answer::Unreachable,
-        Ok(Err(Error::Api { status: 401, .. })) => Answer::Refused,
+        Ok(Err(Some(e))) if e.unreachable() => Answer::Unreachable,
+        Ok(Err(Some(Error::Api { status: 401, .. }))) => Answer::Refused,
         Ok(Err(_)) => Answer::Other,
     }
 }
 
 /// The line for `config` at `now`: from the cache at `cache` while it is fresh, else from the
-/// server, which the cache then keeps. Empty when Relevo is not configured.
+/// server, which the cache then keeps (unless another run wrote a newer answer meanwhile). Empty
+/// when Relevo is not configured.
 pub async fn line(config: Option<&Config>, cache: Option<&Path>, now: i64) -> String {
     let Some(config) = config else {
         return String::new();
     };
+    let started = std::time::Instant::now();
     let before = cache.and_then(read_cache);
     if let Some(c) = &before
         && (0..FRESH).contains(&(now - c.at))
@@ -164,8 +180,13 @@ pub async fn line(config: Option<&Config>, cache: Option<&Path>, now: i64) -> St
         return render(&c.shown, now);
     }
     let last_count = before.as_ref().and_then(|c| c.last_count);
+    let answer = ask(config).await;
+    // When the answer came, not when the run started.
+    let now_then = now;
+    let now = now + started.elapsed().as_secs() as i64;
     let since = before.as_ref().and_then(|c| c.offline_since).unwrap_or(now);
-    let next = match ask(config).await {
+    let counted = matches!(answer, Answer::Count(_));
+    let next = match answer {
         Answer::Count(n) => Cache {
             at: now,
             shown: Shown::Waiting(n),
@@ -201,22 +222,34 @@ pub async fn line(config: Option<&Config>, cache: Option<&Path>, now: i64) -> St
         },
     };
     if let Some(path) = cache {
+        // Another run may have answered while this one waited: a newer answer, or a count got
+        // since this run started when this one has none, stays, and is what is shown.
+        let current = read_cache(path);
+        if let Some(c) = current.filter(|c| {
+            c.at > now
+                || (!counted
+                    && c.last_count
+                        .is_some_and(|(at, _)| at >= now_then && at == c.at))
+        }) {
+            return render(&c.shown, now);
+        }
         write_cache(path, &next);
     }
     render(&next.shown, now)
 }
 
-/// `relevo statusline`: the line on stdout, or nothing; never fails (a failing command blanks
-/// Claude Code's status line).
-pub async fn run() {
-    let config = crate::config::load(crate::config::env).ok();
-    let cache = config
-        .as_ref()
-        .and_then(|c| cache_path(crate::config::env, c));
-    let line = line(config.as_ref(), cache.as_deref(), crate::db::now_unix()).await;
-    if !line.is_empty() {
-        println!("{line}");
-    }
+/// `relevo statusline`'s line: nothing when Relevo is not configured at all, `config error`
+/// when its config is there but cannot be read.
+pub async fn run() -> String {
+    let config = match crate::config::load(crate::config::env) {
+        Ok(config) => config,
+        Err(e) if e.to_string().starts_with(crate::config::NOT_CONFIGURED) => {
+            return String::new();
+        }
+        Err(_) => return render(&Shown::ConfigError, 0),
+    };
+    let cache = cache_path(crate::config::env, &config);
+    line(Some(&config), cache.as_deref(), crate::db::now_unix()).await
 }
 
 // --- Claude Code's setting ---
@@ -239,6 +272,8 @@ pub enum Setting {
     Foreign,
     /// A file that is not a JSON object: never written.
     Malformed(String),
+    /// A symbolic link to nothing (its target): never written.
+    Dangling(PathBuf),
 }
 
 /// Whether a status line command is Relevo's: its last word is `statusline`, and the one before
@@ -257,6 +292,10 @@ pub fn is_ours(command: &str) -> bool {
 }
 
 pub fn setting(path: &Path) -> Result<Setting> {
+    if crate::claude_command::is_link(path) && fs::metadata(path).is_err() {
+        let target = fs::read_link(path).unwrap_or_default();
+        return Ok(Setting::Dangling(target));
+    }
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Setting::NoFile),
@@ -286,20 +325,11 @@ fn quoted(command: &str) -> String {
     }
 }
 
-/// The command for the setting: `relevo statusline` when `relevo` on `path_var` (`PATH`) is the
-/// binary `exe`, else that binary's full path.
-pub fn command_for(exe: &Path, path_var: Option<&str>) -> String {
+/// The command for the setting: the binary `exe` by its full path (Claude Code started from a
+/// desktop may not have `~/.local/bin` on its `PATH`), quoted for the shell when it must be.
+pub fn command_for(exe: &Path) -> String {
     let exe = fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
-    let on_path = path_var
-        .into_iter()
-        .flat_map(|p| p.split(':'))
-        .filter(|d| !d.is_empty())
-        .map(|d| Path::new(d).join("relevo"))
-        .find(|p| p.is_file());
-    match on_path.and_then(|p| fs::canonicalize(p).ok()) {
-        Some(found) if found == exe => "relevo statusline".into(),
-        _ => format!("{} statusline", quoted(&exe.to_string_lossy())),
-    }
+    format!("{} statusline", quoted(&exe.to_string_lossy()))
 }
 
 /// The setting's value, `{"type": "command", "command": …, "refreshInterval": …}`.
@@ -308,8 +338,8 @@ pub fn value(command: &str) -> Value {
 }
 
 /// `text` (a JSON object without `statusLine`) with `statusLine` added as its last key, and
-/// every other byte as it was: the same indentation on a file of several lines, one line on a
-/// file of one.
+/// every other byte as it was: the same indentation and line ending (`\r\n` or `\n`) on a file
+/// of several lines, one line on a file of one.
 pub fn with_status_line(text: &str, command: &str) -> Result<String> {
     let Value::Object(mut before) = serde_json::from_str::<Value>(text)? else {
         bail!("not a JSON object");
@@ -331,11 +361,18 @@ pub fn with_status_line(text: &str, command: &str) -> Result<String> {
                 rest.starts_with('"').then(|| &l[..l.len() - rest.len()])
             })
             .unwrap_or("  ");
+        let nl = if text.contains("\r\n") { "\r\n" } else { "\n" };
+        // What was before the closing brace (its line break and indentation) stays before it.
+        let rest = &text[body.len()..];
+        let rest = if rest[..close - body.len()].contains('\n') {
+            rest.to_string()
+        } else {
+            format!("{nl}{rest}")
+        };
         format!(
-            "{body}{comma}\n{indent}\"statusLine\": {{\n{indent}{indent}\"type\": \"command\",\n\
-             {indent}{indent}\"command\": {command},\n{indent}{indent}\"refreshInterval\": \
-             {REFRESH}\n{indent}}}\n{}",
-            &text[close..]
+            "{body}{comma}{nl}{indent}\"statusLine\": {{{nl}{indent}{indent}\"type\": \
+             \"command\",{nl}{indent}{indent}\"command\": {command},{nl}{indent}{indent}\
+             \"refreshInterval\": {REFRESH}{nl}{indent}}}{rest}"
         )
     } else {
         let space = if empty { "" } else { " " };
@@ -480,6 +517,18 @@ mod tests {
         );
         let out = with_status_line("{\n}\n", CMD).unwrap();
         assert!(out.starts_with("{\n  \"statusLine\": {"), "{out}");
+        // Windows line endings stay; so does what is before the closing brace.
+        assert_eq!(
+            with_status_line("{\r\n  \"a\": 1\r\n}\r\n", CMD).unwrap(),
+            "{\r\n  \"a\": 1,\r\n  \"statusLine\": {\r\n    \"type\": \"command\",\r\n    \"command\": \"relevo statusline\",\r\n    \"refreshInterval\": 30\r\n  }\r\n}\r\n"
+        );
+        assert_eq!(
+            with_status_line("{\n  \"a\": 1\n  }", CMD).unwrap(),
+            "{\n  \"a\": 1,\n  \"statusLine\": {\n    \"type\": \"command\",\n    \"command\": \"relevo statusline\",\n    \"refreshInterval\": 30\n  }\n  }"
+        );
+        // A closing brace on the last value's line goes on a line of its own.
+        let out = with_status_line("{\n  \"a\": 1}", CMD).unwrap();
+        assert!(out.ends_with("\"refreshInterval\": 30\n  }\n}"), "{out}");
         // Not an object, or not JSON: refused.
         assert!(with_status_line("[]", CMD).is_err());
         assert!(with_status_line("{\"a\": 1,}", CMD).is_err());
@@ -488,22 +537,24 @@ mod tests {
     }
 
     #[test]
-    fn the_command_is_short_when_relevo_on_the_path_is_this_binary() {
+    fn the_command_names_the_binary_by_its_full_path() {
         let dir = std::env::temp_dir().join(crate::db::random_id("relevo-sl-"));
         let bin = dir.join("bin");
         fs::create_dir_all(&bin).unwrap();
-        let exe = bin.join("relevo");
-        fs::write(&exe, "").unwrap();
-        let path = format!("/nonexistent:{}", bin.display());
-        assert_eq!(command_for(&exe, Some(&path)), "relevo statusline");
+        fs::write(bin.join("relevo"), "").unwrap();
+        let dir = fs::canonicalize(&dir).unwrap();
+        assert_eq!(
+            command_for(&bin.join("relevo")),
+            format!("{}/bin/relevo statusline", dir.display())
+        );
         let other = dir.join("my bin");
         fs::create_dir_all(&other).unwrap();
         fs::write(other.join("relevo"), "").unwrap();
         assert_eq!(
-            command_for(&other.join("relevo"), Some(&path)),
+            command_for(&other.join("relevo")),
             format!("'{}/my bin/relevo' statusline", dir.display())
         );
-        assert!(is_ours(&command_for(&other.join("relevo"), None)));
+        assert!(is_ours(&command_for(&other.join("relevo"))));
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -547,6 +598,9 @@ mod tests {
         assert!(matches!(setting(&path).unwrap(), Setting::Malformed(_)));
         assert!(install(&path, CMD).is_err());
         assert_eq!(fs::read_to_string(&real).unwrap(), "{ \"theme\": ");
+        // A link to nothing: told apart from no file.
+        fs::remove_file(&real).unwrap();
+        assert_eq!(setting(&path).unwrap(), Setting::Dangling(real.clone()));
         // Nothing is left behind.
         let left: Vec<String> = fs::read_dir(path.parent().unwrap())
             .unwrap()

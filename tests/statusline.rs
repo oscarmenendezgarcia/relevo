@@ -304,7 +304,8 @@ async fn a_timeout_shows_the_last_count_while_recent_else_offline() {
     let dir = temp_dir();
     let cache = dir.join("statusline.json");
     let c = config(&url, "rlv_x");
-    let now = db::now_unix();
+    // Early in a minute: the answer comes about 2 seconds later, in the same minute.
+    let now = db::now_unix() / 60 * 60 + 10;
     // No count to show: offline.
     assert_eq!(line(Some(&c), Some(&cache), now).await, offline(now, now));
     // A recent count: shown, and the cache keeps when the server stopped answering.
@@ -318,13 +319,41 @@ async fn a_timeout_shows_the_last_count_while_recent_else_offline() {
         },
     );
     assert_eq!(line(Some(&c), Some(&cache), now).await, amber(3));
-    assert_eq!(read_cache(&cache).offline_since, Some(now));
+    // Since when the answer did not come: the end of the timeout.
+    let since = read_cache(&cache).offline_since.unwrap();
+    assert!((now + 1..=now + 3).contains(&since), "{since} {now}");
     // Too old: offline since the first timeout.
     let later = now - FRESH + GRACE;
     assert_eq!(
         line(Some(&c), Some(&cache), later).await,
         offline(now, later)
     );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_newer_answer_written_meanwhile_is_never_overwritten() {
+    let (url, _) = silent().await;
+    let dir = temp_dir();
+    let cache = dir.join("statusline.json");
+    let c = config(&url, "rlv_x");
+    let now = db::now_unix();
+    // While this run waits for a server that does not answer, another run gets a count.
+    let other = cache.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        write_cache(
+            &other,
+            &Cache {
+                at: now,
+                shown: Shown::Waiting(7),
+                last_count: Some((now, 7)),
+                offline_since: None,
+            },
+        );
+    });
+    assert_eq!(line(Some(&c), Some(&cache), now).await, amber(7));
+    assert_eq!(read_cache(&cache).shown, Shown::Waiting(7));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -376,6 +405,59 @@ async fn the_command_prints_the_line_or_nothing() {
         cached.len() == 1 && cached[0].starts_with("statusline-"),
         "{cached:?}"
     );
+    // A config that cannot be read says so, in red.
+    std::fs::write(home.join("config.json"), "{ not json").unwrap();
+    let out = relevo(&home).arg("statusline").output().await.unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "\x1b[38;5;203mrelevo ● config error\x1b[0m\n"
+    );
+    // Stdout closed: still exit 0.
+    let out = Command::new("sh")
+        .args(["-c", "\"$0\" statusline >&-; echo \"exit $?\""])
+        .arg(env!("CARGO_BIN_EXE_relevo"))
+        .env("HOME", &home)
+        .env("RELEVO_CONFIG", home.join("none.json"))
+        .env("RELEVO_URL", &s.url)
+        .env("RELEVO_TOKEN", &s.tokens["oscar"])
+        .env("XDG_CACHE_HOME", home.join("cache2"))
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "exit 0\n");
+}
+
+/// The process ends soon after the timeout, whatever the server does: one that never answers,
+/// and an address nothing answers from.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_command_never_outlives_its_timeout_by_much() {
+    let (silent_url, _) = silent().await;
+    let home = temp_dir();
+    for url in [
+        silent_url.as_str(),
+        "http://10.255.255.1:9",
+        "https://10.255.255.1:9",
+    ] {
+        let t = std::time::Instant::now();
+        let out = relevo(&home)
+            .arg("statusline")
+            .env("RELEVO_URL", url)
+            .env("RELEVO_TOKEN", "rlv_x")
+            .env("XDG_CACHE_HOME", home.join(db::random_id("cache-")))
+            .output()
+            .await
+            .unwrap();
+        assert!(out.status.success());
+        let line = String::from_utf8(out.stdout).unwrap();
+        assert!(line.contains("offline"), "{url}: {line}");
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(3),
+            "{url}: {:?}",
+            t.elapsed()
+        );
+    }
+    std::fs::remove_dir_all(&home).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -449,6 +531,18 @@ async fn connect_sets_claude_codes_status_line_only_when_there_is_none() {
     let out = connect(&["--statusline"], None).await;
     assert!(out.contains("it is not valid JSON"), "{out}");
     assert_eq!(std::fs::read_to_string(&settings).unwrap(), broken);
+    // A link to nothing: left as it is, without asking.
+    std::fs::remove_file(&settings).unwrap();
+    std::os::unix::fs::symlink(home.join("dotfiles/settings.json"), &settings).unwrap();
+    let out = connect(&["--statusline"], None).await;
+    assert!(out.contains("which does not exist"), "{out}");
+    assert!(
+        std::fs::symlink_metadata(&settings)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(!home.join("dotfiles").exists());
     // CLAUDE_CONFIG_DIR names Claude Code's folder; with --statusline it is made.
     let other = home.join("claude-other");
     let out = connect(&["--statusline"], Some(&other)).await;

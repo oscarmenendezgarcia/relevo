@@ -466,7 +466,7 @@ fn offer_statusline(force: bool) {
     }
     let path = statusline::settings_path(&dir);
     let command = match std::env::current_exe() {
-        Ok(exe) => statusline::command_for(&exe, config::env("PATH").as_deref()),
+        Ok(exe) => statusline::command_for(&exe),
         Err(_) => "relevo statusline".to_string(),
     };
     match statusline::setting(&path) {
@@ -483,6 +483,13 @@ fn offer_statusline(force: bool) {
             "left {} as it is: it is not valid JSON ({e}); to show Relevo in Claude Code's status \
              line, add \"statusLine\": {} to it",
             path.display(),
+            statusline::value(&command)
+        ),
+        Ok(Setting::Dangling(target)) => println!(
+            "left {} as it is: it is a link to {}, which does not exist; to show Relevo in Claude \
+             Code's status line, add \"statusLine\": {} to the settings it should point to",
+            path.display(),
+            target.display(),
             statusline::value(&command)
         ),
         Ok(Setting::Absent | Setting::NoFile) => {
@@ -694,8 +701,16 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         Command::Statusline => {
-            relevo::statusline::run().await;
-            return Ok(());
+            // Never fails (a failing command blanks Claude Code's status line), even with stdout
+            // closed; and exits at once, not waiting for a name lookup the timeout left behind.
+            use std::io::Write;
+            let line = relevo::statusline::run().await;
+            let mut out = std::io::stdout().lock();
+            if !line.is_empty() {
+                let _ = writeln!(out, "{line}");
+            }
+            let _ = out.flush();
+            std::process::exit(0);
         }
         Command::Mcp { channel } => return mcp::run(channel).await,
         Command::Web { port, no_open } => return relevo::web::run(port, no_open).await,
