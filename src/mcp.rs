@@ -462,32 +462,59 @@ const NOT_CONNECTED: &str = "**Relevo isn't connected on this machine.** Run `re
 const MAX_PAGES: usize = 200;
 
 /// Every thread waiting on the person, oldest first, from the read-only timeline: with who they
-/// are, the names it gave and how many wait.
-async fn waiting_threads(
-    client: &Client,
-) -> Result<(String, Map<String, Value>, Vec<Value>, usize), Error> {
-    let (mut threads, mut names, mut before) = (vec![], Map::new(), None::<String>);
-    for _ in 0..MAX_PAGES {
+/// are, the names it gave, how many wait, and how many they handled at or after `since` (unix
+/// seconds). The first page asks that count too (`handled_since`); a server before 0.6.0 refuses
+/// it, and the page is asked again without it: the count is then `None`.
+async fn waiting_threads(client: &Client, since: i64) -> Result<Waiting, Error> {
+    let mut w = Waiting::default();
+    let mut before = None::<String>;
+    let mut handled_since = Some(since);
+    let mut page_no = 0;
+    while page_no < MAX_PAGES {
         let mut query = "tab=threads&show=waiting&limit=50".to_string();
         if let Some(cursor) = &before {
             query.push_str(&format!("&before={cursor}"));
+        } else if let Some(since) = handled_since {
+            query.push_str(&format!("&handled_since={since}"));
         }
-        let v = client.timeline(&query).await?;
-        names.extend(v["names"].as_object().cloned().unwrap_or_default());
+        let v = match client.timeline(&query).await {
+            Err(Error::Api { status: 400, .. }) if before.is_none() && handled_since.is_some() => {
+                handled_since = None;
+                continue;
+            }
+            r => r?,
+        };
+        page_no += 1;
+        if before.is_none() {
+            w.handled = v["counts"]["handled"].as_i64();
+        }
+        w.names
+            .extend(v["names"].as_object().cloned().unwrap_or_default());
         let page = v["threads"].as_array().cloned().unwrap_or_default();
         let last_page = page.is_empty() || !v["cursor"].is_string();
-        threads.extend(page);
+        w.threads.extend(page);
         before = v["cursor"].as_str().map(str::to_string);
         if last_page {
-            let total = v["counts"]["waiting"].as_u64().unwrap_or(0) as usize;
-            threads.reverse();
-            return Ok((s(&v["you"]).to_string(), names, threads, total));
+            w.total = v["counts"]["waiting"].as_u64().unwrap_or(0) as usize;
+            w.threads.reverse();
+            w.you = s(&v["you"]).to_string();
+            return Ok(w);
         }
     }
     Err(Error::BadResponse(format!(
         "more than {} pages of waiting threads",
         MAX_PAGES
     )))
+}
+
+/// What `waiting_threads` read.
+#[derive(Default)]
+struct Waiting {
+    you: String,
+    names: Map<String, Value>,
+    threads: Vec<Value>,
+    total: usize,
+    handled: Option<i64>,
 }
 
 /// How many threads wait on the person now; `None` when the server does not say.
@@ -497,15 +524,6 @@ async fn still_waiting(client: &Client) -> Option<i64> {
         .await
         .ok()?;
     v["counts"]["waiting"].as_i64()
-}
-
-/// How many threads the person has handled since the start of their day (local time); `None`
-/// from a server before 0.6.0, which does not count them.
-async fn handled_today(client: &Client, now: i64) -> Option<i64> {
-    let since = waiting::start_of_day(now, waiting::local_offset(now));
-    let query = format!("tab=threads&show=waiting&limit=1&handled_since={since}");
-    let v = client.timeline(&query).await.ok()?;
-    v["counts"]["handled"].as_i64()
 }
 
 impl Relevo {
@@ -824,23 +842,19 @@ impl Relevo {
             Err(e) if e.starts_with(config::NOT_CONFIGURED) => return Ok(NOT_CONNECTED.into()),
             Err(e) => return Err(e.clone()),
         };
-        let r = waiting_threads(&client).await;
+        let now = crate::db::now_unix();
+        let today = waiting::start_of_day(now, waiting::local_offset(now));
+        let r = waiting_threads(&client, today).await;
         self.reached(&r);
-        let (you, names, threads, total) = match r {
-            Ok(v) => v,
+        let w = match r {
+            Ok(w) => w,
             Err(e) if e.unreachable() => return Ok(self.failure(&client, e)),
             Err(e) => return Err(self.failure(&client, e)),
         };
-        let now = crate::db::now_unix();
-        let handled = if threads.is_empty() {
-            handled_today(&client, now).await
-        } else {
-            None
-        };
-        let (text, entries) = waiting::list(&you, &names, &threads, total, handled, now);
+        let (text, entries) = waiting::list(&w.you, &w.names, &w.threads, w.total, w.handled, now);
         *lock(&self.listed) = Some(Listed {
-            you,
-            names,
+            you: w.you,
+            names: w.names,
             entries,
         });
         Ok(text)

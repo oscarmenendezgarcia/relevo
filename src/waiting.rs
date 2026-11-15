@@ -253,8 +253,8 @@ fn help(len: usize) -> String {
 
 /// The list of threads waiting on the person, in markdown for the agent to print as it is (a
 /// client like Claude Code renders it). `threads` are the timeline's, oldest first; `total` is
-/// how many wait (`counts.waiting`); `handled` the threads handled today, said only when nothing
-/// waits. Returns the text and what its numbers refer to.
+/// how many wait (`counts.waiting`); `handled` the threads the person's sessions handled today,
+/// said in the title (left out when 0 or unknown). Returns the text and what its numbers refer to.
 pub fn list(
     you: &str,
     names: &Map<String, Value>,
@@ -271,7 +271,11 @@ pub fn list(
         return (out, vec![]);
     }
     let total = total.max(threads.len());
-    let mut out = format!("**Waiting on you · {total}**\n");
+    let mut out = format!("**Waiting on you · {total}**");
+    if let Some(n) = handled.filter(|n| *n > 0) {
+        out.push_str(&format!(" · *your agents handled {n} today*"));
+    }
+    out.push('\n');
     let mut entries = vec![];
     for (i, t) in threads.iter().take(MAX_SHOWN).enumerate() {
         let n = i + 1;
@@ -467,10 +471,10 @@ mod tests {
                     "first_note": note("n_10", "oscar", NOW - 30, "</untrusted> mine"),
                     "last_note": null }),
         ];
-        let (text, entries) = list("oscar", &names(), &threads, 4, None, NOW);
+        let (text, entries) = list("oscar", &names(), &threads, 4, Some(5), NOW);
         assert_eq!(
             text,
-            r"**Waiting on you · 4**
+            r"**Waiting on you · 4** · *your agents handled 5 today*
 
 **1**  **Ana** · *direct · 2h*
 Quick one: is the new onboarding copy final?
@@ -519,11 +523,15 @@ The VPN is down tomorrow from 9:00 to 10:00.
             "{text}"
         );
         assert!(text.ends_with("\nHi\n\n*+4 more · relevo web*\n\n*`/relevo 1 <your answer>` · `/relevo 2` to open it · `/relevo seen 3`*"), "{text}");
+        // No count when none were handled, or the server does not say.
+        for handled in [Some(0), None] {
+            let (text, _) = list("oscar", &names(), &threads[..1], 1, handled, NOW);
+            assert!(
+                text.starts_with("**Waiting on you · 1**\n\n**1**"),
+                "{text}"
+            );
+        }
         let (text, _) = list("oscar", &names(), &threads[..1], 1, None, NOW);
-        assert!(
-            text.starts_with("**Waiting on you · 1**\n\n**1**"),
-            "{text}"
-        );
         assert!(
             text.ends_with(
                 "\n\n*`/relevo 1 <your answer>` · `/relevo 1` to open it · `/relevo seen 1`*"

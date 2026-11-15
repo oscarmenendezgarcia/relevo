@@ -208,6 +208,14 @@ test("numbers act on the last list, after reading the thread again: a reply, a r
     last(ext).message.details.rows.map((r: any) => r.id),
     [second, more],
   );
+  // Its title says how many threads Oscar's agents handled today: 1 here, 3 from Claude Code.
+  assert.equal(last(ext).message.details.handled, 2);
+  assert.match(last(ext).message.content, /\n\nWaiting on you · 2 · your agents handled 2 today\n 1  pedro2 · /);
+  assert.ok(
+    draw(last(ext).message.details, tagTheme).startsWith(
+      "<b>Waiting on you</b><dim> · </dim><warning><b>2</b></warning><dim> · </dim><muted>your agents handled 2 today</muted>\n\n",
+    ),
+  );
   const seen = await ext.tool("relevo_send", { thread: "1, 2", seen: true }, home);
   assert.equal(
     seen,
@@ -298,6 +306,9 @@ test("the list: at most ten, then a count; text that cannot break it; wrapped to
   assert.equal(rs.length, 10);
   const text = plain({ state: "list", rows: rs, total: 14 });
   assert.ok(text.startsWith("Waiting on you · 14\n 1  Ana · direct · 12m\n    question 0\n"), text);
+  // No count in the title when none were handled (or the server does not say).
+  assert.ok(plain({ state: "list", rows: rs, total: 14, handled: 0 }).startsWith("Waiting on you · 14\n"));
+  assert.ok(draw({ state: "list", rows: rs, total: 14, handled: null }, tagTheme).startsWith("<b>Waiting on you</b><dim> · </dim><warning><b>14</b></warning>\n\n"));
   assert.ok(text.includes("\n10  Ana · direct · 3m\n    question 9\n"), text);
   assert.ok(text.endsWith("\n+4 more · relevo web\n/relevo 1 <your answer> · /relevo 2 to open it · /relevo seen 3"), text);
   assert.match(draw({ state: "list", rows: rs, total: 14 }, tagTheme), /\n<muted>\+4 more<\/muted><dim> · <\/dim><muted>relevo web<\/muted>\n/);

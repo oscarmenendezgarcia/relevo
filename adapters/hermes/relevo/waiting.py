@@ -336,8 +336,12 @@ def render(shown: dict, style: Plain) -> str:
     if state == "error":
         return style.bad(style.esc(shown["message"]))
     total, listed = shown["total"], shown["rows"]
-    out = [style.bold("Waiting on you") + " · " + style.number(str(total)) if type(style) is Ansi
-           else style.bold(f"Waiting on you · {total}")]
+    title = (style.bold("Waiting on you") + " · " + style.number(str(total)) if type(style) is Ansi
+             else style.bold(f"Waiting on you · {total}"))
+    if shown.get("handled"):
+        # How many threads the person's sessions handled today, when any.
+        title += dot + style.italic(f"your agents handled {shown['handled']} today")
+    out = [title]
     for r in listed:
         head = (dot.join(style.italic(p) for p in meta(r)) if type(style) is Ansi
                 else style.italic(style.esc(" · ".join(meta(r)))) if isinstance(style, Markdown)
@@ -487,19 +491,35 @@ def failure(api: client.Api, exc: BaseException) -> str:
     return f"could not reach the Relevo server ({client.describe_error(exc)})."
 
 
-def _all_waiting(api: client.Api) -> tuple:
-    threads, names, before = [], {}, None
-    for _ in range(MAX_PAGES):
+def _all_waiting(api: client.Api, since: int) -> tuple:
+    """Every thread waiting on the person, oldest first, and how many they handled since `since` (unix
+    seconds): the first page asks that count too (`handled_since`); a server before 0.6.0 refuses it,
+    and the page is asked again without it, with no count (None)."""
+    threads, names, before, handled_since, handled = [], {}, None, since, None
+    pages = 0
+    while pages < MAX_PAGES:
         params = {"tab": "threads", "show": "waiting", "limit": "50"}
         if before:
             params["before"] = before
-        v = api.timeline(params)
+        elif handled_since is not None:
+            params["handled_since"] = str(handled_since)
+        try:
+            v = api.timeline(params)
+        except client.RelevoError as exc:
+            if before or handled_since is None or exc.status != 400:
+                raise
+            handled_since = None
+            continue
+        pages += 1
+        if not before:
+            h = (v.get("counts") or {}).get("handled")
+            handled = h if isinstance(h, int) and not isinstance(h, bool) else None
         names.update(v.get("names") or {})
         got = v.get("threads") if isinstance(v.get("threads"), list) else []
         threads += got
         if not got or not isinstance(v.get("cursor"), str):
             counts = v.get("counts") or {}
-            return str(v.get("you") or ""), names, threads[::-1], int(counts.get("waiting") or 0)
+            return str(v.get("you") or ""), names, threads[::-1], int(counts.get("waiting") or 0), handled
         before = v["cursor"]
     raise RuntimeError(f"more than {MAX_PAGES} pages of waiting threads")
 
@@ -528,7 +548,7 @@ def waiting_list(keys: list, settings: Optional[client.Settings] = None) -> dict
     api = client.Api(settings)
     now = int(time.time())
     try:
-        you, names, threads, total = _all_waiting(api)
+        you, names, threads, total, handled = _all_waiting(api, start_of_day(now))
         reached()
     except Exception as exc:
         reached(exc)
@@ -542,16 +562,7 @@ def waiting_list(keys: list, settings: Optional[client.Settings] = None) -> dict
     keep(keys, Listed(you=you, names=names, rows=shown))
     total = max(total, len(threads))
     if shown:
-        return {"state": "list", "rows": shown, "total": total}
-    handled = None
-    try:
-        # A server before 0.6.0 refuses handled_since: the line is left out.
-        v = api.timeline({"tab": "threads", "show": "waiting", "limit": "1",
-                          "handled_since": str(start_of_day(now))})
-        h = (v.get("counts") or {}).get("handled")
-        handled = h if isinstance(h, int) else None
-    except Exception:
-        pass
+        return {"state": "list", "rows": shown, "total": total, "handled": handled}
     return {"state": "empty", "handled": handled}
 
 

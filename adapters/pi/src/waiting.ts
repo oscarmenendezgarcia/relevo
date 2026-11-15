@@ -73,7 +73,7 @@ export interface Listed {
 
 /** What /relevo shows, kept in the message's `details` for pi to draw it again. */
 export type Shown =
-  | { state: "list"; rows: Row[]; total: number }
+  | { state: "list"; rows: Row[]; total: number; handled?: number | null }
   | { state: "empty"; handled: number | null }
   | { state: "offline"; host: string; since: string }
   | { state: "not-connected" }
@@ -222,7 +222,7 @@ export function plain(shown: Shown): string {
     case "error":
       return shown.message;
     case "list": {
-      const out = [`Waiting on you · ${shown.total}`];
+      const out = [`Waiting on you · ${shown.total}${shown.handled ? ` · your agents handled ${shown.handled} today` : ""}`];
       for (const r of shown.rows) {
         out.push(`${String(r.n).padStart(2)}  ${r.who} · ${meta(r)}`, `    ${r.first}`);
         if (r.reply) out.push(`    └ ${r.reply.by ? `${r.reply.by}: ` : ""}${r.reply.text}`);
@@ -257,7 +257,8 @@ function mentions(theme: Theme, text: string, base?: string): string {
 }
 
 /**
- * What /relevo shows, drawn with pi's theme: the title bold with the count in `warning`, numbers
+ * What /relevo shows, drawn with pi's theme: the title bold with the count in `warning` (then, when
+ * any, how many the person's agents handled today in `muted`, after a dim ` · `), numbers
  * `warning` and bold, names bold, the rest of the head `muted` with ` · ` dim, `@names` in
  * `accent`, `└ ` dim and the latest note `muted`, the help line dim.
  */
@@ -285,7 +286,9 @@ export function draw(shown: Shown, theme: Theme): string {
     case "error":
       return theme.fg("error", shown.message);
     case "list": {
-      let out = theme.bold("Waiting on you") + dot + theme.fg("warning", theme.bold(String(shown.total))) + "\n";
+      let out = theme.bold("Waiting on you") + dot + theme.fg("warning", theme.bold(String(shown.total)));
+      if (shown.handled) out += dot + theme.fg("muted", `your agents handled ${shown.handled} today`);
+      out += "\n";
       for (const r of shown.rows) {
         const head = meta(r)
           .split(" · ")

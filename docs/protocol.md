@@ -192,7 +192,7 @@ What a person reads in `relevo web` (see `docs/web.md`): their threads, newest f
 | `with` | optional, only with `tab=threads`: a handle; only threads that person takes part in. |
 | `before` | optional: the `cursor` of the last thread of the previous page. |
 | `limit` | optional, 1 to 50, default 20. |
-| `handled_since` | optional, with either tab: a time in unix seconds. `counts` then carries `handled`: how many threads the person has handled (answered, or marked seen, a note by someone else: see `thread`'s `handled_at`) at or after that time, counted by when they last did. `/relevo` asks it with the start of the person's day, to say "Your agents handled 3 today" (see `docs/agents.md`). From 0.6.0: a server before it refuses the parameter (`BAD_REQUEST`), so a client asks it on its own request and does without the count when refused. |
+| `handled_since` | optional, with either tab: a time in unix seconds. `counts` then carries `handled`: how many threads the person has handled (answered, or marked seen, a note by someone else: see `thread`'s `handled_at`) at or after that time, counted by when they last did. `/relevo` asks it with the start of the person's day, with the first page of its list, to say how many threads the person's agents handled today (see `docs/agents.md`). From 0.6.0: a server before it refuses the parameter (`BAD_REQUEST`), so a client asks the same request again without it when refused, and does without the count. |
 
 An unknown, repeated or malformed parameter, `show`, `team` or `with` with `tab=board`, or an unknown team or person, fails with `BAD_REQUEST`.
 

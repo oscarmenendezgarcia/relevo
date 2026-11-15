@@ -3022,6 +3022,19 @@ class Command(Base):
     def tool(self, name: str, args: dict, *, key: str = "s1") -> str:
         return registry.dispatch(name, args, session_id=key)
 
+    def handled_today(self) -> int:
+        """How many threads Oscar's sessions handled today, as the list's title says (other tests here
+        handle some too)."""
+        since = waiting_module.start_of_day(int(time.time()))
+        v = client.Api(client.resolve_settings()).timeline({"tab": "threads", "show": "waiting", "limit": "1",
+                                                            "handled_since": str(since)})
+        return v["counts"]["handled"]
+
+    def title(self, total: int) -> str:
+        """The list's title as plain text, with the count of what Oscar's agents handled today."""
+        n = self.handled_today()
+        return f"Waiting on you · {total}" + (f" · your agents handled {n} today" if n else "")
+
     def three(self) -> list:
         """Ana's direct question with her later reply, Bob's board post whose reply names Oscar, and Ana's
         direct one full of markdown: oldest first by their latest note, b, c, a."""
@@ -3050,7 +3063,7 @@ class Command(Base):
         self.assertIn("\x1b[1;33m", cli)  # numbers in bold yellow, as pi draws them
         self.assertEqual(_ANSI.sub("", cli), self.run_command(platform="tui"))
         self.assertEqual(self.run_command(platform="tui"), "\n".join([
-            "Waiting on you · 3",
+            self.title(3),
             "",
             " 1  Bob · board · now · mentioned you",
             "    The VPN is down tomorrow from 9:00 to 10:00.",
@@ -3073,7 +3086,9 @@ class Command(Base):
     def test_markdown_for_messaging_platforms_escapes_teammates_text(self):
         self.three()
         md = self.run_command(platform="discord")
-        self.assertTrue(md.startswith("**Waiting on you · 3**\n\n**1**  **Bob** · *board · now · mentioned you*\n"), md)
+        n = self.handled_today()
+        title = "**Waiting on you · 3**" + (f" · *your agents handled {n} today*" if n else "")
+        self.assertTrue(md.startswith(f"{title}\n\n**1**  **Bob** · *board · now · mentioned you*\n"), md)
         self.assertIn("\n\\> Can you review \\`/refunds\\`? \\| \\[x\\](http://y) \\~\\~no\\~\\~ \\_now\\_\n", md)
         self.assertIn("\nQuick one: is the new \\*onboarding\\* copy final?\n*└ Also: can we ship it on Monday?*\n", md)
         self.assertTrue(md.endswith("\n\n*`/relevo 1 <your answer>` · `/relevo 2` to open it · `/relevo seen 3`*"), md)
@@ -3089,7 +3104,9 @@ class Command(Base):
         self.assertIn("is the new \u2217onboarding\u2217 copy final?", tg)
         self.assertNotIn("\\", tg)
         v2 = to_markdown_v2(tg)
-        self.assertTrue(v2.startswith("*Waiting on you · 3*\n\n*1*  *Bob* · _board · now · mentioned you_\n"), v2)
+        n = self.handled_today()
+        title = "*Waiting on you · 3*" + (f" · _your agents handled {n} today_" if n else "")
+        self.assertTrue(v2.startswith(f"{title}\n\n*1*  *Bob* · _board · now · mentioned you_\n"), v2)
         self.assertIn("\n_└ Also: can we ship it on Monday?_\n", v2)
         # The note's specials stay text: no code, link, strike or emphasis from it.
         line = next(x for x in v2.split("\n") if "refunds" in x)
@@ -3103,7 +3120,7 @@ class Command(Base):
         for i in range(12):
             self.cara.send(text=f"@oscar Question {i + 1}?")
         out = self.run_command(platform="tui")
-        self.assertTrue(out.startswith("Waiting on you · 12\n"), out)
+        self.assertTrue(out.startswith(self.title(12) + "\n"), out)
         self.assertIn("\n10  Cara · direct · now\n    Question 10?\n", out)
         self.assertNotIn("Question 11?", out)
         self.assertIn("\n\n+2 more · relevo web\n\n/relevo 1", out)
@@ -3112,6 +3129,23 @@ class Command(Base):
         self.assertRegex(out, r"^✓ Nothing is waiting on you\. Your agents handled \d+ today\.$")
         # Its numbers are gone with it: the empty list is the last one.
         self.assertIn("Your last list had nothing waiting on you", self.tool("relevo_send", {"thread": "1", "text": "x"}))
+
+    def test_the_title_says_how_many_the_person_s_agents_handled_today(self):
+        row = waiting_module.Row(n=1, id="r_1", who="Ana", kind="direct", age="2h", replies=0, mentioned=False,
+                                 first="Quick one?", reply_by=None, reply=None, subject="Quick one?",
+                                 last_note="n_1")
+        shown = {"state": "list", "rows": [row], "total": 3, "handled": 5}
+        title = lambda platform: waiting_module.render(shown, waiting_module.style_for(platform)).split("\n")[0]
+        self.assertEqual(title("discord"), "**Waiting on you · 3** · *your agents handled 5 today*")
+        self.assertEqual(title("telegram"), "**Waiting on you · 3** · *your agents handled 5 today*")
+        self.assertEqual(title("tui"), "Waiting on you · 3 · your agents handled 5 today")
+        # The terminal: the title bold, the count bold yellow, then a dim ` · ` and the count of the day dim.
+        self.assertEqual(title("cli"), "\x1b[1mWaiting on you\x1b[0m · \x1b[1;33m3\x1b[0m"
+                                       "\x1b[2m · \x1b[0m\x1b[2myour agents handled 5 today\x1b[0m")
+        for handled in (0, None):
+            shown["handled"] = handled
+            self.assertEqual(title("discord"), "**Waiting on you · 3**")
+            self.assertEqual(title("tui"), "Waiting on you · 3")
 
     def test_not_connected_and_unreachable(self):
         saved = {k: os.environ.pop(k, None) for k in ("RELEVO_URL", "RELEVO_TOKEN", "RELEVO_CONFIG")}

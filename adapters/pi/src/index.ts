@@ -349,19 +349,39 @@ export function relevoExtension(options: Options = {}) {
     }
 
     /** Every thread waiting on the person, oldest first, from the read-only timeline, and how many wait. */
-    async function allWaiting(c: Client): Promise<{ you: string; names: Record<string, string>; threads: Timeline["threads"]; total: number }> {
+    /**
+     * Every thread waiting on the person, oldest first, and how many they handled since `since`
+     * (unix seconds): the first page asks that count too (`handled_since`); a server before 0.6.0
+     * refuses it, and the page is asked again without it, with no count.
+     */
+    async function allWaiting(
+      c: Client,
+      since: number,
+    ): Promise<{ you: string; names: Record<string, string>; threads: Timeline["threads"]; total: number; handled: number | null }> {
       const threads: Timeline["threads"] = [];
       const names: Record<string, string> = {};
       let before: string | null = null;
+      let handledSince: number | null = since;
+      let handled: number | null = null;
       for (let page = 0; page < MAX_PAGES; page++) {
         const q = new URLSearchParams({ tab: "threads", show: "waiting", limit: "50" });
         if (before) q.set("before", before);
-        const v = await c.timeline(q.toString());
+        else if (handledSince !== null) q.set("handled_since", String(handledSince));
+        let v: Timeline;
+        try {
+          v = await c.timeline(q.toString());
+        } catch (err) {
+          if (before || handledSince === null || !(err instanceof RelevoError && err.status === 400)) throw err;
+          handledSince = null;
+          page--;
+          continue;
+        }
+        if (!before) handled = typeof v.counts?.handled === "number" ? v.counts.handled : null;
         Object.assign(names, v.names ?? {});
         const got = Array.isArray(v.threads) ? v.threads : [];
         threads.push(...got);
         if (!got.length || typeof v.cursor !== "string") {
-          return { you: v.you, names, threads: threads.reverse(), total: v.counts?.waiting ?? 0 };
+          return { you: v.you, names, threads: threads.reverse(), total: v.counts?.waiting ?? 0, handled };
         }
         before = v.cursor;
       }
@@ -380,21 +400,13 @@ export function relevoExtension(options: Options = {}) {
       const c = client(sessionCwd);
       const now = nowSecs();
       try {
-        const { you, names, threads, total } = await allWaiting(c);
+        const { you, names, threads, total, handled } = await allWaiting(c, startOfDay(now));
         reached();
         const shown = rows(you, names, threads, now);
         listed = { you, names, rows: shown };
         const count = Math.max(total, threads.length);
         setWaiting(count);
-        if (shown.length) return { state: "list", rows: shown, total: count };
-        let handled: number | null = null;
-        try {
-          // A server before 0.6.0 refuses handled_since: the line is left out.
-          const v = await c.timeline(`tab=threads&show=waiting&limit=1&handled_since=${startOfDay(now)}`);
-          handled = typeof v.counts?.handled === "number" ? v.counts.handled : null;
-        } catch {
-          // Without the count.
-        }
+        if (shown.length) return { state: "list", rows: shown, total: count, handled };
         return { state: "empty", handled };
       } catch (err) {
         reached(err);

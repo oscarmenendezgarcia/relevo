@@ -2273,6 +2273,33 @@ async fn seen_takes_several_numbers_and_the_list_says_what_was_handled_today() {
     oscar.close().await;
 }
 
+/// The list's title says how many threads the person's agents handled today, when any.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_title_says_how_many_were_handled_today() {
+    let s = server_at(&RELEVO_PEOPLE, &[], Clock::system()).await;
+    for (who, text) in [
+        ("ana", "@oscar first"),
+        ("pedro", "@oscar second"),
+        ("luis", "@oscar third"),
+    ] {
+        open_as(&s, who, text).await;
+    }
+    let mut oscar = Mcp::start(&s, "oscar", &s.dir, None, &[]).await;
+    let list = oscar.ok("waiting", json!({})).await;
+    assert!(list.starts_with("**Waiting on you · 3**\n\n"), "{list}");
+    oscar
+        .ok("send", json!({ "thread": "1 2", "seen": true }))
+        .await;
+    let list = oscar.ok("waiting", json!({})).await;
+    assert!(
+        list.starts_with(
+            "**Waiting on you · 1** · *your agents handled 2 today*\n\n**1**  **Luis** · "
+        ),
+        "{list}"
+    );
+    oscar.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn waiting_shows_ten_then_counts_the_rest() {
     let s = server_at(&RELEVO_PEOPLE, &[], Clock::fixed(db::now_unix() - 3600)).await;
