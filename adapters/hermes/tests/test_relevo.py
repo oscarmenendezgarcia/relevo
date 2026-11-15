@@ -8,7 +8,8 @@ Run with the Hermes venv python, from the repository root:
 HERMES_SRC points at the Hermes source (default ~/.hermes/hermes-agent). The plugin is installed
 the way the README says, into a temporary Hermes home, and loaded by Hermes' own plugin discovery.
 HOME and HERMES_HOME point at that temporary directory, so nothing of a real Hermes home is read or
-written. The server listens on a free port in 7990-7999 and is stopped at the end; so do the
+written. The server listens on a free port in 7990-7999 (RELEVO_TEST_PORTS, "19125-19149", names
+others; so does every other socket the tests listen on) and is stopped at the end; so do the
 `relevo serve --tls` servers of the Tls tests (and one with a certificate an office authority signed,
 made with openssl, skipped without it).
 """
@@ -97,15 +98,19 @@ def new_adapter(**extra):
     return ENTRY.adapter_factory(PlatformConfig(enabled=True, extra=extra))
 
 
+# The ports the tests listen on: RELEVO_TEST_PORTS ("19125-19149"), else 7990-7999.
+_PORTS = tuple(int(p) for p in (os.environ.get("RELEVO_TEST_PORTS") or "7990-7999").split("-", 1))
+
+
 def _free_port() -> int:
-    for port in range(7990, 8000):
+    for port in range(_PORTS[0], _PORTS[-1] + 1):
         with socket.socket() as s:
             try:
                 s.bind(("127.0.0.1", port))
             except OSError:
                 continue
             return port
-    raise RuntimeError("no free port in 7990-7999")
+    raise RuntimeError(f"no free port in {_PORTS[0]}-{_PORTS[-1]}")
 
 
 class Server:
@@ -1953,7 +1958,7 @@ class LossyProxy:
                 except OSError:  # the adapter went away (a disconnect)
                     self.close_connection = True
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server = ThreadingHTTPServer(("127.0.0.1", _free_port()), Handler)
         self.server.daemon_threads = True
         self.server.block_on_close = False
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
@@ -2234,7 +2239,7 @@ class Loop(Base):
 
     async def test_a_server_that_never_answers_does_not_hold_up_a_disconnect(self):
         with socket.socket() as mute:  # accepts connections, never answers
-            mute.bind(("127.0.0.1", 0))
+            mute.bind(("127.0.0.1", _free_port()))
             mute.listen(8)
             os.environ.pop("RELEVO_URL")
             a = self.make_adapter(url=f"http://127.0.0.1:{mute.getsockname()[1]}")
@@ -3157,7 +3162,7 @@ class Command(Base):
             self.assertIn("`relevo connect <server>`", self.run_command(platform="discord"))
             del os.environ["RELEVO_CONFIG"]
             with socket.socket() as sock:
-                sock.bind(("127.0.0.1", 0))
+                sock.bind(("127.0.0.1", _free_port()))
                 port = sock.getsockname()[1]
             os.environ["RELEVO_URL"], os.environ["RELEVO_TOKEN"] = f"http://127.0.0.1:{port}", SERVER.tokens["oscar"]
             out = self.run_command(platform="tui")
