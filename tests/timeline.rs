@@ -848,3 +848,43 @@ fn a_layout_7_database_without_the_timeline_tables_gets_them_when_it_migrates() 
     drop(conn);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// `handled_since` counts the threads the person has handled (answered, or marked seen) since
+/// then, by when they last did; without it there is no such count.
+#[tokio::test]
+async fn handled_since_counts_the_threads_handled_since_then() {
+    let s = server(&["ana", "bob"], &[]);
+    let first = s.open("bob", "@ana first").await;
+    let second = s.open("bob", "@ana second").await;
+    s.open("bob", "@ana third, not handled").await;
+    let inbox = || {
+        call(
+            &s.app,
+            "GET",
+            "/api/inbox",
+            Some(&s.tokens["ana"]),
+            &[("relevo-session", "agent-one")],
+            None,
+        )
+    };
+    inbox().await;
+    s.reply("ana", &first, "@bob an answer").await;
+    s.app.clock.advance(100);
+    s.send("ana", json!({ "thread": second, "seen": true }))
+        .await;
+    let handled = |v: Value| v["counts"]["handled"].clone();
+    let v = s.timeline("ana", "tab=threads&show=waiting").await;
+    assert!(v["counts"].get("handled").is_none(), "{v}");
+    assert_eq!(v["counts"]["waiting"], 1);
+    for (since, n) in [(0, 2), (T0, 2), (T0 + 50, 1), (T0 + 100, 1), (T0 + 101, 0)] {
+        let q = format!("tab=threads&show=waiting&limit=1&handled_since={since}");
+        assert_eq!(handled(s.timeline("ana", &q).await), n, "{since}");
+    }
+    // Any tab; Bob has handled nothing (nobody else wrote in his threads before Ana's answer,
+    // which he has not answered).
+    let v = s.timeline("bob", "tab=board&handled_since=0").await;
+    assert_eq!(handled(v), 0);
+    for q in ["handled_since=x", "handled_since=-1", "handled_since="] {
+        s.bad("ana", &format!("tab=threads&{q}")).await;
+    }
+}

@@ -192,10 +192,11 @@ What a person reads in `relevo web` (see `docs/web.md`): their threads, newest f
 | `with` | optional, only with `tab=threads`: a handle; only threads that person takes part in. |
 | `before` | optional: the `cursor` of the last thread of the previous page. |
 | `limit` | optional, 1 to 50, default 20. |
+| `handled_since` | optional, with either tab: a time in unix seconds. `counts` then carries `handled`: how many threads the person has handled (answered, or marked seen, a note by someone else: see `thread`'s `handled_at`) at or after that time, counted by when they last did. `/relevo` asks it with the start of the person's day, with the first page of its list, to say how many threads the person's agents handled today (see `docs/agents.md`). From 0.6.0: a server before it refuses the parameter (`BAD_REQUEST`), so a client asks the same request again without it when refused, and does without the count. |
 
 An unknown, repeated or malformed parameter, `show`, `team` or `with` with `tab=board`, or an unknown team or person, fails with `BAD_REQUEST`.
 
-Returns `{ "you": "ana", "teams": ["backend"], "counts": { "board": 3, "threads": 14, "waiting": 2, "answered": 6, "teams": { "backend": 3 } }, "people": ["luis", "pedro"], "names": { "ana": "Ana", "pedro": "Pedro" }, "threads": [ … ], "cursor": "…" | null }`. Threads are ordered by their latest note, newest first; `cursor` is `null` on the last page. `teams` are the teams the person is in now, sorted; `counts` count what each tab, `show` value and team of the person would list, whatever filters the request gives, so each is what the page lists when that filter is clicked (`waiting` is what `show=waiting` lists: pending for the person, a `global` thread that names them included). `people` are the people the person shares a `direct` or `team` thread with, sorted (what `with` takes); `names` gives the name of the person, of everyone in `people`, and of everyone the threads name (opener, participants, authors). (The page needs names, and `GET /api/people` would count as a session seen: see `docs/web.md`.) Each thread:
+Returns `{ "you": "ana", "teams": ["backend"], "counts": { "board": 3, "threads": 14, "waiting": 2, "answered": 6, "teams": { "backend": 3 } }, "people": ["luis", "pedro"], "names": { "ana": "Ana", "pedro": "Pedro" }, "threads": [ … ], "cursor": "…" | null }`. Threads are ordered by their latest note, newest first; `cursor` is `null` on the last page. `teams` are the teams the person is in now, sorted; `counts` count what each tab, `show` value and team of the person would list, whatever filters the request gives, so each is what the page lists when that filter is clicked (`waiting` is what `show=waiting` lists: pending for the person, a `global` thread that names them included). With `handled_since`, `counts` also has `handled` (see above); without it, it has no such field. `people` are the people the person shares a `direct` or `team` thread with, sorted (what `with` takes); `names` gives the name of the person, of everyone in `people`, and of everyone the threads name (opener, participants, authors). (The page needs names, and `GET /api/people` would count as a session seen: see `docs/web.md`.) Each thread:
 
 ```json
 { "id": "r_…", "kind": "direct" | "team" | "global", "title": "…", "from": "oscar", "participants": ["oscar", "ana"], "teams": ["backend"],
@@ -221,7 +222,7 @@ GET  /api/inbox?all=1&wait=30
 GET  /api/threads/:id
 POST /api/send            { text?, thread?, claim?, seen?, key? }   (to, done, close: deprecated, see send)
 GET  /api/people          { "team": [...], "teams": [...], "you": "ana" }  (same lists as inbox)
-GET  /api/timeline?tab=board|threads&show=&team=&with=&before=&limit=   read only, delivers nothing (see timeline)
+GET  /api/timeline?tab=board|threads&show=&team=&with=&before=&limit=&handled_since=   read only, delivers nothing (see timeline)
 GET  /api/timeline/threads/:id   one thread in full, read only
 DELETE /api/session        forget this session (the one the headers name) and release its claims; { "ok": true }
 GET  /api/dist/manifest.json   the signed list of the clients this server hands out (see docs/update.md)

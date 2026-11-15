@@ -859,6 +859,40 @@ fn register(env: &impl Fn(&str) -> Option<String>, kind: Kind, dir: &Path) -> Re
     Ok(true)
 }
 
+/// The /relevo command for Claude Code (`crate::claude_command`), refreshed when Relevo wrote
+/// it, nobody edited it, and this binary's copy differs (unless `check`). Nothing when it is not
+/// installed; left alone when it is not Relevo's.
+fn refresh_command(env: &impl Fn(&str) -> Option<String>, check: bool) -> Option<Step> {
+    use crate::claude_command::{self as command, Installed};
+    let path = command::path_in(&command::claude_dir(env)?);
+    let what = format!("the /relevo command for Claude Code ({})", path.display());
+    let to = env!("CARGO_PKG_VERSION").to_string();
+    let outcome = match command::state(&path) {
+        Ok(Installed::Missing) => return None,
+        Ok(Installed::Foreign) => {
+            Outcome::Kept("left as it is: Relevo did not write it, or it was edited".into())
+        }
+        Ok(Installed::Ours {
+            version,
+            current: true,
+        }) => Outcome::UpToDate(version),
+        Ok(Installed::Ours { version, .. }) if command::newer(&version) => Outcome::Kept(format!(
+            "left as it is: Relevo {version} wrote it, newer than this binary ({to})"
+        )),
+        Ok(Installed::Ours { version, .. }) if check => Outcome::WouldInstall { from: version, to },
+        Ok(Installed::Ours { version, .. }) => match command::install(&path) {
+            Ok(()) => Outcome::Installed {
+                from: version,
+                to,
+                then: "Claude Code uses it at the next /relevo",
+            },
+            Err(e) => Outcome::Failed(format!("{e:#}")),
+        },
+        Err(e) => Outcome::Failed(format!("{e:#}")),
+    };
+    Some(Step { what, outcome })
+}
+
 /// `relevo update` as asked, with the configuration of `env`, at `now`. With `auto`, every reason
 /// not to check (turned off, checked within the hour, another update running, not configured)
 /// gives no steps and no error.
@@ -927,6 +961,11 @@ pub async fn command(
         return Ok(vec![]);
     }
     steps.extend(run(&config, setup, req.check).await?);
+    // After the binary's own step, so a failed update leaves the command as it was. It is this
+    // binary that writes it, so its copy: when the step above installed a newer binary, the
+    // command comes with that binary's next update run (an older binary never replaces the file
+    // of a newer one: `claude_command::newer`).
+    steps.extend(refresh_command(&env, req.check));
     if req.auto {
         // Quiet unless something was installed or failed.
         steps.retain(|s| s.installed() || s.failed());

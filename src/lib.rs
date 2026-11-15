@@ -4,6 +4,7 @@
 pub mod api;
 pub mod auth;
 pub mod backup;
+pub mod claude_command;
 pub mod client;
 pub mod config;
 pub mod context;
@@ -16,9 +17,11 @@ pub mod release;
 pub mod render;
 pub mod serve;
 pub mod session;
+pub mod statusline;
 pub mod timeline;
 pub mod tls;
 pub mod update;
+pub mod waiting;
 pub mod web;
 
 use std::collections::HashMap;

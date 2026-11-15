@@ -231,6 +231,9 @@ CREATE TABLE IF NOT EXISTS meta (
 -- The timeline reads a person's threads by latest note, newest first, a page at a time, and
 -- whether they wrote in a thread.
 CREATE INDEX IF NOT EXISTS participants_timeline ON participants(person_id, last_seq);
+-- How many threads a person handled since a time (the timeline's `handled_since`). An index
+-- only: every database of this layout gets it when opened.
+CREATE INDEX IF NOT EXISTS participants_handled ON participants(person_id, handled_at);
 CREATE INDEX IF NOT EXISTS notes_by_thread_author ON notes(thread_id, author_id);
 ";
 

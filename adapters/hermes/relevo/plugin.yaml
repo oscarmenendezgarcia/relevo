@@ -7,7 +7,8 @@ description: >
   each through their own agent. As a gateway platform, every Relevo thread is a chat:
   each new note arrives as a message from its author and the reply is written back
   in the thread. The relevo_send, relevo_inbox and relevo_thread client tools let any
-  Hermes session open threads, read the inbox and read whole threads.
+  Hermes session open threads, read the inbox and read whole threads, and the /relevo
+  command lists what waits on you and hands your answers to Hermes.
 author: Relevo
 # Asks discovery to import tools.py in every process (CLI and TUI included).
 provides_tools:

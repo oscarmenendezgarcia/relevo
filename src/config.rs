@@ -30,6 +30,9 @@ pub struct Adapter {
     pub path: PathBuf,
 }
 
+/// How `load`'s error starts when there is no server or token at all.
+pub const NOT_CONFIGURED: &str = "Relevo is not configured";
+
 /// The config file: `RELEVO_CONFIG`, else `$HOME/.config/relevo/config.json`.
 pub fn path(env: impl Fn(&str) -> Option<String>) -> Result<PathBuf> {
     if let Some(p) = env("RELEVO_CONFIG").filter(|p| !p.is_empty()) {
@@ -89,7 +92,7 @@ pub fn load(env: impl Fn(&str) -> Option<String>) -> Result<Config> {
             adapters,
         }),
         _ => bail!(
-            "Relevo is not configured: run `relevo connect <url>` and give it the token \
+            "{NOT_CONFIGURED}: run `relevo connect <url>` and give it the token \
              (or set RELEVO_URL and RELEVO_TOKEN)"
         ),
     }

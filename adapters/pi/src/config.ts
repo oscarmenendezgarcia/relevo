@@ -58,3 +58,29 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, home: string = 
   }
   return { url, token, cert };
 }
+
+/**
+ * Why the configuration cannot be read, for the footer's `relevo ● config error`: what
+ * `loadConfig` throws, or, when nothing else configures Relevo, a config file that is there but
+ * is not a JSON object. null when it reads, or when there is simply none.
+ */
+export function configProblem(env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string | null {
+  try {
+    if (loadConfig(env, home)) return null;
+  } catch (err) {
+    return (err as Error).message;
+  }
+  const file = configPath(home, env);
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch {
+    return null; // No file.
+  }
+  try {
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? null : `Relevo: ${file} is not a JSON object`;
+  } catch {
+    return `Relevo: ${file} is not JSON`;
+  }
+}

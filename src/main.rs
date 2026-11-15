@@ -118,6 +118,20 @@ enum Command {
         /// its SHA-256 fingerprint (what the server printed), to trust it without being asked.
         #[arg(long, value_name = "SHA256")]
         fingerprint: Option<String>,
+        /// Install the /relevo command for Claude Code (~/.claude/commands/relevo.md) without
+        /// asking. A file there that Relevo did not write is still never replaced unasked.
+        #[arg(long, conflicts_with = "no_command")]
+        command: bool,
+        /// Do not offer the /relevo command for Claude Code.
+        #[arg(long)]
+        no_command: bool,
+        /// Show Relevo in Claude Code's status line (~/.claude/settings.json) without asking.
+        /// A status line that is not Relevo's is never changed.
+        #[arg(long, conflicts_with = "no_statusline")]
+        statusline: bool,
+        /// Do not offer Claude Code's status line.
+        #[arg(long)]
+        no_statusline: bool,
     },
     /// Open your timeline in the browser: the board and your threads, read only (it delivers,
     /// handles and claims nothing). Serves it on 127.0.0.1 until Ctrl-C.
@@ -129,6 +143,10 @@ enum Command {
         #[arg(long)]
         no_open: bool,
     },
+    /// Print one line for Claude Code's status line: how many threads wait on you, or that the
+    /// server is offline; nothing when Relevo is not configured. Reads only, at most once every
+    /// 15 seconds (a cache in ~/.cache/relevo).
+    Statusline,
     /// Serve MCP on stdin and stdout, for Claude Code and any MCP client.
     Mcp {
         /// Push new notes as Claude Code channel events (keeps an inbox request waiting).
@@ -358,6 +376,151 @@ async fn connect(url: &str, token: Option<String>, fingerprint: Option<String>) 
     Ok(())
 }
 
+/// After `connect`: installs the /relevo command for Claude Code when Claude Code's folder is
+/// here and the person says yes (`force`: without asking). A file Relevo did not write, or that
+/// was edited, is replaced only when the person at the terminal says so. Never fails `connect`.
+fn offer_command(force: bool) {
+    use relevo::claude_command::{self as command, Installed};
+    use std::io::IsTerminal;
+    let Some(dir) = command::claude_dir(&config::env) else {
+        return;
+    };
+    if !force && !dir.is_dir() {
+        return;
+    }
+    let path = command::path_in(&dir);
+    let terminal = std::io::stdin().is_terminal();
+    let ask = |question: &str, default: bool| -> bool {
+        match read_line(question) {
+            Ok(answer) => match answer.trim().to_lowercase().as_str() {
+                "" => default,
+                a => matches!(a, "y" | "yes"),
+            },
+            Err(_) => false,
+        }
+    };
+    let install = |done: &str| match command::install(&path) {
+        Ok(()) => println!(
+            "{done} the /relevo command for Claude Code in {}",
+            path.display()
+        ),
+        Err(e) => eprintln!("the /relevo command for Claude Code: not installed: {e:#}"),
+    };
+    match command::state(&path) {
+        Ok(Installed::Ours { current: true, .. }) => println!(
+            "the /relevo command for Claude Code is up to date in {}",
+            path.display()
+        ),
+        Ok(Installed::Ours { version, .. }) if command::newer(&version) => println!(
+            "left {} as it is: Relevo {version} wrote it, newer than this one ({})",
+            path.display(),
+            env!("CARGO_PKG_VERSION")
+        ),
+        Ok(Installed::Ours { .. }) => install("updated"),
+        Ok(Installed::Missing) => {
+            let question = format!(
+                "Add the /relevo command to Claude Code ({})? [Y/n] ",
+                path.display()
+            );
+            if force || (terminal && ask(&question, true)) {
+                install("installed");
+            } else if !terminal {
+                println!(
+                    "skipped the /relevo command for Claude Code (no terminal to ask): run \
+                     relevo connect again with --command to install it"
+                );
+            }
+        }
+        Ok(Installed::Foreign) => {
+            let question = format!(
+                "{} exists, and Relevo did not write it (or it was edited). Replace it with \
+                 Relevo's /relevo command? [y/N] ",
+                path.display()
+            );
+            // A link is written through only to Relevo's own file (`command::install`).
+            if terminal && !command::is_link(&path) && ask(&question, false) {
+                install("installed");
+            } else {
+                println!(
+                    "left {} as it is: Relevo did not write it, or it was edited",
+                    path.display()
+                );
+            }
+        }
+        Err(e) => eprintln!("the /relevo command for Claude Code: {e:#}"),
+    }
+}
+
+/// After `connect`: sets Claude Code's status line to `relevo statusline` when Claude Code's
+/// folder is here, its settings have no status line, and the person says yes (`force`: without
+/// asking). A status line that is not Relevo's, or settings that are not valid JSON, are never
+/// changed: it says how to add Relevo by hand. Never fails `connect`.
+fn offer_statusline(force: bool) {
+    use relevo::statusline::{self, Setting};
+    use std::io::IsTerminal;
+    let Some(dir) = relevo::claude_command::claude_dir(&config::env) else {
+        return;
+    };
+    if !force && !dir.is_dir() {
+        return;
+    }
+    let path = statusline::settings_path(&dir);
+    let command = match std::env::current_exe() {
+        Ok(exe) => statusline::command_for(&exe),
+        Err(_) => "relevo statusline".to_string(),
+    };
+    match statusline::setting(&path) {
+        Ok(Setting::Ours) => println!(
+            "Claude Code's status line already shows Relevo ({})",
+            path.display()
+        ),
+        Ok(Setting::Foreign) => println!(
+            "Claude Code already has a status line ({}): left as it is; {}",
+            path.display(),
+            statusline::how_to_add(&command)
+        ),
+        Ok(Setting::Malformed(e)) => println!(
+            "left {} as it is: it is not valid JSON ({e}); to show Relevo in Claude Code's status \
+             line, add \"statusLine\": {} to it",
+            path.display(),
+            statusline::value(&command)
+        ),
+        Ok(Setting::Dangling(target)) => println!(
+            "left {} as it is: it is a link to {}, which does not exist; to show Relevo in Claude \
+             Code's status line, add \"statusLine\": {} to the settings it should point to",
+            path.display(),
+            target.display(),
+            statusline::value(&command)
+        ),
+        Ok(Setting::Absent | Setting::NoFile) => {
+            let terminal = std::io::stdin().is_terminal();
+            let question = format!(
+                "Show what waits on you in Claude Code's status line ({})? [Y/n] ",
+                path.display()
+            );
+            let yes = || {
+                read_line(&question)
+                    .is_ok_and(|a| matches!(a.trim().to_lowercase().as_str(), "" | "y" | "yes"))
+            };
+            if force || (terminal && yes()) {
+                match statusline::install(&path, &command) {
+                    Ok(()) => println!(
+                        "set Claude Code's status line to `{command}` in {}",
+                        path.display()
+                    ),
+                    Err(e) => eprintln!("Claude Code's status line: not set: {e:#}"),
+                }
+            } else if !terminal {
+                println!(
+                    "skipped Claude Code's status line (no terminal to ask): run relevo connect \
+                     again with --statusline to set it"
+                );
+            }
+        }
+        Err(e) => eprintln!("Claude Code's status line: {e:#}"),
+    }
+}
+
 /// `relevo update`: what it did on stdout, what failed on stderr (and exit 1).
 async fn update_command(req: &update::Request) -> Result<()> {
     let setup = update::Setup::this_binary()?;
@@ -523,7 +686,32 @@ async fn main() -> Result<()> {
             url,
             token,
             fingerprint,
-        } => return connect(&url, token, fingerprint).await,
+            command,
+            no_command,
+            statusline,
+            no_statusline,
+        } => {
+            connect(&url, token, fingerprint).await?;
+            if !no_command {
+                offer_command(command);
+            }
+            if !no_statusline {
+                offer_statusline(statusline);
+            }
+            return Ok(());
+        }
+        Command::Statusline => {
+            // Never fails (a failing command blanks Claude Code's status line), even with stdout
+            // closed; and exits at once, not waiting for a name lookup the timeout left behind.
+            use std::io::Write;
+            let line = relevo::statusline::run().await;
+            let mut out = std::io::stdout().lock();
+            if !line.is_empty() {
+                let _ = writeln!(out, "{line}");
+            }
+            let _ = out.flush();
+            std::process::exit(0);
+        }
         Command::Mcp { channel } => return mcp::run(channel).await,
         Command::Web { port, no_open } => return relevo::web::run(port, no_open).await,
         Command::Update {
@@ -769,6 +957,7 @@ async fn main() -> Result<()> {
             }
         }
         Command::Connect { .. }
+        | Command::Statusline
         | Command::Mcp { .. }
         | Command::Web { .. }
         | Command::Update { .. }

@@ -58,6 +58,16 @@ def register(ctx) -> None:
     except Exception:
         logger.warning("Relevo: failed to register client tools", exc_info=True)
 
+    try:
+        from .waiting import command
+
+        # /relevo: what waits on the person, numbered; its numbers go to the agent (docs/agents.md).
+        ctx.register_command("relevo", command(ctx),
+                             description="Relevo · what is waiting on you, and answer it from here",
+                             args_hint="[N <your answer> | N | seen N… | @name <note>]")
+    except Exception:
+        logger.warning("Relevo: failed to register the /relevo command", exc_info=True)
+
     from .client import PLATFORM_HINT
 
     def _factory(cfg):

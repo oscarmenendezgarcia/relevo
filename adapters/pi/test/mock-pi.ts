@@ -14,6 +14,10 @@ export interface Sent {
 
 export function loadExtension(options: Options) {
   const tools = new Map<string, any>();
+  const commands = new Map<string, any>();
+  const renderers = new Map<string, any>();
+  /** Each footer status set, by key, in order. */
+  const statuses: Array<[string, string | undefined]> = [];
   const handlers = new Map<string, Array<(event: any, ctx: any) => unknown>>();
   const sent: Sent[] = [];
   const notified: string[] = [];
@@ -90,6 +94,12 @@ export function loadExtension(options: Options) {
     registerTool(tool: any) {
       tools.set(tool.name, tool);
     },
+    registerCommand(name: string, command: any) {
+      commands.set(name, command);
+    },
+    registerMessageRenderer(customType: string, renderer: any) {
+      renderers.set(customType, renderer);
+    },
     on(event: string, handler: (event: any, ctx: any) => unknown) {
       handlers.set(event, [...(handlers.get(event) ?? []), handler]);
       return () => {};
@@ -114,6 +124,10 @@ export function loadExtension(options: Options) {
           notified.push(text);
           levels.push(level);
         },
+        setStatus: (key: string, text: string | undefined) => {
+          statuses.push([key, text]);
+        },
+        theme: tagTheme,
       },
       isIdle: () => !streaming && !compacting,
     };
@@ -121,6 +135,17 @@ export function loadExtension(options: Options) {
 
   return {
     tools,
+    commands,
+    renderers,
+    statuses,
+    /** The footer's latest `relevo` status, its colours as tags. */
+    status(): string | undefined {
+      return statuses.filter(([k]) => k === "relevo").at(-1)?.[1];
+    },
+    /** Runs `/name args` the way pi does. */
+    async command(name: string, args: string, cwd: string, mode = "interactive"): Promise<void> {
+      await commands.get(name).handler(args, ctx(cwd, mode));
+    },
     sent,
     seen,
     notified,
@@ -135,6 +160,15 @@ export function loadExtension(options: Options) {
     },
   };
 }
+
+/** A theme that shows its colours as tags: `<warning>3</warning>`, `<b>Ana</b>`. */
+export const tagTheme = {
+  fg: (color: string, text: string) => `<${color}>${text}</${color}>`,
+  bold: (text: string) => `<b>${text}</b>`,
+};
+
+/** A theme without colours. */
+export const plainTheme = { fg: (_c: string, text: string) => text, bold: (text: string) => text };
 
 export async function until(check: () => boolean, ms = 5000): Promise<void> {
   const end = Date.now() + ms;
