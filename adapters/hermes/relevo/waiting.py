@@ -700,13 +700,21 @@ def send_listed(api: client.Api, keys: list, ns: list, payload: dict, seen: bool
         return "Error: " + found
     now = int(time.time())
     done, notes = [], []
+
+    def failed(row: Row, exc: BaseException) -> str:
+        # Its own line, and the others still go: what was done is never hidden by a later failure.
+        if isinstance(exc, client.RelevoError) and exc.status == 404:
+            return f"Thread {row.n} ({row.who}) is gone, or not visible to you · nothing sent"
+        return f"Thread {row.n} ({row.who}): {failure(api, exc)}"
+
     for row in found:
         try:
             thread = api.thread(row.id)
             reached()
         except Exception as exc:
             reached(exc)
-            return "Error: " + failure(api, exc)
+            notes.append(failed(row, exc))
+            continue
         no = refusal(row, thread, listed, now)
         if no:
             notes.append(no)
@@ -716,7 +724,7 @@ def send_listed(api: client.Api, keys: list, ns: list, payload: dict, seen: bool
             reached()
         except Exception as exc:
             reached(exc)
-            notes.append(f"Thread {row.n} ({row.who}): {failure(api, exc)}")
+            notes.append(failed(row, exc))
             continue
         if text is not None:
             line = f"Sent to {recipients(thread, listed.you)}: \"{text}\" · {named(row)}"

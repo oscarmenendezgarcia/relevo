@@ -2978,6 +2978,45 @@ waiting_module = importlib.import_module(_PKG + ".waiting")
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
+class SendListedFailures(unittest.TestCase):
+    """In seen 1 2 3, a thread whose read or send fails has its own line and the others still go;
+    a 404 says the thread is gone or not visible, as relevo mcp and pi say."""
+
+    def test_a_failing_number_does_not_hide_what_the_others_did(self):
+        W = waiting_module
+        rows = [W.Row(n=i, id=f"r_{i}", who="Ana", kind="direct", age="now", replies=0, mentioned=False,
+                      first=f"Question {i}", reply_by=None, reply=None, subject=f"Question {i}",
+                      last_note=f"n_{i}") for i in (1, 2, 3)]
+        W.keep(["send-listed-test"], W.Listed(you="oscar", names={"ana": "Ana"}, rows=rows))
+        client_module = importlib.import_module(_PKG + ".client")
+        sent = []
+
+        class Api:
+            def thread(self, tid):
+                if tid == "r_2":
+                    raise client_module.RelevoError(404, "NOT_FOUND", "no such thread")
+                n = tid[2:]
+                return {"id": tid, "kind": "direct", "pending": True, "participants": ["ana", "oscar"],
+                        "teams": [], "notes": [{"id": f"n_{n}", "author": "ana", "text": "Q"}], "delivery": []}
+
+            def send(self, body):
+                if body["thread"] == "r_3":
+                    raise client_module.RelevoError(500, "INTERNAL", "boom")
+                sent.append(body["thread"])
+                return {"thread": body["thread"]}
+
+            def timeline(self, params):
+                return {"counts": {"waiting": 2}}
+
+        out = W.send_listed(Api(), ["send-listed-test"], [1, 2, 3], {"seen": True}, True, lambda r: "")
+        self.assertEqual(sent, ["r_1"])
+        lines = out.split("\n")
+        self.assertEqual(lines[0], "Marked seen: thread 1 (Ana · Question 1). Nothing was written. 2 left")
+        self.assertEqual(lines[1], "Thread 2 (Ana) is gone, or not visible to you · nothing sent")
+        self.assertTrue(lines[2].startswith("Thread 3 (Ana): "), out)
+        self.assertNotIn("0.4.0", out)
+
+
 class _InjectingCtx:
     """A plugin context whose inject_message gates as Hermes' does (hermes_cli/plugins_injection.py,
     PluginContext._gateway_injection_allowed): whatever the surface, the classic CLI included (this
