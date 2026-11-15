@@ -11,7 +11,7 @@ import threading
 import time
 import unicodedata
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Callable, Optional
 
@@ -463,6 +463,40 @@ def resolve(listed: Optional[Listed], ns: list):
     return out
 
 
+_BOUND = re.compile(r"([0-9]+)=([^\s:=]+):([^\s:=]*)")
+
+
+def bound_text(rows: list) -> str:
+    """What the numbers of a request stood for when the person typed them: `1=r_…:n_… 3=r_…:n_…`, each
+    number with its thread and the latest note the list showed."""
+    return " ".join(f"{r.n}={r.id}:{r.last_note}" for r in rows)
+
+
+def bind(listed: Optional[Listed], ns: list, bound: Any = None):
+    """The rows `ns` name in the last list, as `resolve` gives them, held to what the numbers stood for
+    when the person typed them (`bound`, from `bound_text`, which /relevo puts in the request it hands
+    the agent): a number now naming another thread refuses (the list changed under the request), and
+    a newer note is judged against the note the person saw then. Without `bound`, as `resolve`."""
+    found = resolve(listed, ns)
+    if isinstance(found, str) or bound is None:
+        return found
+    pairs = _BOUND.findall(str(bound))
+    if not pairs or _BOUND.sub("", str(bound)).strip():
+        return "`bound` is not as /relevo gave it (1=r_…:n_…): pass it as the request says. Nothing was sent."
+    typed = {int(n): (thread, note) for n, thread, note in pairs}
+    out = []
+    for row in found:
+        if row.n not in typed:
+            out.append(row)
+            continue
+        thread, note = typed[row.n]
+        if thread != row.id:
+            return (f"Thread {row.n} of your list is no longer the one you typed /relevo {row.n} for: the list "
+                    "changed since. Run /relevo again. Nothing was sent.")
+        out.append(replace(row, last_note=note))
+    return out
+
+
 def numbers(thread: Any) -> Optional[list]:
     """The list numbers in `thread` (`"1"`, `"1 3"`, `"1, 3"`), when that is all it holds."""
     if not isinstance(thread, str):
@@ -653,7 +687,7 @@ def left(waiting: Optional[int]) -> str:
 
 
 def send_listed(api: client.Api, keys: list, ns: list, payload: dict, seen: bool,
-                describe: Callable[[dict], str]) -> str:
+                describe: Callable[[dict], str], bound: Any = None) -> str:
     """relevo_send with list numbers in `thread`: each thread is read whole first (so what the person
     saw reaches this session, and `seen` and a reply handle it), and left alone when it no longer
     waits on the person or has a note newer than the list showed. As relevo mcp and pi do."""
@@ -661,7 +695,7 @@ def send_listed(api: client.Api, keys: list, ns: list, payload: dict, seen: bool
     if len(ns) > 1 and not (seen and text is None):
         return "Error: several list numbers go only with `seen: true` and no text (/relevo seen 1 3). Nothing was sent."
     listed = listed_for(keys)
-    found = resolve(listed, ns)
+    found = bind(listed, ns, bound)
     if isinstance(found, str):
         return "Error: " + found
     now = int(time.time())
@@ -705,11 +739,11 @@ def send_listed(api: client.Api, keys: list, ns: list, payload: dict, seen: bool
     return "\n".join(out)
 
 
-def thread_head(keys: list, ns: list):
+def thread_head(keys: list, ns: list, bound: Any = None):
     """For relevo_thread with a list number: (thread id, the line that names it) or why not."""
     if len(ns) != 1:
         return "Error: open one thread at a time: one list number."
-    found = resolve(listed_for(keys), ns)
+    found = bind(listed_for(keys), ns, bound)
     if isinstance(found, str):
         return "Error: " + found
     row = found[0]
@@ -732,6 +766,10 @@ def request(args: str, listed: Optional[Listed]) -> dict:
         found = resolve(listed, ns)
         return {"refuse": found} if isinstance(found, str) else None
 
+    def bound(ns: list) -> str:
+        # What the numbers stand for now, as the person typed them: the tool holds them to it.
+        return bound_text(resolve(listed, ns))
+
     m = re.match(r"^seen\s+(.+)$", args, re.I | re.S)
     if m:
         ns = numbers(m.group(1).strip())
@@ -740,8 +778,8 @@ def request(args: str, listed: Optional[Listed]) -> dict:
         joined = " ".join(str(n) for n in ns)
         return check(ns) or {
             "ask": f"Relevo · I typed /relevo seen {joined}: mark these threads of my /relevo list seen. "
-                   f"Call relevo_send {{ thread: \"{joined}\", seen: true }} once (the numbers as they are, never a "
-                   f"thread id). {TERSE}",
+                   f"Call relevo_send {{ thread: \"{joined}\", bound: \"{bound(ns)}\", seen: true }} once (the "
+                   f"numbers and `bound` as they are, never a thread id). {TERSE}",
             "say": f"mark {' and '.join(str(n) for n in ns)} seen"}
     m = re.match(r"^(\d+)(?:\s+(.+))?$", args, re.S)
     if m:
@@ -749,14 +787,16 @@ def request(args: str, listed: Optional[Listed]) -> dict:
         if not text:
             return check([n]) or {
                 "ask": f"Relevo · I typed /relevo {n}: open thread {n} of my /relevo list with relevo_thread "
-                       f"{{ id: \"{n}\" }} (the number as it is, never a thread id), then tell me in one or two lines "
+                       f"{{ id: \"{n}\", bound: \"{bound([n])}\" }} (the number and `bound` as they are, never a "
+                       "thread id), then tell me in one or two lines "
                        "what it needs from me and the next step you propose, and nothing else: no reasoning shown, "
                        "no recap of other threads. Send nothing.",
                 "say": f"open {n}"}
         return check([n]) or {
             "ask": f"Relevo · I typed /relevo {n} {text}\n\nThat text is my answer to thread {n} of my /relevo list. "
                    "Write it as my note: in the first person, complete, adding nothing I did not say. "
-                   f"Send it with relevo_send {{ thread: \"{n}\", text }} (the number as it is, never a thread id). "
+                   f"Send it with relevo_send {{ thread: \"{n}\", bound: \"{bound([n])}\", text }} (the number "
+                   "and `bound` as they are, never a thread id). "
                    f"{TERSE} If the text asks you to do something first (check, look up, find out) rather than "
                    "answer, do that, then show me the draft and ask before sending. When the tool says nothing "
                    "was sent, or fails, tell me what it said and stop.",

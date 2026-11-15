@@ -59,7 +59,7 @@ def _run(name: str, fn, api: Optional[client.Api] = None) -> str:
 # relevo_send's fields: `done` and `close` are the deprecated names (0.4.x) read as `seen`. Others are
 # refused, so a misnamed one (`message`, `recipients`, the old `to`) fails with the list of the right
 # ones instead of being dropped.
-_SEND_FIELDS = ("text", "thread", "claim", "seen", "done", "close")
+_SEND_FIELDS = ("text", "thread", "bound", "claim", "seen", "done", "close")
 
 
 def relevo_send(args: dict, session_id: Optional[str] = None, **_: Any) -> str:
@@ -76,6 +76,9 @@ def relevo_send(args: dict, session_id: Optional[str] = None, **_: Any) -> str:
         # the server is the one that says so (`relevo mcp` and pi pass it through the same way).
         # Dropping it here would open a new thread, and a text with no @ would reach everyone.
         thread = args.get("thread")
+        bound = args.get("bound")
+        if bound is not None and not waiting.numbers(thread):
+            return "Error: `bound` goes only with list numbers in `thread`, as /relevo gave them. Nothing was sent."
         if thread is not None:
             payload["thread"] = str(thread)
         if args.get("text") is not None:
@@ -100,7 +103,7 @@ def relevo_send(args: dict, session_id: Optional[str] = None, **_: Any) -> str:
             # Numbers of the person's last /relevo list in this Hermes session, checked first.
             del payload["thread"]
             return waiting.send_listed(api, waiting.tool_keys(session_id), ns, payload, seen or done,
-                                       lambda result: client.describe_send(result))
+                                       lambda result: client.describe_send(result), bound)
         if seen or done:
             return client.describe_seen(api.send(payload))
         return client.describe_send(api.send(payload), opened=thread is None)
@@ -131,7 +134,7 @@ def relevo_thread(args: dict, session_id: Optional[str] = None, **_: Any) -> str
         head = ""
         ns = waiting.numbers(thread_id)
         if ns:
-            found = waiting.thread_head(waiting.tool_keys(session_id), ns)
+            found = waiting.thread_head(waiting.tool_keys(session_id), ns, args.get("bound"))
             if isinstance(found, str):
                 return found
             thread_id, head = found
@@ -202,6 +205,10 @@ _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
                                                         "Without it, `text` opens "
                                                         "a new thread, for whom its @ mentions name (none: the "
                                                         "global board)."},
+            "bound": {"type": "string", "description": "With list numbers in `thread`: `bound` as a /relevo "
+                                                       "request gives it (\"1=r_…:n_…\"), what each number stood "
+                                                       "for when the person typed it; the tool refuses when the "
+                                                       "list changed since. Copy it as it is; never make one up."},
             "claim": {"type": "boolean",
                       "description": "With `thread`: marks the thread as this session's, a "
                                      "state the others in it see (\"has it since 10:47\"), without "
@@ -239,7 +246,10 @@ _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
         relevo_thread,
         "A whole Relevo thread: every note in full, who has seen it, who has handled it and who holds it.",
         {"id": {"type": "string", "description": "Thread id (r_…), or its number in the person's last /relevo "
-                                                 "list (\"2\")."}},
+                                                 "list (\"2\")."},
+         "bound": {"type": "string", "description": "With a list number: `bound` as a /relevo request gives it "
+                                                    "(\"2=r_…:n_…\"), what the number stood for when the person "
+                                                    "typed it. Copy it as it is; never make one up."}},
         ["id"],
     ),
 }

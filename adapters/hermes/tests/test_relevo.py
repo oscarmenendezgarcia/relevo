@@ -1268,7 +1268,7 @@ class Tools(Base):
         """send has no `to` any more: @ mentions in the text, and the answer says whom it reached."""
         definition = registry.get_definitions({"relevo_send"}, quiet=True)[0]["function"]
         self.assertEqual(sorted(definition["parameters"]["properties"]),
-                         ["claim", "close", "done", "seen", "text", "thread"])
+                         ["bound", "claim", "close", "done", "seen", "text", "thread"])
         for phrase in ("@handle for a person (@handle/repo or @handle/repo@branch for one context), @team-name for "
                        "a team, and no @ at all to post on the global board, which everyone on the server sees and "
                        "nobody has to answer: use it for announcements, or when nobody knows who knows and your "
@@ -3232,22 +3232,27 @@ class Command(Base):
         self.assertTrue(out.startswith("Thread 1 of your list (Bob · "), out)
 
     def test_actions_go_to_the_agent_when_a_turn_can_start(self):
-        self.three()
+        b, c, a = self.three()
         ctx = _InjectingCtx()
         handler = waiting_module.command(ctx)
         self.run_command(handler=handler)
+        rows = waiting_module.listed_for(["s1"]).rows
+        bound = {r.n: f"{r.n}={r.id}:{r.last_note}" for r in rows}
+        self.assertEqual([r.id for r in rows], [b, c, a])
         self.assertIsNone(self.run_command("1 yes, final", handler=handler))
         ask, key = ctx.injected[-1]
         self.assertEqual(key, "s1")
         self.assertTrue(ask.startswith("Relevo · I typed /relevo 1 yes, final\n\nThat text is my answer to thread 1"),
                         ask)
-        self.assertIn('relevo_send { thread: "1", text }', ask)
+        # The thread and the note the number stood for when the person typed it go with it.
+        self.assertIn(f'relevo_send {{ thread: "1", bound: "{bound[1]}", text }}', ask)
         self.assertIn("reply with only the tool's result line(s), word for word, plus at most one short line", ask)
         self.assertIn("show me the draft and ask before sending", ask)
         self.assertIsNone(self.run_command("seen 1, 3", handler=handler))
-        self.assertIn('relevo_send { thread: "1 3", seen: true } once', ctx.injected[-1][0])
+        self.assertIn(f'relevo_send {{ thread: "1 3", bound: "{bound[1]} {bound[3]}", seen: true }} once',
+                      ctx.injected[-1][0])
         self.assertIsNone(self.run_command("2", handler=handler))
-        self.assertIn('relevo_thread { id: "2" }', ctx.injected[-1][0])
+        self.assertIn(f'relevo_thread {{ id: "2", bound: "{bound[2]}" }}', ctx.injected[-1][0])
         self.assertIsNone(self.run_command("@ana is the build green?", handler=handler))
         self.assertIn("A new note: send it with relevo_send { text }", ctx.injected[-1][0])
         # Never a request the CLI would run as a command again.
@@ -3258,6 +3263,49 @@ class Command(Base):
                          "was sent.")
         self.assertEqual(self.run_command("what?", handler=handler, platform="tui"), waiting_module.USAGE)
         self.assertEqual(len(ctx.injected), 4)
+
+    def test_a_request_holds_its_numbers_to_what_the_person_typed_them_for(self):
+        """The numbers are bound when /relevo hands the request over, not when the tool runs: a list shown
+        again in between that moved the numbers, or a newer note than the one the person saw, sends nothing."""
+        b, c, a = self.three()
+        ctx = _InjectingCtx()
+        handler = waiting_module.command(ctx)
+        self.run_command(handler=handler)
+        self.run_command("1 no clash", handler=handler)
+        bound_1 = re.search(r'bound: "([^"]+)"', ctx.injected[-1][0]).group(1)
+        self.run_command("2", handler=handler)
+        bound_2 = re.search(r'bound: "([^"]+)"', ctx.injected[-1][0]).group(1)
+        # Another session of Oscar's handles Bob's thread, and /relevo is run again before the agent acts:
+        # number 1 is now Ana's markdown thread.
+        other = Person(SERVER, "oscar", session="test-oscar-elsewhere")
+        other.thread(b)
+        other.send(thread=b, done=True)
+        self.run_command(handler=handler)
+        self.assertEqual(waiting_module.listed_for(["s1"]).rows[0].id, c)
+        notes = len(self.ana.thread(c)["notes"])
+        out = self.tool("relevo_send", {"thread": "1", "bound": bound_1, "text": "No clash."})
+        self.assertEqual(out, "Error: Thread 1 of your list is no longer the one you typed /relevo 1 for: the list "
+                              "changed since. Run /relevo again. Nothing was sent.")
+        self.assertEqual(len(self.ana.thread(c)["notes"]), notes)
+        out = self.tool("relevo_thread", {"id": "1", "bound": bound_1})
+        self.assertTrue(out.startswith("Error: Thread 1 of your list is no longer the one"), out)
+        # The same thread, with a note newer than the one the person typed against: judged by that note.
+        self.ana.send(thread=c, text="One more thing.")
+        self.run_command(handler=handler)
+        # c was 2 when the person typed; its number in the list shown now, with the note seen then.
+        n = next(r.n for r in waiting_module.listed_for(["s1"]).rows if r.id == c)
+        bound_c = f"{n}=" + bound_2.split("=", 1)[1]
+        out = self.tool("relevo_send", {"thread": str(n), "bound": bound_c, "seen": True})
+        self.assertEqual(out, f'Thread {n} (Ana) has a new note since your list, by Ana: "One more thing." · '
+                              f'nothing sent. Run /relevo again, or /relevo {n} to open it.')
+        # Without `bound`, as before: the list now shown is what counts.
+        self.assertTrue(self.tool("relevo_send", {"thread": str(n), "seen": True}).startswith(
+            f"Marked seen: thread {n}"))
+        # `bound` only goes with numbers, and only as /relevo writes it.
+        self.assertIn("`bound` goes only with list numbers",
+                      self.tool("relevo_send", {"thread": c, "bound": bound_c, "seen": True}))
+        self.assertIn("`bound` is not as /relevo gave it",
+                      self.tool("relevo_send", {"thread": "2", "bound": "two", "seen": True}))
 
     def test_without_a_turn_the_person_is_told_what_to_say(self):
         """Hermes keeps a plugin from starting gateway turns unless the owner allows it: the command then
