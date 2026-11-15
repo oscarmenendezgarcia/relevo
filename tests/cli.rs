@@ -125,6 +125,11 @@ async fn clients_lists_each_sessions_client_against_the_servers_version_outdated
             ("relevo-context", context),
             ("relevo-client", client),
             ("user-agent", agent),
+            // One session says its agent (the last column), the others do not.
+            (
+                "relevo-agent",
+                (session == Some("mcp_new001")).then_some("Gemini CLI"),
+            ),
         ] {
             if let Some(value) = value {
                 req = req.header(name, value);
@@ -158,7 +163,8 @@ async fn clients_lists_each_sessions_client_against_the_servers_version_outdated
                 "general",
                 "mcp",
                 "0.0.1?",
-                "outdated"
+                "outdated",
+                "-"
             ],
             vec![
                 "bob",
@@ -167,7 +173,8 @@ async fn clients_lists_each_sessions_client_against_the_servers_version_outdated
                 "general",
                 "pi",
                 "0.0.2",
-                "outdated"
+                "outdated",
+                "-"
             ],
             vec![
                 "carl",
@@ -176,7 +183,8 @@ async fn clients_lists_each_sessions_client_against_the_servers_version_outdated
                 "general",
                 "unknown",
                 "-",
-                "unknown"
+                "unknown",
+                "-"
             ],
             vec![
                 "ana",
@@ -185,7 +193,8 @@ async fn clients_lists_each_sessions_client_against_the_servers_version_outdated
                 "pagos-api",
                 "mcp",
                 "999.0.0",
-                "newer"
+                "newer",
+                "Gemini CLI"
             ],
             vec![
                 "bob",
@@ -194,7 +203,8 @@ async fn clients_lists_each_sessions_client_against_the_servers_version_outdated
                 "general",
                 "pi",
                 server,
-                "current"
+                "current",
+                "-"
             ],
         ],
         "{out}"
@@ -211,7 +221,7 @@ async fn clients_lists_each_sessions_client_against_the_servers_version_outdated
     assert!(
         lines[..3]
             .iter()
-            .all(|l| l.ends_with("\toutdated") || l.ends_with("\tunknown"))
+            .all(|l| l.contains("\toutdated\t") || l.contains("\tunknown\t"))
     );
     assert_eq!(
         lines[3],
@@ -225,13 +235,23 @@ async fn clients_lists_each_sessions_client_against_the_servers_version_outdated
         "{out}"
     );
 
-    // `sessions` says the client too, last.
+    // `sessions` says the client too, then the agent.
     let out = relevo(path, &["sessions", "ana"]);
-    let mut clients: Vec<&str> = out.lines().map(|l| l.split('\t').nth(5).unwrap()).collect();
+    let mut clients: Vec<(&str, &str)> = out
+        .lines()
+        .map(|l| {
+            let l: Vec<&str> = l.split('\t').collect();
+            (l[5], l[6])
+        })
+        .collect();
     clients.sort();
-    assert_eq!(clients, ["mcp/0.0.1?", "mcp/999.0.0"], "{out}");
+    assert_eq!(
+        clients,
+        [("mcp/0.0.1?", "-"), ("mcp/999.0.0", "Gemini CLI")],
+        "{out}"
+    );
     let out = relevo(path, &["sessions", "carl"]);
-    assert!(out.trim_end().ends_with("\tunknown"), "{out}");
+    assert!(out.trim_end().ends_with("\tunknown\t-"), "{out}");
     drop(app);
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -311,7 +331,7 @@ fn without_relevo_db_an_admin_command_never_creates_a_database_here() {
 }
 
 #[test]
-fn only_serve_migrates_a_layout_5_6_7_or_8_database_and_check_db_says_so() {
+fn only_serve_migrates_a_layout_5_to_9_database_and_check_db_says_so() {
     for (dump, made_by) in [
         (
             include_str!("fixtures/layout5.sql"),
@@ -323,6 +343,7 @@ fn only_serve_migrates_a_layout_5_6_7_or_8_database_and_check_db_says_so() {
             include_str!("fixtures/layout8.sql"),
             "a development build of relevo 0.5.0",
         ),
+        (include_str!("fixtures/layout9.sql"), "relevo 0.5.x"),
     ] {
         let dir = std::env::temp_dir().join(db::random_id("relevo-cli-"));
         std::fs::create_dir(&dir).unwrap();

@@ -1,8 +1,9 @@
 //! Databases of layout 5, made by relevo 0.2.1 itself (`tests/fixtures/make-layout5.sh`), of
 //! layout 6, made by relevo 0.3.0 (`tests/fixtures/make-layout6.sh`), of layout 7, made by
-//! relevo 0.4.4 (`tests/fixtures/make-layout7.sh`), and of layout 8, made by a development build
-//! of 0.5.0 (`tests/fixtures/make-layout8.sh`), migrated in place when this version first opens
-//! them, then used through the HTTP router.
+//! relevo 0.4.4 (`tests/fixtures/make-layout7.sh`), of layout 8, made by a development build of
+//! 0.5.0 (`tests/fixtures/make-layout8.sh`), and of layout 9, made by relevo 0.5.0
+//! (`tests/fixtures/make-layout9.sh`), migrated in place when this version first opens them, then
+//! used through the HTTP router.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,6 +23,8 @@ const LAYOUT7: &str = include_str!("fixtures/layout7.sql");
 const FIXTURE7: &str = include_str!("fixtures/layout7-tokens.json");
 const LAYOUT8: &str = include_str!("fixtures/layout8.sql");
 const FIXTURE8: &str = include_str!("fixtures/layout8-tokens.json");
+const LAYOUT9: &str = include_str!("fixtures/layout9.sql");
+const FIXTURE9: &str = include_str!("fixtures/layout9-tokens.json");
 
 /// A directory of its own, removed when the test ends.
 struct TempDir(PathBuf);
@@ -62,6 +65,11 @@ fn layout7(path: &str) -> i64 {
 /// The layout 8 database, as a file, and when its sessions were last seen.
 fn layout8(path: &str) -> i64 {
     made_by(path, LAYOUT8, 8)
+}
+
+/// The layout 9 database, as a file, and when its sessions were last seen.
+fn layout9(path: &str) -> i64 {
+    made_by(path, LAYOUT9, 9)
 }
 
 fn made_by(path: &str, dump: &str, layout: i64) -> i64 {
@@ -189,7 +197,7 @@ async fn a_layout_5_database_migrates_and_what_waited_for_a_reply_stays_pending(
         Clock::fixed(seen + 60),
         5,
     );
-    assert_eq!(user_version(&path), 9);
+    assert_eq!(user_version(&path), 10);
     let f = Fixture {
         app,
         v: serde_json::from_str(FIXTURE).unwrap(),
@@ -338,7 +346,7 @@ async fn a_layout_5_database_migrates_and_what_waited_for_a_reply_stays_pending(
         )
         .unwrap();
     assert_eq!(pending, 4);
-    assert_eq!(user_version(&path), 9);
+    assert_eq!(user_version(&path), 10);
 }
 
 /// The columns of every table and the definition of every index, as `db::open` leaves them.
@@ -397,6 +405,7 @@ fn a_migrated_database_has_the_layout_of_a_new_one() {
         ("6.db", layout6),
         ("7.db", layout7),
         ("8.db", layout8),
+        ("9.db", layout9),
     ] {
         let migrated = dir.0.join(name);
         let migrated = migrated.to_str().unwrap();
@@ -540,7 +549,7 @@ fn a_failed_migration_from_layout_7_leaves_it_at_layout_7() {
     conn.execute_batch("DROP TRIGGER no_reopening").unwrap();
     drop(conn);
     db::open_migrating(&path).unwrap();
-    assert_eq!(user_version(&path), 9);
+    assert_eq!(user_version(&path), 10);
 }
 
 #[test]
@@ -562,7 +571,7 @@ fn a_broken_reference_elsewhere_does_not_stop_the_migration() {
     .unwrap();
     drop(conn);
     db::open_migrating(&path).unwrap();
-    assert_eq!(user_version(&path), 9);
+    assert_eq!(user_version(&path), 10);
     // Still broken: the check the migration makes is over the tables that refer to threads.
     let conn = rusqlite::Connection::open(&path).unwrap();
     let broken: i64 = conn
@@ -579,7 +588,7 @@ fn a_broken_reference_elsewhere_does_not_stop_the_migration() {
 fn other_layouts_are_refused_and_left_as_they_are() {
     for (version, says) in [
         (4, "older version of relevo"),
-        (10, "newer version of relevo"),
+        (11, "newer version of relevo"),
     ] {
         let dir = TempDir::new();
         let path = dir.db();
@@ -627,6 +636,7 @@ fn only_serve_migrates_and_checking_writes_nothing() {
             layout8,
             "a development build of relevo 0.5.0 (before its release)",
         ),
+        (9, layout9, "relevo 0.5.x"),
     ] {
         let path = dir.0.join(format!("{version}.db"));
         let path = path.to_str().unwrap();
@@ -661,7 +671,7 @@ fn only_serve_migrates_and_checking_writes_nothing() {
         // The server migrates it; then everything opens it, and checking says so, also while it
         // is open (read-only, through its -wal and -shm).
         let conn = db::open_migrating(path).unwrap();
-        assert_eq!(user_version(path), 9);
+        assert_eq!(user_version(path), 10);
         assert_eq!(db::check(path).unwrap(), db::Layout::Current);
         db::open(path).unwrap();
         drop(conn);
@@ -730,7 +740,7 @@ async fn a_layout_6_database_migrates_its_team_questions_to_the_global_board() {
         Clock::fixed(seen + 60),
         5,
     );
-    assert_eq!(user_version(&path), 9);
+    assert_eq!(user_version(&path), 10);
     // Delivery, handled and claims stay as they were, and so does what is pending.
     assert_eq!(open(flags(&path)), before);
     let f = Fixture {
@@ -856,7 +866,7 @@ async fn a_layout_7_database_migrates_and_its_closed_threads_open_with_nothing_p
         Clock::fixed(seen + 60),
         5,
     );
-    assert_eq!(user_version(&path), 9);
+    assert_eq!(user_version(&path), 10);
     // Nothing became pending, and no thread is closed.
     assert_eq!(waiting(&path), before);
     let closed: i64 = rusqlite::Connection::open(&path)
@@ -994,7 +1004,7 @@ async fn a_layout_8_database_migrates_and_its_sessions_report_their_clients() {
         Clock::fixed(seen + 60),
         5,
     );
-    assert_eq!(user_version(&path), 9);
+    assert_eq!(user_version(&path), 10);
     // Delivery, handled and claims are as they were.
     assert_eq!(flags(&path), before);
     // Every session is kept, and has said nothing of its client yet.
@@ -1035,4 +1045,67 @@ async fn a_layout_8_database_migrates_and_its_sessions_report_their_clients() {
     pending.sort();
     expected.sort();
     assert_eq!(pending, expected);
+}
+
+#[tokio::test]
+async fn a_layout_9_database_migrates_and_its_sessions_say_their_agent() {
+    let dir = TempDir::new();
+    let path = dir.db();
+    let seen = layout9(&path);
+    let before = flags(&path);
+    let app = App::new(
+        db::open_migrating(&path).unwrap(),
+        Clock::fixed(seen + 60),
+        5,
+    );
+    assert_eq!(user_version(&path), 10);
+    // Delivery, handled and claims are as they were.
+    assert_eq!(flags(&path), before);
+    // Every session is kept, with its client, and has said nothing of its agent yet.
+    let sessions = || db::list_sessions(&app.db(), None, seen + 60).unwrap();
+    assert_eq!(sessions().len(), 3);
+    assert!(
+        sessions()
+            .iter()
+            .all(|s| s.client.is_some() && s.agent.is_none())
+    );
+    let f = Fixture {
+        app: app.clone(),
+        v: serde_json::from_str(FIXTURE9).unwrap(),
+    };
+    // Its next request says it: Bob's session, as pi 0.6.0 does. Its note is via pi.
+    let bob = f.agent("bob", "bob-term-01", "pagos-api");
+    let req = Request::post("/api/send")
+        .header("authorization", format!("Bearer {}", bob.token))
+        .header("relevo-session", "bob-term-01")
+        .header("relevo-context", "pagos-api")
+        .header("relevo-agent", "pi")
+        .header("content-type", "application/json");
+    let body = json!({ "thread": f.thread("fetched"), "text": "On it." }).to_string();
+    let res = api::router(app.clone())
+        .oneshot(req.body(Body::from(body)).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let agent = |id: &str| {
+        sessions()
+            .into_iter()
+            .find(|s| s.session.as_deref() == Some(id))
+            .unwrap()
+            .agent
+    };
+    assert_eq!(agent("bob-term-01").as_deref(), Some("pi"));
+    // A 0.5.0 client says nothing: its notes are via its token's label, as before.
+    let ana = f.agent("ana", "ana-cc-0001", "pagos-api");
+    ana.send(json!({ "thread": f.thread("fetched"), "text": "Thanks." }))
+        .await;
+    assert_eq!(agent("ana-cc-0001"), None);
+    let notes = ana.thread(&f.thread("fetched")).await["notes"].clone();
+    let via: Vec<&str> = notes
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["via"].as_str().unwrap())
+        .collect();
+    assert_eq!(via, ["Claude Code", "pi", "Claude Code"]);
 }

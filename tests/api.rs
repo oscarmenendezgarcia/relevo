@@ -1829,6 +1829,121 @@ async fn a_waiting_request_answering_keeps_the_client_a_newer_request_reported()
     assert_eq!(clients_of(&t, "bob")[0].1.as_deref(), Some("pi/0.5.1"));
 }
 
+/// The agent each session of `who` said it is, by session id.
+fn agents_of(t: &Team, who: &str) -> Vec<(Option<String>, Option<String>)> {
+    let mut out: Vec<_> = db::list_sessions(&t.app.db(), Some(who), T0)
+        .unwrap()
+        .into_iter()
+        .map(|s| (s.session, s.agent))
+        .collect();
+    out.sort();
+    out
+}
+
+#[tokio::test]
+async fn each_session_keeps_the_agent_its_latest_request_said() {
+    let t = team(&["ana"]);
+    let some = |s: &str| Some(s.to_string());
+    let said = |agent: &str| {
+        let t = &t;
+        let agent = agent.to_string();
+        async move {
+            let a = agent_with(t, "ana", "agent-sess-1", &[("relevo-agent", &agent)]);
+            let (status, v) = a.get("/api/inbox").await;
+            assert_eq!(status, StatusCode::OK, "{agent:?}: {v}");
+            agents_of(t, "ana")[0].1.clone()
+        }
+    };
+    // Kept as said, trimmed; any script.
+    assert_eq!(said("Claude Code").await, some("Claude Code"));
+    assert_eq!(said("  pi  ").await, some("pi"));
+    assert_eq!(said("Gémini CLI").await, some("Gémini CLI"));
+    assert_eq!(said(&"x".repeat(40)).await, some(&"x".repeat(40)));
+    // Anything else is ignored, never an error: the session says nothing.
+    for bad in [
+        "",
+        "   ",
+        "a\tb",
+        "right\u{202E}left",
+        "zero\u{200B}width",
+        "line\u{2028}break",
+        &"x".repeat(41),
+    ] {
+        said("Claude Code").await;
+        assert_eq!(said(bad).await, None, "{bad:?}");
+    }
+    // The latest request wins, one that says nothing included.
+    said("Hermes").await;
+    t.agent("ana", "agent-sess-1", "").inbox().await;
+    assert_eq!(agents_of(&t, "ana")[0], (some("agent-sess-1"), None));
+}
+
+#[tokio::test]
+async fn a_note_is_via_the_agent_that_wrote_it_else_the_tokens_label() {
+    let t = team(&["ana", "bob"]);
+    let cc = agent_with(&t, "ana", "cc-sess-01", &[("relevo-agent", "Claude Code")]);
+    let id = cc.ok(json!({ "text": "@bob Who owns refunds?" })).await;
+    assert_eq!(cc.inbox().await["session"]["label"], "Claude Code");
+    // Bob's pi reads it, claims it and answers: each line says pi.
+    let pi = agent_with(&t, "bob", "pi-sess-01", &[("relevo-agent", "pi")]);
+    pi.inbox().await;
+    pi.ok(json!({ "thread": id, "claim": true })).await;
+    let held = cc.thread(&id).await["held_by"].clone();
+    assert_eq!(held[0]["label"], "pi", "{held}");
+    pi.ok(json!({ "thread": id, "text": "I do." })).await;
+    let th = cc.thread(&id).await;
+    let bob = th["delivery"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["handle"] == "bob")
+        .unwrap()
+        .clone();
+    assert_eq!(bob["by"]["label"], "pi", "{bob}");
+    assert_eq!(bob["claimed_by"]["label"], "pi", "{bob}");
+    assert_eq!(bob["handled_by"]["label"], "pi", "{bob}");
+    // A client that says no agent writes as its token's label, as before.
+    t.ok(
+        "bob",
+        json!({ "thread": id, "text": "From the default session." }),
+    )
+    .await;
+    // A note keeps the agent that wrote it, whatever the session says later.
+    agent_with(&t, "bob", "pi-sess-01", &[("relevo-agent", "pi 2")])
+        .inbox()
+        .await;
+    let via: Vec<Value> = cc.thread(&id).await["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["via"].clone())
+        .collect();
+    assert_eq!(via, ["Claude Code", "pi", "laptop"]);
+}
+
+#[tokio::test]
+async fn a_waiting_request_answering_keeps_the_agent_a_newer_request_said() {
+    let t = team(&["ana", "bob"]);
+    let old = agent_with(&t, "bob", "term-0001", &[("relevo-agent", "pi")]);
+    let waiting = tokio::spawn(async move { old.inbox_at("/api/inbox?wait=30").await });
+    // Until it waits.
+    for _ in 0..100 {
+        if !agents_of(&t, "bob").is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    agent_with(&t, "bob", "term-0001", &[("relevo-agent", "Hermes")])
+        .inbox()
+        .await;
+    let id = t.ok("ana", json!({ "text": "@bob Wake up" })).await;
+    let answered = waiting.await.unwrap();
+    assert_eq!(answered["session"]["label"], "Hermes");
+    assert_eq!(agents_of(&t, "bob")[0].1.as_deref(), Some("Hermes"));
+    let th = t.thread("ana", &id).await;
+    assert_eq!(th["delivery"][1]["by"]["label"], "Hermes", "{th}");
+}
+
 #[tokio::test]
 async fn sessions_not_seen_for_7_days_are_forgotten() {
     let t = team(&["ana", "bob"]);

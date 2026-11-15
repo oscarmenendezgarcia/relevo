@@ -17,12 +17,14 @@ pub const MAX_SESSIONS_PER_TOKEN: i64 = 20;
 pub struct Session {
     pub id: i64,
     pub person_id: i64,
+    /// What teammates see it as (a note's `via`): the agent it said it is (`Relevo-Agent`), else
+    /// its token's label.
     pub label: String,
     /// `None` for a general session.
     pub context: Option<String>,
 }
 
-/// A session as the protocol shows it: its token's label and its context.
+/// A session as the protocol shows it: its label (see `Session`) and its context.
 #[derive(Serialize)]
 pub struct SessionOut {
     pub label: String,
@@ -49,8 +51,8 @@ fn check_token(conn: &Connection, caller: &Caller) -> Result<(), ApiError> {
 /// sessions not seen for 15 minutes (this one's included: they lapsed before it came back),
 /// forgets sessions not seen for 7 days, then those of the token beyond `MAX_SESSIONS_PER_TOKEN`.
 ///
-/// With `arrived`, the request has just arrived and records the context and the client it sent
-/// (the latest request wins, saying nothing included). Otherwise it is a waiting request
+/// With `arrived`, the request has just arrived and records the context, the client and the agent
+/// it sent (the latest request wins, saying nothing included). Otherwise it is a waiting request
 /// answering, whose context may be older than one the session sent since: it keeps the
 /// session's.
 pub fn touch(
@@ -68,17 +70,18 @@ pub fn touch(
             "SELECT EXISTS (SELECT 1 FROM sessions WHERE token_id = ?1 AND client_id = ?2)",
         )?
         .query_row(params![caller.token_id, caller.session], |r| r.get(0))?;
-    let (id, context): (i64, Option<String>) = conn.query_row(
+    let (id, context, agent): (i64, Option<String>, Option<String>) = conn.query_row(
         "INSERT INTO sessions (token_id, client_id, person_id, context, last_seen, client,
-                               client_inferred)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?7, ?8)
+                               client_inferred, agent)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?7, ?8, ?9)
          ON CONFLICT (token_id, client_id)
          DO UPDATE SET context = CASE WHEN ?6 THEN excluded.context ELSE context END,
                        client = CASE WHEN ?6 THEN excluded.client ELSE client END,
                        client_inferred = CASE WHEN ?6 THEN excluded.client_inferred
                                          ELSE client_inferred END,
+                       agent = CASE WHEN ?6 THEN excluded.agent ELSE agent END,
                        last_seen = excluded.last_seen
-         RETURNING id, context",
+         RETURNING id, context, agent",
         params![
             caller.token_id,
             caller.session,
@@ -87,9 +90,10 @@ pub fn touch(
             now,
             arrived,
             caller.client,
-            caller.client_inferred
+            caller.client_inferred,
+            caller.agent
         ],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
     if !known {
         start(conn, id, caller.person_id)?;
@@ -113,7 +117,7 @@ pub fn touch(
     Ok(Session {
         id,
         person_id: caller.person_id,
-        label: caller.label.clone(),
+        label: agent.unwrap_or_else(|| caller.label.clone()),
         context,
     })
 }
@@ -149,13 +153,15 @@ pub fn find(conn: &Connection, caller: &Caller) -> Result<Option<Session>, ApiEr
     check_token(conn, caller)?;
     Ok(conn
         .query_row(
-            "SELECT id, context FROM sessions WHERE token_id = ?1 AND client_id = ?2",
+            "SELECT id, context, agent FROM sessions WHERE token_id = ?1 AND client_id = ?2",
             params![caller.token_id, caller.session],
             |r| {
                 Ok(Session {
                     id: r.get(0)?,
                     person_id: caller.person_id,
-                    label: caller.label.clone(),
+                    label: r
+                        .get::<_, Option<String>>(2)?
+                        .unwrap_or_else(|| caller.label.clone()),
                     context: r.get(1)?,
                 })
             },

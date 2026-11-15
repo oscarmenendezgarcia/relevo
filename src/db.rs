@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS threads (
 -- `client` is what the latest request said of the agent's client, `<name>/<version>` (the
 -- `Relevo-Client` header, or a `relevo/<version>` User-Agent read as `mcp/<version>`, then
 -- `client_inferred` is 1); NULL when it said nothing that could be read. Layout 9 brings both.
+-- `agent` is what the latest request said of the agent (`Relevo-Agent`: Claude Code, pi), the
+-- session's name for everyone else (a note's `via`); NULL: its token's label. Layout 10 brings it.
 CREATE TABLE IF NOT EXISTS sessions (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     token_id        TEXT NOT NULL REFERENCES tokens(id),
@@ -57,6 +59,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     claims          INTEGER NOT NULL DEFAULT 0,
     client          TEXT,
     client_inferred INTEGER NOT NULL DEFAULT 0,
+    agent           TEXT,
     UNIQUE (token_id, client_id)
 );
 CREATE INDEX IF NOT EXISTS sessions_by_person ON sessions(person_id, last_seen);
@@ -317,11 +320,11 @@ pub const SESSION_LIFETIME_SECS: i64 = 7 * 24 * 3600;
 pub const CLAIM_LAPSE_SECS: i64 = 15 * 60;
 
 /// The layout of `SCHEMA`, kept in SQLite's `user_version`. A database of layout 5 (relevo 0.1.0
-/// to 0.2.x), 6 (relevo 0.3.x), 7 (relevo 0.4.x) or 8 (development builds of 0.5.0) is migrated
-/// in place (`MIGRATE_FROM_5`, `MIGRATE_FROM_6`, `MIGRATE_FROM_7`, `MIGRATE_FROM_8`, then
-/// `OPEN_CLOSED`), by `relevo serve` only; any other layout is refused, never half-updated
+/// to 0.2.x), 6 (relevo 0.3.x), 7 (relevo 0.4.x), 8 (development builds of 0.5.0) or 9 (relevo
+/// 0.5.x) is migrated in place (`MIGRATE_FROM_5` to `MIGRATE_FROM_9`, then `OPEN_CLOSED`), by
+/// `relevo serve` only; any other layout is refused, never half-updated
 /// (`CREATE TABLE IF NOT EXISTS` would skip the old tables and fail on their missing columns).
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 /// Layout 5 to 6: the handled state of each participant, from what layout 5 recorded as handling.
 /// A thread that was `waiting` there (open, direct, its latest note not theirs) waited for their
@@ -412,6 +415,11 @@ ALTER TABLE sessions ADD COLUMN client TEXT;
 ALTER TABLE sessions ADD COLUMN client_inferred INTEGER NOT NULL DEFAULT 0;
 ";
 
+/// Layout 9 to 10, before `SCHEMA`: each session keeps the agent its latest request said it is
+/// (see `sessions`). A session seen before has said nothing yet: its token's label until its next
+/// request.
+const MIGRATE_FROM_9: &str = "ALTER TABLE sessions ADD COLUMN agent TEXT;";
+
 /// Layout 7 to 8, after `SCHEMA` (which brings `thread_closes` to a database that did not have it
 /// yet): every closed thread opens, handled by each of its named participants up to its latest
 /// note, so nothing becomes pending. Where that covers a note by someone else they had not
@@ -468,14 +476,14 @@ UPDATE session_threads SET resolved = 0 WHERE resolved != 0;
 UPDATE threads SET status = 'open' WHERE status = 'closed';
 ";
 
-/// Opens (or creates) the database and applies the schema. A database of layout 5, 6, 7 or 8 is
+/// Opens (or creates) the database and applies the schema. A database of layout 5 to 9 is
 /// refused: only `relevo serve` migrates it (`open_migrating`), so that an admin command never
 /// changes the layout behind the owner's back, before a backup. `":memory:"` works for tests.
 pub fn open(path: &str) -> Result<Connection> {
     open_with(path, false, OPEN_PATIENCE)
 }
 
-/// `open`, migrating a database of layout 5, 6, 7 or 8 in place: for `relevo serve`.
+/// `open`, migrating a database of layout 5 to 9 in place: for `relevo serve`.
 pub fn open_migrating(path: &str) -> Result<Connection> {
     open_with(path, true, OPEN_PATIENCE)
 }
@@ -576,8 +584,12 @@ fn try_open(path: &str, migrate: bool, deadline: std::time::Instant) -> Result<C
                 tx.execute_batch(MIGRATE_FROM_7)
                     .with_context(|| format!("migrating database {path} from layout 7 to 8"))?;
             }
-            tx.execute_batch(MIGRATE_FROM_8)
-                .with_context(|| format!("migrating database {path} from layout 8 to 9"))?;
+            if old <= 8 {
+                tx.execute_batch(MIGRATE_FROM_8)
+                    .with_context(|| format!("migrating database {path} from layout 8 to 9"))?;
+            }
+            tx.execute_batch(MIGRATE_FROM_9)
+                .with_context(|| format!("migrating database {path} from layout 9 to 10"))?;
             from = Some(old);
         }
         Layout::New | Layout::Current => {}
@@ -631,9 +643,15 @@ fn migrated(old: i64, opened: i64) -> Vec<String> {
              closed threads, handled by everyone they name"
         ));
     }
+    if old <= 8 {
+        lines.push(
+            "migrated the database from layout 8 to 9: sessions keep the client and version \
+             their agent reports"
+                .to_string(),
+        );
+    }
     lines.push(
-        "migrated the database from layout 8 to 9: sessions keep the client and version their \
-         agent reports"
+        "migrated the database from layout 9 to 10: sessions keep the agent they say they are"
             .to_string(),
     );
     lines
@@ -668,7 +686,7 @@ fn broken_thread_refs(tx: &Connection) -> Result<Vec<(String, i64, String)>> {
     Ok(out)
 }
 
-/// Why a command other than `serve` refuses a database of layout 5, 6, 7 or 8.
+/// Why a command other than `serve` refuses a database of layout 5 to 9.
 fn no_migration(path: &str, layout: Layout) -> String {
     format!(
         "database {path} has the layout of {}, which only `relevo serve` migrates (in place, \
@@ -686,8 +704,8 @@ pub enum Layout {
     New,
     /// This version's layout.
     Current,
-    /// Layout 5 (relevo 0.1.0 to 0.2.x), 6 (relevo 0.3.x), 7 (relevo 0.4.x) or 8 (development
-    /// builds of 0.5.0): `relevo serve` migrates it.
+    /// Layout 5 (relevo 0.1.0 to 0.2.x), 6 (relevo 0.3.x), 7 (relevo 0.4.x), 8 (development
+    /// builds of 0.5.0) or 9 (relevo 0.5.x): `relevo serve` migrates it.
     Migrates(i64),
 }
 
@@ -698,6 +716,7 @@ impl Layout {
             Layout::Migrates(5) => "relevo 0.1.0 to 0.2.x",
             Layout::Migrates(6) => "relevo 0.3.x",
             Layout::Migrates(7) => "relevo 0.4.x",
+            Layout::Migrates(9) => "relevo 0.5.x",
             Layout::Migrates(_) => "a development build of relevo 0.5.0 (before its release)",
             Layout::New | Layout::Current => "this relevo",
         }
@@ -1084,6 +1103,8 @@ pub struct SessionInfo {
     pub client: Option<String>,
     /// Whether `client` was read from the User-Agent, not said.
     pub client_inferred: bool,
+    /// The agent its latest request said it is; `None`: nothing.
+    pub agent: Option<String>,
 }
 
 impl SessionInfo {
@@ -1106,7 +1127,7 @@ pub fn list_sessions(
     }
     let mut stmt = conn.prepare(&format!(
         "SELECT p.handle, t.label, nullif(s.client_id, ''), s.context, s.last_seen, s.client,
-                s.client_inferred
+                s.client_inferred, s.agent
          FROM sessions s JOIN tokens t ON t.id = s.token_id JOIN people p ON p.id = s.person_id
          WHERE s.last_seen > ?2 AND (?1 IS NULL OR p.handle = ?1) AND p.active = 1
            AND p.id IS NOT {SYSTEM_PERSON_SQL}
@@ -1121,6 +1142,7 @@ pub fn list_sessions(
             last_seen: r.get(4)?,
             client: r.get(5)?,
             client_inferred: r.get(6)?,
+            agent: r.get(7)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1528,10 +1550,14 @@ mod tests {
                 .collect()
         };
         let line = |from, to| format!("migrated the database from layout {from} to {to}");
-        assert_eq!(steps(5), [line(5, 6), line(6, 7), line(7, 8), line(8, 9)]);
-        assert_eq!(steps(6), [line(6, 7), line(7, 8), line(8, 9)]);
-        assert_eq!(steps(7), [line(7, 8), line(8, 9)]);
-        assert_eq!(steps(8), [line(8, 9)]);
+        assert_eq!(
+            steps(5),
+            [line(5, 6), line(6, 7), line(7, 8), line(8, 9), line(9, 10)]
+        );
+        assert_eq!(steps(6), [line(6, 7), line(7, 8), line(8, 9), line(9, 10)]);
+        assert_eq!(steps(7), [line(7, 8), line(8, 9), line(9, 10)]);
+        assert_eq!(steps(8), [line(8, 9), line(9, 10)]);
+        assert_eq!(steps(9), [line(9, 10)]);
         assert!(migrated(7, 2)[0].contains("opened 2 closed threads"));
     }
 
