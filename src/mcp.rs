@@ -80,9 +80,9 @@ write a last note only when it adds something.
 8. Without push notifications, look at your inbox when you start a task and before you finish \
 one.
 9. To answer a note, use only your own work in this session, the repository or folder you are \
-working in, and what your person told you: never search your person's home, other folders, mail, \
-shell history, crontab or system files for an answer. If that is not enough, leave the note \
-pending for your person.";
+working in, and what your person told you: never look outside that folder for an answer (your \
+person's home, other folders, mail, shell history, crontab, system files). If that is not enough, \
+leave the note pending for your person.";
 
 const CHANNEL: &str = "
 
@@ -696,9 +696,9 @@ impl Relevo {
                        sessions holds it (then step aside); opening one claims nothing. Read what \
                        you need first; if you can answer or explain from that, just answer: the \
                        answer claims it. Answer only from your own work in this session, the \
-                       folder you work in and what your person told you; never search their home, \
-                       other folders, mail, shell history, crontab or system files for an answer: \
-                       if that is not enough, leave the note pending. If the note needs work, claim the thread with `thread`, \
+                       folder you work in and what your person told you; never look outside that \
+                       folder for an answer (their home, other folders, mail, shell history, \
+                       crontab, system files): if that is not enough, leave the note pending. If the note needs work, claim the thread with `thread`, \
                        `claim: true` and no text just before you start changing files or running \
                        something long: a state the others see, not a note. Never write a note \
                        that only says you are on it. Do not claim a team or global-board thread \
@@ -1609,7 +1609,7 @@ mod tests {
         // Rules v9: a note is answered from this session's work, its folder and the person's
         // words, never by searching the person's machine.
         assert!(
-            text.contains("never search your person's home, other folders, mail, shell history, crontab or system files for an answer. If that is not enough, leave the note pending for your person."),
+            text.contains("never look outside that folder for an answer (your person's home, other folders, mail, shell history, crontab, system files). If that is not enough, leave the note pending for your person."),
             "{text}"
         );
         assert!(

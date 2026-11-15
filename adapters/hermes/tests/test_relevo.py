@@ -960,10 +960,10 @@ class Tools(Base):
         searching the person's machine."""
         self.assertEqual(client.RULES.splitlines()[8],
                          "9. To answer a note, use only your own work in this session, the repository or folder "
-                         "you are working in, and what your person told you: never search your person's home, "
-                         "other folders, mail, shell history, crontab or system files for an answer. If that is "
-                         "not enough, leave the note pending for your person.")
-        self.assertIn("never search your person's home", client.TOOL_RULES)
+                         "you are working in, and what your person told you: never look outside that folder for an "
+                         "answer (your person's home, other folders, mail, shell history, crontab, system files). "
+                         "If that is not enough, leave the note pending for your person.")
+        self.assertIn("never look outside that folder for an answer", client.TOOL_RULES)
 
     def test_the_rules_are_those_of_docs_agents_md_word_for_word(self):
         doc = (_REPO / "docs" / "agents.md").read_text(encoding="utf-8")

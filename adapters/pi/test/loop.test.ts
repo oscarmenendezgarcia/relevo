@@ -412,7 +412,7 @@ test("the rules go into the system prompt only when configured", async () => {
   assert.match(RULES, /^7\. [^\n]*Threads do not close: when you asked and the answer settles it, mark it seen; write a last note only when it adds something\.$/m);
   assert.doesNotMatch(RULES, /done|Close a thread/);
   // v9: answered from this session's work, its folder and the person's words; never by searching the machine.
-  assert.match(RULES, /^9\. To answer a note, use only your own work in this session, the repository or folder you are working in, and what your person told you: never search your person's home, other folders, mail, shell history, crontab or system files for an answer\. If that is not enough, leave the note pending for your person\.$/m);
+  assert.match(RULES, /^9\. To answer a note, use only your own work in this session, the repository or folder you are working in, and what your person told you: never look outside that folder for an answer \(your person's home, other folders, mail, shell history, crontab, system files\)\. If that is not enough, leave the note pending for your person\.$/m);
 
   const bare = loadExtension({ env: {}, home });
   const none = { systemPromptOptions: { sections: {} as Record<string, string> } };
