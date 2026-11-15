@@ -251,6 +251,20 @@ impl Client {
         Ok(v)
     }
 
+    /// `GET /api/timeline?<query>`: read only, it delivers nothing, and the server ignores the
+    /// session headers (docs/protocol.md, "timeline").
+    pub async fn timeline(&self, query: &str) -> Result<Value, Error> {
+        let req = self.http.get(format!("{}/api/timeline?{query}", self.url));
+        shaped(
+            self.call(req, TIMEOUT).await,
+            &[
+                ("threads", Value::is_array),
+                ("counts", Value::is_object),
+                ("you", Value::is_string),
+            ],
+        )
+    }
+
     pub async fn thread(&self, id: &str) -> Result<Value, Error> {
         // A thread id is `r_` + base32; anything else is sent encoded and the server says it is
         // not found.
@@ -300,6 +314,17 @@ impl Client {
                 body,
             }),
             v => shaped(v, &[("thread", Value::is_string)]),
+        }
+    }
+}
+
+impl Error {
+    /// The server was not reached, or only a proxy in front of it answered.
+    pub fn unreachable(&self) -> bool {
+        match self {
+            Error::Network(_) => true,
+            Error::Api { status, code, .. } => is_gateway(*status, code),
+            Error::BadResponse(_) => false,
         }
     }
 }

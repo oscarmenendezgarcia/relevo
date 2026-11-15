@@ -19,6 +19,7 @@ pub mod session;
 pub mod timeline;
 pub mod tls;
 pub mod update;
+pub mod waiting;
 pub mod web;
 
 use std::collections::HashMap;
