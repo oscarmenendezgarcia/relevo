@@ -125,6 +125,13 @@ enum Command {
         /// Do not offer the /relevo command for Claude Code.
         #[arg(long)]
         no_command: bool,
+        /// Show Relevo in Claude Code's status line (~/.claude/settings.json) without asking.
+        /// A status line that is not Relevo's is never changed.
+        #[arg(long, conflicts_with = "no_statusline")]
+        statusline: bool,
+        /// Do not offer Claude Code's status line.
+        #[arg(long)]
+        no_statusline: bool,
     },
     /// Open your timeline in the browser: the board and your threads, read only (it delivers,
     /// handles and claims nothing). Serves it on 127.0.0.1 until Ctrl-C.
@@ -136,6 +143,10 @@ enum Command {
         #[arg(long)]
         no_open: bool,
     },
+    /// Print one line for Claude Code's status line: how many threads wait on you, or that the
+    /// server is offline; nothing when Relevo is not configured. Reads only, at most once every
+    /// 15 seconds (a cache in ~/.cache/relevo).
+    Statusline,
     /// Serve MCP on stdin and stdout, for Claude Code and any MCP client.
     Mcp {
         /// Push new notes as Claude Code channel events (keeps an inbox request waiting).
@@ -440,6 +451,69 @@ fn offer_command(force: bool) {
     }
 }
 
+/// After `connect`: sets Claude Code's status line to `relevo statusline` when Claude Code's
+/// folder is here, its settings have no status line, and the person says yes (`force`: without
+/// asking). A status line that is not Relevo's, or settings that are not valid JSON, are never
+/// changed: it says how to add Relevo by hand. Never fails `connect`.
+fn offer_statusline(force: bool) {
+    use relevo::statusline::{self, Setting};
+    use std::io::IsTerminal;
+    let Some(dir) = relevo::claude_command::claude_dir(&config::env) else {
+        return;
+    };
+    if !force && !dir.is_dir() {
+        return;
+    }
+    let path = statusline::settings_path(&dir);
+    let command = match std::env::current_exe() {
+        Ok(exe) => statusline::command_for(&exe, config::env("PATH").as_deref()),
+        Err(_) => "relevo statusline".to_string(),
+    };
+    match statusline::setting(&path) {
+        Ok(Setting::Ours) => println!(
+            "Claude Code's status line already shows Relevo ({})",
+            path.display()
+        ),
+        Ok(Setting::Foreign) => println!(
+            "Claude Code already has a status line ({}): left as it is; {}",
+            path.display(),
+            statusline::how_to_add(&command)
+        ),
+        Ok(Setting::Malformed(e)) => println!(
+            "left {} as it is: it is not valid JSON ({e}); to show Relevo in Claude Code's status \
+             line, add \"statusLine\": {} to it",
+            path.display(),
+            statusline::value(&command)
+        ),
+        Ok(Setting::Absent | Setting::NoFile) => {
+            let terminal = std::io::stdin().is_terminal();
+            let question = format!(
+                "Show what waits on you in Claude Code's status line ({})? [Y/n] ",
+                path.display()
+            );
+            let yes = || {
+                read_line(&question)
+                    .is_ok_and(|a| matches!(a.trim().to_lowercase().as_str(), "" | "y" | "yes"))
+            };
+            if force || (terminal && yes()) {
+                match statusline::install(&path, &command) {
+                    Ok(()) => println!(
+                        "set Claude Code's status line to `{command}` in {}",
+                        path.display()
+                    ),
+                    Err(e) => eprintln!("Claude Code's status line: not set: {e:#}"),
+                }
+            } else if !terminal {
+                println!(
+                    "skipped Claude Code's status line (no terminal to ask): run relevo connect \
+                     again with --statusline to set it"
+                );
+            }
+        }
+        Err(e) => eprintln!("Claude Code's status line: {e:#}"),
+    }
+}
+
 /// `relevo update`: what it did on stdout, what failed on stderr (and exit 1).
 async fn update_command(req: &update::Request) -> Result<()> {
     let setup = update::Setup::this_binary()?;
@@ -607,11 +681,20 @@ async fn main() -> Result<()> {
             fingerprint,
             command,
             no_command,
+            statusline,
+            no_statusline,
         } => {
             connect(&url, token, fingerprint).await?;
             if !no_command {
                 offer_command(command);
             }
+            if !no_statusline {
+                offer_statusline(statusline);
+            }
+            return Ok(());
+        }
+        Command::Statusline => {
+            relevo::statusline::run().await;
             return Ok(());
         }
         Command::Mcp { channel } => return mcp::run(channel).await,
@@ -859,6 +942,7 @@ async fn main() -> Result<()> {
             }
         }
         Command::Connect { .. }
+        | Command::Statusline
         | Command::Mcp { .. }
         | Command::Web { .. }
         | Command::Update { .. }
