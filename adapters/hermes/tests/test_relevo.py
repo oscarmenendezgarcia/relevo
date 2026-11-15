@@ -3007,7 +3007,7 @@ class SendListedFailures(unittest.TestCase):
                 sent.append(body["thread"])
                 return {"thread": body["thread"]}
 
-            def timeline(self, params):
+            def timeline(self, params, timeout=None):
                 return {"counts": {"waiting": 2}}
 
         out = W.send_listed(Api(), ["send-listed-test"], [1, 2, 3], {"seen": True}, True, lambda r: "")
@@ -3130,7 +3130,7 @@ class Command(Base):
     def test_the_list_oldest_first_in_the_terminal_and_the_pager(self):
         ids = self.three()
         cli = self.run_command(platform="cli")
-        self.assertIn("\x1b[1;33m", cli)  # numbers in bold yellow, as pi draws them
+        self.assertIn("\x1b[1m\x1b[38;5;221m", cli)  # numbers in bold amber, as pi draws them
         self.assertEqual(_ANSI.sub("", cli), self.run_command(platform="tui"))
         self.assertEqual(self.run_command(platform="tui"), "\n".join([
             self.title(3),
@@ -3209,13 +3209,26 @@ class Command(Base):
         self.assertEqual(title("discord"), "**Waiting on you · 3** · *your agents handled 5 today*")
         self.assertEqual(title("telegram"), "**Waiting on you · 3** · *your agents handled 5 today*")
         self.assertEqual(title("tui"), "Waiting on you · 3 · your agents handled 5 today")
-        # The terminal: the title bold, the count bold yellow, then a dim ` · ` and the count of the day dim.
-        self.assertEqual(title("cli"), "\x1b[1mWaiting on you\x1b[0m · \x1b[1;33m3\x1b[0m"
-                                       "\x1b[2m · \x1b[0m\x1b[2myour agents handled 5 today\x1b[0m")
+        # The terminal: the title bold, the count bold amber, then a grey ` · ` and the count of the day grey.
+        self.assertEqual(title("cli"), "\x1b[1mWaiting on you\x1b[0m · \x1b[1m\x1b[38;5;221m3\x1b[0m"
+                                       "\x1b[38;5;245m · \x1b[0m\x1b[38;5;245myour agents handled 5 today\x1b[0m")
         for handled in (0, None):
             shown["handled"] = handled
             self.assertEqual(title("discord"), "**Waiting on you · 3**")
             self.assertEqual(title("tui"), "Waiting on you · 3")
+
+    def test_the_terminal_s_colours_are_the_status_line_s(self):
+        # The 256-colour codes of `relevo statusline` (src/statusline.rs): grey 245, amber 221,
+        # red 203; and one blue for pi's accent (mentions), one green for its success.
+        a = waiting_module.Ansi()
+        self.assertEqual(a.number("3"), "\x1b[1m\x1b[38;5;221m3\x1b[0m")
+        self.assertEqual(a.italic("2h"), "\x1b[38;5;245m2h\x1b[0m")
+        self.assertEqual(a.reply("ok"), "\x1b[38;5;245m\x1b[3mok\x1b[0m")
+        self.assertEqual(a.bad("x"), "\x1b[38;5;203mx\x1b[39m")
+        self.assertEqual(a.ok("✓"), "\x1b[38;5;114m✓\x1b[39m")
+        self.assertEqual(a.mention("@ana"), "\x1b[38;5;111m@ana\x1b[39m")
+        offline = waiting_module.render({"state": "offline", "host": "relevo.office", "since": "11:20"}, a)
+        self.assertTrue(offline.startswith("\x1b[38;5;203m\x1b[1mRelevo can't reach relevo.office since 11:20."), offline)
 
     def test_a_server_before_0_6_0_lists_without_the_count_and_still_reads_only(self):
         """A 0.5.0 server refuses `handled_since` (400, an unknown parameter): the first page is asked again
@@ -3223,11 +3236,11 @@ class Command(Base):
         ids = self.three()
         real, asked = client.Api.timeline, []
 
-        def as_0_5_0(api, params):
+        def as_0_5_0(api, params, **kw):
             asked.append(dict(params))
             if "handled_since" in params:
                 raise client.RelevoError(400, "BAD_REQUEST", "unknown parameter 'handled_since'")
-            return real(api, params)
+            return real(api, params, **kw)
 
         client.Api.timeline = as_0_5_0
         try:
@@ -3276,7 +3289,7 @@ class Command(Base):
                       self.tool("relevo_send", {"thread": "1", "text": "x"}, key="s2"))
         self.assertIn("There is no thread 4 in your last list (1 to 3)",
                       self.tool("relevo_send", {"thread": "4", "text": "x"}))
-        self.assertIn("several list numbers go only with `seen: true`",
+        self.assertIn("Error: Several list numbers go only with `seen: true`",
                       self.tool("relevo_send", {"thread": "1 2", "text": "x"}))
         opened = self.tool("relevo_thread", {"id": "2"})
         # The opener and title come only fenced, in the thread below the line.

@@ -218,8 +218,12 @@ class Plain:
 
 
 class Ansi(Plain):
-    """The classic CLI, which prints a command's answer with its ANSI colours: as pi draws it."""
-    _B, _D, _I, _R = "\x1b[1m", "\x1b[2m", "\x1b[3m", "\x1b[0m"
+    """The classic CLI, which prints a command's answer with its ANSI colours: as pi draws it, in the
+    256-colour codes of Claude Code's status line (`relevo statusline`): 245 grey for what pi draws
+    muted or dim, 221 amber for its warning (the numbers), 203 red for its error, 114 green for its
+    success and 111 blue for its accent (the @mentions)."""
+    _B, _R = "\x1b[1m", "\x1b[0m"
+    GREY, AMBER, RED, GREEN, BLUE = "\x1b[38;5;245m", "\x1b[38;5;221m", "\x1b[38;5;203m", "\x1b[38;5;114m", "\x1b[38;5;111m"
 
     def esc(self, text: str) -> str:
         # A teammate's text may not carry escape sequences of its own (control characters are gone already).
@@ -229,25 +233,25 @@ class Ansi(Plain):
         return f"{self._B}{text}{self._R}"
 
     def italic(self, text: str) -> str:
-        return f"{self._D}{text}{self._R}"
+        return f"{self.GREY}{text}{self._R}"
 
     def number(self, text: str) -> str:
-        return f"\x1b[1;33m{text}{self._R}"
+        return f"{self._B}{self.AMBER}{text}{self._R}"
 
     def mention(self, text: str) -> str:
-        return f"\x1b[36m{text}\x1b[39m"
+        return f"{self.BLUE}{text}\x1b[39m"
 
     def code(self, text: str) -> str:
         return text
 
     def ok(self, text: str) -> str:
-        return f"\x1b[32m{text}\x1b[39m"
+        return f"{self.GREEN}{text}\x1b[39m"
 
     def bad(self, text: str) -> str:
-        return f"\x1b[31m{text}\x1b[39m"
+        return f"{self.RED}{text}\x1b[39m"
 
     def reply(self, text: str) -> str:
-        return f"{self._D}{self._I}{text}{self._R}"
+        return f"{self.GREY}\x1b[3m{text}{self._R}"
 
 
 class Markdown(Plain):
@@ -540,7 +544,13 @@ def failure(api: client.Api, exc: BaseException) -> str:
         return client.describe_refusal(exc)
     if isinstance(exc, client.CertError):
         return f"{exc}."
-    return f"could not reach the Relevo server ({client.describe_error(exc)})."
+    # Not a network failure (those are offline above): an answer that is not what Relevo sends.
+    return f"the server did not answer as a Relevo server does ({client.describe_error(exc)}); is the URL right?"
+
+
+# How long /relevo waits for each page of its list before it says the server is out of reach: 8
+# seconds, as pi's and relevo mcp's do.
+LIST_TIMEOUT = 8
 
 
 def _all_waiting(api: client.Api, since: int) -> tuple:
@@ -556,7 +566,7 @@ def _all_waiting(api: client.Api, since: int) -> tuple:
         elif handled_since is not None:
             params["handled_since"] = str(handled_since)
         try:
-            v = api.timeline(params)
+            v = api.timeline(params, timeout=LIST_TIMEOUT)
         except client.RelevoError as exc:
             if before or handled_since is None or exc.status != 400:
                 raise
@@ -693,7 +703,7 @@ def send_listed(api: client.Api, keys: list, ns: list, payload: dict, seen: bool
     waits on the person or has a note newer than the list showed. As relevo mcp and pi do."""
     text = payload.get("text")
     if len(ns) > 1 and not (seen and text is None):
-        return "Error: several list numbers go only with `seen: true` and no text (/relevo seen 1 3). Nothing was sent."
+        return "Error: Several list numbers go only with `seen: true` and no text (/relevo seen 1 3). Nothing was sent."
     listed = listed_for(keys)
     found = bind(listed, ns, bound)
     if isinstance(found, str):
@@ -750,7 +760,7 @@ def send_listed(api: client.Api, keys: list, ns: list, payload: dict, seen: bool
 def thread_head(keys: list, ns: list, bound: Any = None):
     """For relevo_thread with a list number: (thread id, the line that names it) or why not."""
     if len(ns) != 1:
-        return "Error: open one thread at a time: one list number."
+        return "Error: Open one thread at a time: one list number."
     found = bind(listed_for(keys), ns, bound)
     if isinstance(found, str):
         return "Error: " + found

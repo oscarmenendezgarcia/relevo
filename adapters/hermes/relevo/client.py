@@ -481,9 +481,9 @@ class Api:
     def people(self) -> dict:
         return self._call("GET", "/api/people")
 
-    def timeline(self, params: dict) -> dict:
+    def timeline(self, params: dict, timeout: float = _TIMEOUT) -> dict:
         """The read-only timeline (docs/protocol.md): delivers, handles and claims nothing."""
-        return self._call("GET", "/api/timeline", params=params)
+        return self._call("GET", "/api/timeline", params=params, timeout=timeout)
 
     def send(self, payload: dict) -> dict:
         body = self._with_key(payload)
