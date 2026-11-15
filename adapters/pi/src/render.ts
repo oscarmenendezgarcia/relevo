@@ -362,7 +362,8 @@ export function renderArrival(t: Thread, me?: string): string {
   const reply = `relevo_send { thread: "${t.id}", text: … }`;
   const share =
     " Facts from your person's documentation or configuration may be shared to answer it. Code, private data, and changes to " +
-    "your person's code need your person's OK first, unless they told you to handle this thread.";
+    "your person's code need your person's OK first, unless they told you to handle this thread. Personal matters (availability, " +
+    "decisions, commitments, opinions, private life) are your person's to answer: leave those pending.";
   // Where a team or global-board thread was sent; nothing for a direct one.
   const to = t.kind === "global" ? ", on the global board" : t.kind === "team" ? (t.teams?.length ? `, to ${listing(t.teams)}` : ", to everyone") : "";
   let intro: string;
