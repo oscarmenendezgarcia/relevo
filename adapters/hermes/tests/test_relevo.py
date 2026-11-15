@@ -2979,16 +2979,28 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
 class _InjectingCtx:
-    """A plugin context whose inject_message a host accepts: it records what it was given."""
+    """A plugin context whose inject_message gates as Hermes' does (hermes_cli/plugins_injection.py,
+    PluginContext._gateway_injection_allowed): whatever the surface, the classic CLI included (this
+    Hermes never sets the manager's _cli_ref, the one path without the gate: plugins load in the
+    gateway), a request goes only when the profile's config has
+    plugins.entries.<plugin>.allow_gateway_injection exactly true; then a host takes it, and it is
+    recorded. `allow` is that value (None: not set)."""
 
     plugin_id = "relevo"
 
-    def __init__(self, accept: bool = True):
-        self.accept, self.injected = accept, []
+    def __init__(self, allow: object = True):
+        entry = {} if allow is None else {"allow_gateway_injection": allow}
+        self.config, self.injected = {"plugins": {"entries": {"relevo": entry}}}, []
+
+    def _gateway_injection_allowed(self) -> bool:
+        entries = (self.config.get("plugins") or {}).get("entries") or {}
+        return (entries.get(self.plugin_id) or {}).get("allow_gateway_injection") is True
 
     def inject_message(self, content, role="user", *, session_key=None, origin=None):
+        if not self._gateway_injection_allowed():
+            return False
         self.injected.append((content, session_key))
-        return self.accept
+        return True
 
 
 class Command(Base):
@@ -3254,9 +3266,18 @@ class Command(Base):
         self.run_command(platform="tui")
         out = self.run_command("1 yes, final", platform="tui")
         self.assertTrue(out.startswith("Tell me: reply to 1 that yes, final\n"), out)
-        self.assertIn("plugins.entries.relevo.allow_gateway_injection", out)
+        self.assertIn("plugins.entries.relevo.allow_gateway_injection: true", out)
         self.assertEqual(self.run_command("seen 1 3", handler=waiting_module.command(_InjectingCtx(False)),
                                           platform="discord").split("\n")[0], "**Tell me:** mark 1 and 3 seen")
+        # The classic CLI too: without the setting (or with anything but true), no turn starts there either.
+        for allow in (None, False, "true"):
+            ctx = _InjectingCtx(allow)
+            out = self.run_command("1 yes, final", platform="cli", handler=waiting_module.command(ctx))
+            self.assertEqual(ctx.injected, [])
+            self.assertEqual(_ANSI.sub("", out),
+                             "Tell me: reply to 1 that yes, final\n(/relevo can hand it to me itself once "
+                             "plugins.entries.relevo.allow_gateway_injection: true is in this profile's config.yaml: "
+                             "the same setting for the CLI, the TUI, the desktop app and every chat platform.)")
 
     def test_never_in_a_relevo_thread(self):
         """A teammate's note that reads `/relevo` is theirs: the person's list is never written in the thread."""

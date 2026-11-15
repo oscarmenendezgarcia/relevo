@@ -809,14 +809,17 @@ def command(ctx: Any) -> Callable:
             handed = False
         if handed:
             return None
-        # No turn can start from here (gateway injection is off for this plugin, or this Hermes has
-        # none): the person says it to Hermes, and the tools take the numbers all the same.
+        # No turn can start from here (injection is off for this plugin, or this Hermes has none): the
+        # person says it to Hermes, and the tools take the numbers all the same. Hermes gates every
+        # surface alike (hermes_cli/plugins_injection.py): plugins load in the gateway, so the classic
+        # CLI's request goes through the same _gateway_injection_allowed as a chat's.
         out = style.bold("Tell me:") + " " + style.esc(r["say"])
         if inject:
             plugin = getattr(ctx, "plugin_id", "relevo") or "relevo"
             out += "\n" + style.italic(style.esc(
-                f"(/relevo can hand it to me itself once plugins.entries.{plugin}.allow_gateway_injection is "
-                "true in this profile's config.)"))
+                f"(/relevo can hand it to me itself once plugins.entries.{plugin}.allow_gateway_injection: true "
+                "is in this profile's config.yaml: the same setting for the CLI, the TUI, the desktop app and "
+                "every chat platform.)"))
         return out
 
     return relevo
