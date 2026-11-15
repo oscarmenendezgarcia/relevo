@@ -79,7 +79,9 @@ export async function startServer(
       : [];
   let child: ChildProcess | null = null;
   let url = "";
-  for (let port = 7990; port <= 7999 && !child; port++) {
+  // RELEVO_TEST_PORTS ("19100-19124") picks another range, for a machine where 7990-7999 are not ours.
+  const [low, high] = (process.env.RELEVO_TEST_PORTS ?? "7990-7999").split("-").map(Number);
+  for (let port = low; port <= high && !child; port++) {
     if (!(await portFree(port))) continue;
     const c = spawn(bin, ["serve", "--addr", `127.0.0.1:${port}`, "--db", db, ...tls], {
       stdio: "ignore",
@@ -104,7 +106,7 @@ export async function startServer(
       await exited;
     }
   }
-  if (!child) throw new Error("relevo serve did not start on any port in 7990-7999");
+  if (!child) throw new Error(`relevo serve did not start on any port in ${low}-${high}`);
   const proc = child;
   return {
     url,

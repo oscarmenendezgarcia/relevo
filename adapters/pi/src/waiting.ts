@@ -3,7 +3,7 @@
 // The same list and the same checks as relevo mcp's `waiting` (src/waiting.rs): rows for pi's
 // renderer, plain text for the model. Nothing here talks to the server.
 
-import { neutralize } from "./render.ts";
+import { neutralize, untrusted } from "./render.ts";
 
 /** The most threads the list shows; the rest are counted. */
 export const MAX_SHOWN = 10;
@@ -46,6 +46,9 @@ export interface Row {
   id: string;
   /** Whoever opened it ("You" for the person). */
   who: string;
+  /** Their handle, and whether it is the person's own thread (its text is not fenced for the model). */
+  opener?: string;
+  own?: boolean;
   /** `direct`, `team @backend`, `board`. */
   kind: string;
   /** How long since its latest note: `now`, `5m`, `2h`, `3d`. */
@@ -56,8 +59,8 @@ export interface Row {
   mentioned: boolean;
   /** The first line of its first note, without the `@` names it starts with. */
   first: string;
-  /** Its latest note, with its author's name when not the opener's. */
-  reply: { by: string | null; text: string } | null;
+  /** Its latest note, with its author's name when not the opener's (and their handle). */
+  reply: { by: string | null; text: string; author?: string; own?: boolean } | null;
   /** Its first line, short: names it in an action's answer. */
   subject: string;
   /** The latest note the list showed: an action refuses when a newer one came since. */
@@ -79,10 +82,20 @@ export type Shown =
   | { state: "not-connected" }
   | { state: "error"; message: string };
 
+/**
+ * A teammate's text on one line, as the list shows it (a terminal shows it): control characters
+ * (C0, C1) and the line and paragraph separators U+2028 and U+2029 become spaces, and Unicode
+ * format characters (category Cf: U+202E and the other direction overrides, zero-width spaces and
+ * joiners, U+FEFF…) are dropped. As relevo mcp's `plain` (src/waiting.rs).
+ */
+export function scrub(text: string): string {
+  return text.replace(/\p{Cf}/gu, "").replace(/[\p{Cc}\u2028\u2029]/gu, " ");
+}
+
 function nameOf(names: Record<string, string>, you: string, handle: string): string {
   if (handle === you) return "You";
-  const name = names[handle];
-  return typeof name === "string" && name.trim() ? name : handle;
+  const name = typeof names[handle] === "string" ? scrub(names[handle]).trim() : "";
+  return name || scrub(handle);
 }
 
 /** `text` cut to `max` characters, at a word when one ends in the second half, with `…` when cut. */
@@ -101,14 +114,13 @@ function cut(text: string, max: number): string {
 }
 
 /**
- * The first line of `text` that is not blank, without control characters (a terminal shows it),
- * and, with `mentions`, without the `@` names it starts with: the list is for the person, who
- * knows a note names them.
+ * The first line of `text` that is not blank (U+2028 and U+2029 end a line too), `scrub`bed, and,
+ * with `mentions`, without the `@` names it starts with: the list is for the person, who knows a
+ * note names them.
  */
 export function firstLine(text: string, mentions: boolean, max: number): string {
-  const raw = text.split(/\r?\n/).find((l) => l.trim() !== "") ?? "";
+  const raw = text.split(/\r?\n|[\u2028\u2029]/).map(scrub).find((l) => l.trim() !== "") ?? "";
   let line = raw
-    .replace(/\p{Cc}/gu, " ")
     .trim()
     .replace(/^#+/, "")
     .trim();
@@ -162,7 +174,7 @@ export function host(url: string): string {
 }
 
 function kindOf(t: TimelineThread): string {
-  if (t.kind === "team") return t.teams?.length ? `team ${t.teams.map((x) => `@${x}`).join(" ")}` : "team";
+  if (t.kind === "team") return t.teams?.length ? `team ${t.teams.map((x) => `@${scrub(x)}`).join(" ")}` : "team";
   if (t.kind === "global") return "board";
   return t.kind;
 }
@@ -184,13 +196,20 @@ export function rows(you: string, names: Record<string, string>, threads: Timeli
       n: i + 1,
       id: t.id,
       who: nameOf(names, you, opener),
+      opener,
+      own: opener === you,
       kind: kindOf(t),
       age: age(now - at),
       replies: replies > 1 ? replies : 0,
       mentioned: t.kind === "global",
       first: firstLine(text, true, LINE_CHARS),
       reply: last
-        ? { by: last.author === opener ? null : nameOf(names, you, last.author), text: firstLine(last.text, false, LINE_CHARS) }
+        ? {
+            by: last.author === opener ? null : nameOf(names, you, last.author),
+            text: firstLine(last.text, false, LINE_CHARS),
+            author: last.author,
+            own: last.author === you,
+          }
         : null,
       subject: firstLine(text, true, SUBJECT_CHARS),
       lastNote: latest?.id ?? "",
@@ -210,8 +229,12 @@ export function help(len: number): string {
 
 export const NOT_CONNECTED = "Relevo isn't connected on this machine. Run relevo connect <server> with the token your admin gave you.";
 
-/** What /relevo shows, as plain text: what the model reads (the person sees it drawn by `draw`). */
-export function plain(shown: Shown): string {
+/**
+ * What /relevo shows, as plain text: what the model reads (the person sees it drawn by `draw`).
+ * With `fence`, every name, first line and reply of a teammate goes inside `<untrusted
+ * from="@handle">` (rule 5), as in the inbox: the person's own stay as they are.
+ */
+export function plain(shown: Shown, fence = false): string {
   switch (shown.state) {
     case "empty":
       return `✓ Nothing is waiting on you.${shown.handled ? ` Your agents handled ${shown.handled} today.` : ""}`;
@@ -223,9 +246,15 @@ export function plain(shown: Shown): string {
       return shown.message;
     case "list": {
       const out = [`Waiting on you · ${shown.total}${shown.handled ? ` · your agents handled ${shown.handled} today` : ""}`];
+      // `text` by `handle`, fenced when asked and not the person's own.
+      const by = (handle: string | undefined, own: boolean | undefined, text: string) =>
+        fence && !own ? untrusted(handle || "unknown", text, true) : text;
       for (const r of shown.rows) {
-        out.push(`${String(r.n).padStart(2)}  ${r.who} · ${meta(r)}`, `    ${r.first}`);
-        if (r.reply) out.push(`    └ ${r.reply.by ? `${r.reply.by}: ` : ""}${r.reply.text}`);
+        out.push(`${String(r.n).padStart(2)}  ${by(r.opener, r.own, r.who)} · ${meta(r)}`, `    ${by(r.opener, r.own, r.first)}`);
+        if (r.reply) {
+          const name = r.reply.by ? `${by(r.reply.author, r.reply.own, r.reply.by)}: ` : "";
+          out.push(`    └ ${name}${by(r.reply.author ?? r.opener, r.reply.own ?? r.own, r.reply.text)}`);
+        }
       }
       if (shown.total > MAX_SHOWN) out.push(`+${shown.total - MAX_SHOWN} more · relevo web`);
       out.push(help(shown.rows.length));
@@ -327,8 +356,10 @@ export function refusal(n: number, row: Row, thread: any, listed: Listed, now: n
       out += "was handled";
       const by = d?.handled_by;
       if (by && typeof by === "object") {
-        out += ` by your ${by.label}`;
-        if (typeof by.context === "string") out += ` in ${by.context}`;
+        const label = typeof by.label === "string" ? scrub(by.label).trim() : "";
+        out += ` by your ${label || "agent"}`;
+        const context = typeof by.context === "string" ? scrub(by.context).trim() : "";
+        if (context) out += ` in ${context}`;
       }
       out += ` at ${clock(at, now)}`;
     } else {
