@@ -3263,6 +3263,61 @@ class Command(Base):
         self.assertIsNone(self.run_command(platform="relevo"))
         self.assertIsNone(self.run_command("1 yes", platform="relevo"))
 
+    def test_the_style_fits_the_platform(self):
+        """Markdown, escaped with backslashes, only where the platform shows CommonMark as it is; Telegram
+        its own; plain text where a backslash would show or the platform has a markup of its own."""
+        style = lambda p: type(waiting_module.style_for(p)).__name__
+        self.assertEqual({p: style(p) for p in ("cli", "local", "telegram", "discord", "mattermost", "matrix")},
+                         {"cli": "Ansi", "local": "Ansi", "telegram": "Telegram", "discord": "Markdown",
+                          "mattermost": "Markdown", "matrix": "Markdown"})
+        for p in ("slack", "whatsapp", "whatsapp_cloud", "signal", "sms", "email", "bluebubbles", "tui", "desktop",
+                  "", None, "something-new"):
+            self.assertEqual(style(p), "Plain", p)
+        row = waiting_module.Row(n=1, id="r_1", who="Ana", kind="direct", age="2h", replies=0, mentioned=False,
+                                 first="*all* of `it` _now_", reply_by=None, reply="**done**", subject="x",
+                                 last_note="n_1")
+        out = waiting_module.render({"state": "list", "rows": [row], "total": 1, "handled": None},
+                                    waiting_module.style_for("slack"))
+        self.assertNotIn("\\", out)
+        self.assertIn("\n    *all* of `it` _now_\n    └ **done**\n", out)
+
+    def test_teammates_text_loses_format_characters_and_separators(self):
+        first_line = waiting_module.first_line
+        self.assertEqual(first_line("Pay\u2028now", False, 100), "Pay")
+        self.assertEqual(first_line("\u2029\nHi", False, 100), "Hi")
+        self.assertEqual(first_line("a\u202eb\u200bc\ufeff\x85d", False, 100), "abc d")
+        names = {"ana": "A\u202ena\u200d\x9b", "bob": "\u200b"}
+        threads = [{"id": "r_1", "kind": "team", "from": "ana", "notes": 2, "teams": ["back\u202eend"],
+                    "first_note": {"id": "n_1", "author": "ana", "created_at": "2026-11-08T10:00:00Z",
+                                   "text": "Q\u2029second"},
+                    "last_note": {"id": "n_2", "author": "bob", "created_at": "2026-11-08T10:00:00Z",
+                                  "text": "R\u2028more"}}]
+        r = waiting_module.rows("oscar", names, threads, waiting_module.unix("2026-11-08T11:00:00Z"))[0]
+        self.assertEqual((r.who, r.kind, r.first, r.reply_by, r.reply), ("Ana", "team @backend", "Q", "bob", "R"))
+        # List numbers are ASCII digits only.
+        self.assertEqual(waiting_module.numbers("1, 3"), [1, 3])
+        for odd in ("²", "١", "1 ²", "-1"):
+            self.assertIsNone(waiting_module.numbers(odd), odd)
+        # A handled thread whose agent has no label says "your agent", never "None".
+        listed = waiting_module.Listed(you="oscar", names={}, rows=[row := waiting_module.Row(
+            n=1, id="r_1", who="Ana", kind="direct", age="2h", replies=0, mentioned=False, first="Q",
+            reply_by=None, reply=None, subject="Q", last_note="n_1")])
+        for by in ({"label": None, "context": None}, {"label": "", "context": ""}, {"label": " \u202e"}):
+            thread = {"pending": False, "delivery": [{"handle": "oscar", "handled_at": "2026-11-08T10:00:00Z",
+                                                      "handled_by": by}]}
+            out = waiting_module.refusal(row, thread, listed, waiting_module.unix("2026-11-08T11:00:00Z"))
+            self.assertRegex(out, r"^Thread 1 \(Ana\) was handled by your agent at \d\d:\d\d(?: on [-\d]+)? · "
+                                  r"nothing sent$")
+        self.assertEqual(listed.rows, [row])
+
+    def test_at_most_max_sessions_lists_are_kept_each_under_two_keys(self):
+        for i in range(waiting_module.MAX_SESSIONS + 1):
+            waiting_module.keep([f"key{i}", f"id{i}"], waiting_module.Listed(you="oscar", names={}))
+        self.assertEqual(len(waiting_module._lists), 2 * waiting_module.MAX_SESSIONS)
+        self.assertIsNone(waiting_module.listed_for(["key0"]))
+        self.assertIsNone(waiting_module.listed_for(["id0"]))
+        self.assertIsNotNone(waiting_module.listed_for(["id1"]))
+
 
 if __name__ == "__main__":
     unittest.main()

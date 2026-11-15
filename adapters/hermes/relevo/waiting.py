@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 import threading
 import time
+import unicodedata
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -24,7 +25,7 @@ LINE_CHARS = 100
 SUBJECT_CHARS = 40
 # The most pages of 50 the list reads (the oldest come last).
 MAX_PAGES = 200
-# The most Hermes sessions whose last list is kept.
+# The most Hermes sessions whose last list is kept (each under its key and its id).
 MAX_SESSIONS = 100
 
 USAGE = "/relevo · /relevo N <your answer> · /relevo N · /relevo seen N · /relevo @name <note>"
@@ -60,7 +61,8 @@ def _name(names: dict, you: str, handle: str) -> str:
     if handle == you:
         return "You"
     name = names.get(handle)
-    return name if isinstance(name, str) and name.strip() else handle
+    name = plain(name).strip() if isinstance(name, str) else ""
+    return name or plain(handle)
 
 
 def cut(text: str, max_chars: int) -> str:
@@ -77,14 +79,21 @@ def cut(text: str, max_chars: int) -> str:
     return text[:at].rstrip() + "…"
 
 
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+def plain(text: str) -> str:
+    """A teammate's text on one line, as the list shows it: control characters (C0, C1) and U+2028/U+2029
+    (line and paragraph separators) become spaces, and Unicode format characters (category Cf: U+202E
+    and the other direction overrides, zero-width spaces and joiners, U+FEFF…) are dropped."""
+    return _CONTROL.sub(" ", "".join(c for c in text if unicodedata.category(c) != "Cf"))
 
 
 def first_line(text: str, mentions: bool, max_chars: int) -> str:
-    """The first line of `text` that is not blank, without control characters and, with
-    `mentions`, without the @ names it starts with: the person knows a note names them."""
-    raw = next((line for line in re.split(r"\r?\n", text or "") if line.strip()), "")
-    line = _CONTROL.sub(" ", raw).strip().lstrip("#").strip()
+    """The first line of `text` that is not blank (U+2028 and U+2029 end a line too), `plain`, and,
+    with `mentions`, without the @ names it starts with: the person knows a note names them."""
+    lines = (plain(line) for line in re.split(r"\r?\n|[\u2028\u2029]", text or ""))
+    line = next((line for line in lines if line.strip()), "").strip().lstrip("#").strip()
     if mentions:
         rest = line
         while re.match(r"@\w", rest) and not rest[1] == "_":
@@ -133,7 +142,7 @@ def host(url: str) -> str:
 
 def _kind(t: dict) -> str:
     if t.get("kind") == "team":
-        teams = [f"@{x}" for x in t.get("teams") or [] if isinstance(x, str)]
+        teams = [f"@{plain(x)}" for x in t.get("teams") or [] if isinstance(x, str)]
         return f"team {' '.join(teams)}" if teams else "team"
     if t.get("kind") == "global":
         return "board"
@@ -370,18 +379,25 @@ def render(shown: dict, style: Plain) -> str:
     return "\n".join(out)
 
 
+# The messaging platforms that show CommonMark as it is, backslash escapes included: there a
+# teammate's text is escaped as relevo mcp's md() does. Elsewhere (Slack's mrkdwn, WhatsApp, Signal,
+# SMS, email…) a backslash would show, or the platform has a markup of its own: plain text.
+MARKDOWN_PLATFORMS = ("discord", "mattermost", "matrix")
+
+
 def style_for(platform: Any) -> Plain:
     """How /relevo draws its answer where it was typed: colours in the classic CLI (it prints a command's
-    answer with its ANSI codes), Telegram's own markdown, markdown on the other messaging platforms,
-    and plain text in a pager (TUI, desktop) or where the platform is not said."""
+    answer with its ANSI codes), Telegram's own markdown, markdown where the platform shows CommonMark
+    with its backslash escapes (MARKDOWN_PLATFORMS), and plain text anywhere else: a pager (TUI,
+    desktop), a platform with another markup or none, or where the platform is not said."""
     p = str(platform or "").strip().lower()
     if p in ("cli", "local"):
         return Ansi()
     if p == "telegram":
         return Telegram()
-    if p in ("", "tui", "desktop", "acp", "api_server", "codex", "webhook", "cron", "kanban", "tool"):
-        return Plain()
-    return Markdown()
+    if p in MARKDOWN_PLATFORMS:
+        return Markdown()
+    return Plain()
 
 
 # -- the numbers, per Hermes session ------------------------------------------------------------------
@@ -397,7 +413,8 @@ def keep(keys: list, listed: Listed) -> None:
         for key in keys:
             _lists[key] = listed
             _lists.move_to_end(key)
-        while len(_lists) > MAX_SESSIONS:
+        # A session's list is kept under two keys: MAX_SESSIONS counts the lists, not the keys.
+        while len({id(v) for v in _lists.values()}) > MAX_SESSIONS:
             _lists.popitem(last=False)
 
 
@@ -451,7 +468,8 @@ def numbers(thread: Any) -> Optional[list]:
     if not isinstance(thread, str):
         return None
     parts = [p for p in re.split(r"[ ,]", thread) if p]
-    if not parts or not all(p.isdigit() for p in parts):
+    # ASCII digits only: str.isdigit takes "²" or "١", which int() refuses or reads otherwise.
+    if not parts or not all(re.fullmatch(r"[0-9]+", p) for p in parts):
         return None
     return [int(p) for p in parts]
 
@@ -587,9 +605,11 @@ def refusal(row: Row, thread: dict, listed: Listed, now: int) -> Optional[str]:
             out += "was handled"
             by = d.get("handled_by")
             if isinstance(by, dict):
-                out += f" by your {by.get('label')}"
-                if isinstance(by.get("context"), str):
-                    out += f" in {by['context']}"
+                label = plain(by["label"]).strip() if isinstance(by.get("label"), str) else ""
+                out += f" by your {label or 'agent'}"
+                context = plain(by["context"]).strip() if isinstance(by.get("context"), str) else ""
+                if context:
+                    out += f" in {context}"
             out += f" at {clock(at, now)}"
         else:
             out += "is no longer waiting on you"
