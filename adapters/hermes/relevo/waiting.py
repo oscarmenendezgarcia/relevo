@@ -769,15 +769,31 @@ def request(args: str, listed: Optional[Listed]) -> dict:
     return {"refuse": USAGE}
 
 
+# The chat types of a messaging gateway's `source` (gateway.session.SessionSource.chat_type) that are
+# a private chat with the person: "dm" (Hermes' own), and the names other code gives it. A surface
+# with no source (the CLI, the TUI, the desktop app) is the person's own too.
+PRIVATE_CHATS = ("", "dm", "direct", "private")
+
+GROUP_REFUSAL = "/relevo only works in a private chat with me."
+
+
+def private(source: Any) -> bool:
+    """Whether /relevo was typed where only the person reads the answer."""
+    return str(getattr(source, "chat_type", "") or "").strip().lower() in PRIVATE_CHATS
+
+
 def command(ctx: Any) -> Callable:
     """The /relevo handler for ctx.register_command."""
 
     def relevo(raw_args: str = "", *, session_key: str = "", session_id: str = "", platform: str = "",
-               **_: Any) -> Optional[str]:
+               source: Any = None, **_: Any) -> Optional[str]:
         # A note in a Relevo thread is a teammate's message: their `/relevo` is never run there, or
         # the person's list would be written in that thread for them to read.
         if str(platform or "").lower() == "relevo":
             return None
+        # A group, a channel or a thread in one: the person's list is theirs, not the room's.
+        if not private(source):
+            return GROUP_REFUSAL
         style = style_for(platform)
         keys = command_keys(session_key, session_id)
         args = str(raw_args or "").strip()

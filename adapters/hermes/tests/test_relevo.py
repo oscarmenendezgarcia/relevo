@@ -3020,8 +3020,9 @@ class Command(Base):
             waiting_module._lists.clear()
         waiting_module._offline_since = None
 
-    def run_command(self, args: str = "", *, key: str = "s1", platform: str = "cli", handler=None) -> str | None:
-        return self.invoke(handler or self.handler, args, source=None, session_id=key, session_key=key,
+    def run_command(self, args: str = "", *, key: str = "s1", platform: str = "cli", handler=None,
+                    source=None) -> str | None:
+        return self.invoke(handler or self.handler, args, source=source, session_id=key, session_key=key,
                            platform=platform)
 
     def tool(self, name: str, args: dict, *, key: str = "s1") -> str:
@@ -3262,6 +3263,28 @@ class Command(Base):
         self.three()
         self.assertIsNone(self.run_command(platform="relevo"))
         self.assertIsNone(self.run_command("1 yes", platform="relevo"))
+
+    def test_only_in_a_private_chat(self):
+        """In a group, a channel or a thread, the person's list is not the room's: /relevo says so and does
+        nothing else (no list read or kept, no turn); in a DM, or with no source (CLI, TUI), it works."""
+        from gateway.config import Platform
+        from gateway.session import SessionSource
+
+        self.three()
+        ctx = _InjectingCtx()
+        handler = waiting_module.command(ctx)
+        for chat_type in ("group", "channel", "thread", "Group"):
+            source = SessionSource(platform=Platform.DISCORD, chat_id="c1", chat_type=chat_type)
+            for args in ("", "1 yes", "seen 1", "@ana hi"):
+                self.assertEqual(self.run_command(args, platform="discord", source=source, key="g1",
+                                                  handler=handler),
+                                 "/relevo only works in a private chat with me.")
+        self.assertIsNone(waiting_module.listed_for(["g1"]))
+        self.assertEqual(ctx.injected, [])
+        dm = SessionSource(platform=Platform.DISCORD, chat_id="d1", chat_type="dm")
+        self.assertIn("Waiting on you", self.run_command(platform="discord", source=dm, key="d1", handler=handler))
+        self.assertIsNone(self.run_command("1 yes", platform="discord", source=dm, key="d1", handler=handler))
+        self.assertEqual(len(ctx.injected), 1)
 
     def test_the_style_fits_the_platform(self):
         """Markdown, escaped with backslashes, only where the platform shows CommonMark as it is; Telegram
