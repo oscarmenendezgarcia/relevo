@@ -444,6 +444,8 @@ class Api:
         }
         if CLIENT:
             headers["Relevo-Client"] = CLIENT
+        # Which agent this is, as teammates see it (a note's `via`: "via Hermes").
+        headers["Relevo-Agent"] = "Hermes"
         if self.settings.context:
             headers["Relevo-Context"] = self.settings.context
         return {"method": method, "url": self.settings.url + path, "headers": headers,
