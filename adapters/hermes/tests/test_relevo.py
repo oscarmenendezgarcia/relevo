@@ -3165,6 +3165,35 @@ class Command(Base):
             self.assertEqual(title("discord"), "**Waiting on you · 3**")
             self.assertEqual(title("tui"), "Waiting on you · 3")
 
+    def test_a_server_before_0_6_0_lists_without_the_count_and_still_reads_only(self):
+        """A 0.5.0 server refuses `handled_since` (400, an unknown parameter): the first page is asked again
+        without it, the title has no count, and nothing is delivered, handled or claimed."""
+        ids = self.three()
+        real, asked = client.Api.timeline, []
+
+        def as_0_5_0(api, params):
+            asked.append(dict(params))
+            if "handled_since" in params:
+                raise client.RelevoError(400, "BAD_REQUEST", "unknown parameter 'handled_since'")
+            return real(api, params)
+
+        client.Api.timeline = as_0_5_0
+        try:
+            out = self.run_command(platform="tui")
+        finally:
+            client.Api.timeline = real
+        self.assertTrue(out.startswith("Waiting on you · 3\n\n 1  Bob · board"), out)
+        self.assertEqual([("handled_since" in p, p.get("before")) for p in asked], [(True, None), (False, None)])
+        self.assertTrue(all(p["tab"] == "threads" and p["show"] == "waiting" for p in asked), asked)
+        # Its numbers work all the same.
+        self.assertEqual(len(waiting_module.listed_for(["s1"]).rows), 3)
+        for thread_id in ids:
+            thread = self.ana.thread(thread_id)
+            oscar = next(d for d in thread["delivery"] if d["handle"] == "oscar")
+            self.assertIsNone(oscar.get("delivered_at"), oscar)
+            self.assertIsNone(oscar.get("handled_at"), oscar)
+            self.assertIsNone(oscar.get("claimed_by"), oscar)
+
     def test_not_connected_and_unreachable(self):
         saved = {k: os.environ.pop(k, None) for k in ("RELEVO_URL", "RELEVO_TOKEN", "RELEVO_CONFIG")}
         try:
