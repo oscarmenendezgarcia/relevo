@@ -633,6 +633,18 @@ mod tests {
             .unwrap()
     }
 
+    /// `handled_since` counts from its own index, not the person's every row.
+    #[test]
+    fn the_handled_count_reads_its_index() {
+        let plan = plan(HANDLED_SQL, 2);
+        assert!(
+            plan[0].contains(
+                "USING COVERING INDEX participants_handled (person_id=? AND handled_at>?)"
+            ),
+            "{plan:#?}"
+        );
+    }
+
     /// A page reads the person's rows from `participants_timeline`, already newest first, and
     /// stops after the page: no sort, and no table read whole.
     #[test]
