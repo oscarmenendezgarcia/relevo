@@ -1534,7 +1534,10 @@ mod tests {
         assert!(took >= patience, "{took:?}");
         // Bounded, not exact: SQLite's busy handler sleeps in coarser steps on macOS (about
         // 1.1-1.3 s here for 400 ms on GitHub's runners), so allow 2 s over the patience.
-        assert!(took < patience + std::time::Duration::from_secs(2), "{took:?}");
+        assert!(
+            took < patience + std::time::Duration::from_secs(2),
+            "{took:?}"
+        );
         holder.execute_batch("ROLLBACK").unwrap();
         drop(holder);
         std::fs::remove_dir_all(&dir).unwrap();
