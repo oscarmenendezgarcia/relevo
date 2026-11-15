@@ -254,9 +254,14 @@ impl Client {
     /// `GET /api/timeline?<query>`: read only, it delivers nothing, and the server ignores the
     /// session headers (docs/protocol.md, "timeline").
     pub async fn timeline(&self, query: &str) -> Result<Value, Error> {
+        self.timeline_within(query, TIMEOUT).await
+    }
+
+    /// `timeline`, waiting at most `timeout` for the answer.
+    pub async fn timeline_within(&self, query: &str, timeout: Duration) -> Result<Value, Error> {
         let req = self.http.get(format!("{}/api/timeline?{query}", self.url));
         shaped(
-            self.call(req, TIMEOUT).await,
+            self.call(req, timeout).await,
             &[
                 ("threads", Value::is_array),
                 ("counts", Value::is_object),

@@ -465,6 +465,10 @@ const NO_TIMELINE: &str = "This Relevo server has no timeline, which /relevo rea
 /// The most pages of 50 `waiting` reads (the oldest come last).
 const MAX_PAGES: usize = 200;
 
+/// How long `waiting` waits for each page before it says the server is out of reach: 8 seconds,
+/// as pi's and Hermes' /relevo do.
+const LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
 /// Every thread waiting on the person, oldest first, from the read-only timeline: with who they
 /// are, the names it gave, how many wait, and how many they handled at or after `since` (unix
 /// seconds). The first page asks that count too (`handled_since`); a server before 0.6.0 refuses
@@ -481,7 +485,7 @@ async fn waiting_threads(client: &Client, since: i64) -> Result<Waiting, Error> 
         } else if let Some(since) = handled_since {
             query.push_str(&format!("&handled_since={since}"));
         }
-        let v = match client.timeline(&query).await {
+        let v = match client.timeline_within(&query, LIST_TIMEOUT).await {
             Err(Error::Api { status: 400, .. }) if before.is_none() && handled_since.is_some() => {
                 handled_since = None;
                 continue;
