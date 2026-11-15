@@ -9,9 +9,10 @@ use std::time::Duration;
 
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::model::{
-    CustomNotification, ErrorData, GetPromptRequestParams, GetPromptResponse, GetPromptResult,
-    Implementation, ListPromptsResult, PaginatedRequestParams, Prompt, PromptArgument,
-    PromptMessage, Role, ServerCapabilities, ServerConfig, ServerNotification,
+    CallToolRequestParams, CallToolResponse, CustomNotification, ErrorData, GetPromptRequestParams,
+    GetPromptResponse, GetPromptResult, Implementation, ListPromptsResult, PaginatedRequestParams,
+    Prompt, PromptArgument, PromptMessage, Role, ServerCapabilities, ServerConfig,
+    ServerNotification,
 };
 use rmcp::service::{Peer, RequestContext, RoleServer};
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
@@ -892,6 +893,22 @@ impl Relevo {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for Relevo {
+    /// As `tool_handler` makes it, after learning which agent this is: MCP from 2026-07-28 (Claude
+    /// Code's) has no `initialize`, and says the client's `clientInfo` with every request.
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        if let (Ok(client), Some(info)) = (self.client(), context.client_info())
+            && let Some(agent) = agent_name(info.title.as_deref(), &info.name)
+        {
+            let _ = client.agent.set(agent);
+        }
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        self.tool_router.call(tcc).await
+    }
+
     fn get_info(&self) -> ServerConfig {
         let caps = ServerCapabilities::builder();
         let caps = if self.channel {
@@ -1007,7 +1024,8 @@ pub async fn run(channel: bool) -> anyhow::Result<()> {
         server.failed.clone(),
     );
     let service = server.serve(rmcp::transport::stdio()).await?;
-    // Every request from now on says which agent this is, as its MCP client named itself.
+    // Every request from now on says which agent this is, as its MCP client named itself at
+    // `initialize` (before MCP 2026-07-28; from then on, with each request: see `call_tool`).
     if let (Ok(client), Some(info)) = (&client, service.peer().peer_info())
         && let Some(agent) = agent_name(info.client_info.title.as_deref(), &info.client_info.name)
     {

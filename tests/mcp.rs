@@ -118,21 +118,8 @@ impl Mcp {
     }
 
     /// Runs `cmd` (a `relevo mcp`) and initializes it.
-    async fn spawn(mut cmd: Command) -> Mcp {
-        let mut child = cmd
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap();
-        let mut mcp = Mcp {
-            stdin: child.stdin.take().unwrap(),
-            stdout: BufReader::new(child.stdout.take().unwrap()).lines(),
-            child,
-            next: 1,
-            notifications: vec![],
-            init: Value::Null,
-        };
+    async fn spawn(cmd: Command) -> Mcp {
+        let mut mcp = Mcp::run(cmd);
         mcp.init = mcp
             .request(
                 "initialize",
@@ -147,6 +134,24 @@ impl Mcp {
         mcp.write(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
             .await;
         mcp
+    }
+
+    /// Runs `cmd` (a `relevo mcp`), without initializing it.
+    fn run(mut cmd: Command) -> Mcp {
+        let mut child = cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        Mcp {
+            stdin: child.stdin.take().unwrap(),
+            stdout: BufReader::new(child.stdout.take().unwrap()).lines(),
+            child,
+            next: 1,
+            notifications: vec![],
+            init: Value::Null,
+        }
     }
 
     async fn write(&mut self, msg: Value) {
@@ -1032,6 +1037,38 @@ async fn connect_and_mcp_report_their_client_and_version() {
         assert_eq!(session.client.as_deref(), Some(mine.as_str()));
         assert!(!session.client_inferred);
     }
+}
+
+/// MCP from 2026-07-28, as Claude Code 2.1.325 speaks it: no `initialize`, the client's
+/// `clientInfo` in each request's `_meta`. The agent is still learnt, from the first tool call.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_without_initialize_says_its_agent_with_each_request() {
+    let s = server(&["ana"]).await;
+    let home = s.dir.join("home-stateless");
+    std::fs::create_dir(&home).unwrap();
+    let mut cmd = relevo(&home);
+    cmd.arg("mcp")
+        .env("RELEVO_URL", &s.url)
+        .env("RELEVO_TOKEN", &s.tokens["ana"])
+        .env("RELEVO_CONTEXT", "");
+    let mut mcp = Mcp::run(cmd);
+    let meta = json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": { "name": "gemini-cli", "version": "0" },
+        "io.modelcontextprotocol/clientCapabilities": {}
+    });
+    mcp.request("server/discover", json!({ "_meta": meta }))
+        .await;
+    let r = mcp
+        .request(
+            "tools/call",
+            json!({ "name": "inbox", "arguments": {}, "_meta": meta }),
+        )
+        .await;
+    assert_ne!(r["isError"], true, "{r}");
+    let sessions = db::list_sessions(&s.app.db(), Some("ana"), db::now_unix()).unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].agent.as_deref(), Some("Gemini CLI"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
