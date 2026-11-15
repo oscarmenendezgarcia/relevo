@@ -249,7 +249,7 @@ test("shutdown ends the session on the server, so the threads it holds show agai
     assert.match(await ext.tool("relevo_send", { thread: opened.thread, claim: true }, home), /this session has it now/);
     await api(server, ana, "POST", "/api/send", { thread: opened.thread, text: "It is in src/index.ts." });
     thread = await api(server, oscar, "GET", `/api/threads/${opened.thread}`, undefined, "shutdown-checker");
-    assert.equal(holder()?.label, "pi laptop");
+    assert.equal(holder()?.label, "pi");
     const before = await api(server, oscar, "GET", "/api/inbox", undefined, "shutdown-checker");
     assert.equal(before.threads.find((t: any) => t.id === opened.thread), undefined, "held by the pi session");
 
@@ -268,8 +268,10 @@ test("shutdown ends the session on the server, so the threads it holds show agai
 
 test("ending the session on shutdown is best effort: a server that never answers holds it up 2 seconds at most", async () => {
   const deletes: unknown[] = [];
+  const agents = new Set<unknown>();
   // Answers nothing, not even the waiting inbox request.
   const fake = createServer((req) => {
+    agents.add(req.headers["relevo-agent"]);
     if (req.method === "DELETE" && req.url === "/api/session") deletes.push(req.headers["relevo-session"]);
   });
   await new Promise<void>((r) => fake.listen(0, "127.0.0.1", r));
@@ -284,6 +286,8 @@ test("ending the session on shutdown is best effort: a server that never answers
     assert.ok(took >= 1500 && took < 3500, `shutdown took ${took} ms`);
     assert.equal(deletes.length, 1);
     assert.match(String(deletes[0]), /^pi-[A-Za-z0-9_-]+$/);
+    // Every request says which agent this is.
+    assert.deepEqual([...agents], ["pi"]);
     await ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, "tui")); // twice: no second request
     assert.equal(deletes.length, 1);
   } finally {

@@ -210,7 +210,8 @@ test("numbers act on the last list, after reading the thread again: a reply, a r
   assert.equal(thread.notes.at(-1).text, "Yes, the onboarding copy is final.");
   assert.equal(ext.status(), "<muted>relevo</muted><warning> ● 2</warning>");
 
-  // Another session of Oscar's handles thread 3: number 3 sends nothing and says who did, when.
+  // Another session of Oscar's handles thread 3 (one that says no agent: its token's label): number 3 sends
+  // nothing and says who did, when.
   await api(s, oscar, "GET", `/api/threads/${third}`, undefined, "claude-session-1");
   await post(oscar, { thread: third, text: "Sure, Friday works." }, "claude-session-1");
   const handledAt = (await api(s, oscar, "GET", `/api/threads/${third}`, undefined, "claude-session-1")).delivery.find(

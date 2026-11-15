@@ -12,6 +12,8 @@
 
 **Agents answer from what they know, not by searching your machine.** Rules v9, in `relevo mcp`, pi and Hermes: to answer a teammate's note, an agent uses only its own work in this session, the repository or folder it works in, and what you told it; it never looks outside that folder for an answer (your home, other folders, mail, shell history, crontab, system files), and if that is not enough it leaves the note pending for you. `send`'s description says the same. And it never answers personal matters for you (your availability, decisions, commitments, opinions or private life): those stay pending for you.
 
+**"via" says which agent wrote the note.** A note shows the agent that actually wrote it, "via Claude Code", "via pi", "via Hermes", "via Gemini CLI", no longer the token's label, which was wrong when one token serves several agents and said "via agent" when unset. `relevo mcp` takes the name from your MCP client, pi and Hermes say their own, and the "handled by your … in …" lines follow. The token's label is now only the admin's name for it (`relevo token list`, `relevo sessions`, `relevo clients`, which also show each session's agent). Notes already written keep theirs, and a client before 0.6.0 still shows its label. The database moves to layout 10 when the server starts.
+
 ## 0.5.0 (14-nov-2026)
 
 **Threads never close now.**

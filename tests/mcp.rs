@@ -42,8 +42,7 @@ async fn server_at(handles: &[&str], teams: &[(&str, &[&str])], clock: Clock) ->
         for h in handles {
             let about = format!("{h} things");
             let name = h[..1].to_uppercase() + &h[1..];
-            let t =
-                db::invite(&conn, h, &name, Some(&about), "Claude Code", db::now_unix()).unwrap();
+            let t = db::invite(&conn, h, &name, Some(&about), "laptop", db::now_unix()).unwrap();
             tokens.insert(h.to_string(), t.secret);
         }
         for (name, members) in teams {
@@ -118,34 +117,41 @@ impl Mcp {
     }
 
     /// Runs `cmd` (a `relevo mcp`) and initializes it.
-    async fn spawn(mut cmd: Command) -> Mcp {
-        let mut child = cmd
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap();
-        let mut mcp = Mcp {
-            stdin: child.stdin.take().unwrap(),
-            stdout: BufReader::new(child.stdout.take().unwrap()).lines(),
-            child,
-            next: 1,
-            notifications: vec![],
-            init: Value::Null,
-        };
+    async fn spawn(cmd: Command) -> Mcp {
+        let mut mcp = Mcp::run(cmd);
         mcp.init = mcp
             .request(
                 "initialize",
                 json!({
                     "protocolVersion": "2025-06-18",
                     "capabilities": {},
-                    "clientInfo": { "name": "test", "version": "0" }
+                    // A title, as Claude Code gives, and a name that maps to something else: the
+                    // title is the agent (not the name, nor the token's label, "laptop").
+                    "clientInfo": { "name": "claude-code-test", "title": "Claude Code", "version": "0" }
                 }),
             )
             .await;
         mcp.write(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
             .await;
         mcp
+    }
+
+    /// Runs `cmd` (a `relevo mcp`), without initializing it.
+    fn run(mut cmd: Command) -> Mcp {
+        let mut child = cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        Mcp {
+            stdin: child.stdin.take().unwrap(),
+            stdout: BufReader::new(child.stdout.take().unwrap()).lines(),
+            child,
+            next: 1,
+            notifications: vec![],
+            init: Value::Null,
+        }
     }
 
     async fn write(&mut self, msg: Value) {
@@ -1003,6 +1009,8 @@ async fn a_server_that_does_not_answer_holds_up_the_exit_only_briefly() {
     );
     // A 0.4 client: a reply's mentions are read (docs/protocol.md, `send`).
     assert!(head.to_lowercase().contains("relevo-mentions: 1"), "{head}");
+    // The agent, as the MCP client named itself at `initialize` (its title).
+    assert!(head.contains("relevo-agent: Claude Code"), "{head}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1029,6 +1037,56 @@ async fn connect_and_mcp_report_their_client_and_version() {
         assert_eq!(session.client.as_deref(), Some(mine.as_str()));
         assert!(!session.client_inferred);
     }
+}
+
+/// MCP from 2026-07-28, as Claude Code 2.1.325 speaks it: no `initialize`, the client's
+/// `clientInfo` in each request's `_meta`. The agent is learnt from its first request,
+/// `server/discover`, before the channel's first inbox request.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_without_initialize_says_its_agent_with_each_request() {
+    let s = server(&["ana"]).await;
+    let home = s.dir.join("home-stateless");
+    std::fs::create_dir(&home).unwrap();
+    let mut cmd = relevo(&home);
+    cmd.args(["mcp", "--channel"])
+        .env("RELEVO_URL", &s.url)
+        .env("RELEVO_TOKEN", &s.tokens["ana"])
+        .env("RELEVO_CONTEXT", "");
+    let mut mcp = Mcp::run(cmd);
+    let meta = json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": { "name": "gemini-cli", "version": "0" },
+        "io.modelcontextprotocol/clientCapabilities": {}
+    });
+    mcp.request("server/discover", json!({ "_meta": meta }))
+        .await;
+    // The session starts with the first other request (rmcp's), and with it the channel, whose
+    // waiting inbox request is the first to reach the server.
+    mcp.request("tools/list", json!({ "_meta": meta })).await;
+    let agents = || {
+        db::list_sessions(&s.app.db(), Some("ana"), db::now_unix())
+            .unwrap()
+            .into_iter()
+            .map(|s| s.agent)
+            .collect::<Vec<_>>()
+    };
+    for _ in 0..100 {
+        if !agents().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(agents(), [Some("Gemini CLI".to_string())]);
+    let r = mcp
+        .request(
+            "tools/call",
+            json!({ "name": "inbox", "arguments": {}, "_meta": meta }),
+        )
+        .await;
+    assert_ne!(r["isError"], true, "{r}");
+    let sessions = db::list_sessions(&s.app.db(), Some("ana"), db::now_unix()).unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].agent.as_deref(), Some("Gemini CLI"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -180,9 +180,11 @@ Check it from another machine: `curl -s https://relevo.example.com/health`.
 Each person gets a token per agent. The token is printed once; only its hash is stored:
 
 ```
-relevo invite ana --name "Ana" --about "payments backend" --label "Claude Code laptop"
-relevo token add ana --label "pi desktop"        # another agent of hers
+relevo invite ana --name "Ana" --about "payments backend" --label "ana's laptop"
+relevo token add ana --label "ana's desktop"     # another token of hers
 ```
+
+The label is your name for the token, for your own lists (`relevo token list`, `relevo sessions`, `relevo clients`). Teammates see the agent that wrote each note, as it says itself: "via Claude Code", "via pi", "via Hermes"; the label only when the agent is not known (a client before 0.6.0, which does not say it).
 
 Send each token to its person privately (a password manager, a direct message you delete afterwards), with the server's address (`https://192.168.1.50:7878` with `relevo serve --tls`, or `https://relevo.example.com` behind a proxy) and, with `relevo serve --tls`, the certificate's fingerprint (`relevo tls-fingerprint`). `--about` is the one line other agents read to decide whom to ask; change it with `relevo about ana "…"`.
 
@@ -290,6 +292,8 @@ After the migration, every thread closed under 0.4.x is open, and handled by eac
 **Release notes, from 0.5.0 on.** Each time the server starts on a newer version, it posts that version's section of the CHANGELOG on the global board, once, as the person `relevo` (name "Relevo"): everyone sees it, nobody has to answer it (docs/protocol.md, "Release notes"). A new database posts nothing; a restart, or going back to an older version, posts nothing either. To turn them off, start the server with `--no-release-notes`, or set `RELEVO_RELEASE_NOTES=0` (for the systemd unit, in its environment): the version is still recorded, so turning them on later does not post an old version's notes. `relevo` is reserved from 0.5.0: the server makes that person when it first starts, and from then on nobody can be invited under it, nor a team named so. A server where a person or a team already had the name keeps them as they are (the person stays theirs to manage) and posts no release notes, with a warning in the log.
 
 To go back to 0.4.x: the backup from step 1 in place of the database, then the 0.4.x binary. Notes written since the backup are lost.
+
+**From 0.5.x to 0.6.0.** A note now shows the agent that wrote it ("via Claude Code", "via pi"), not the token's label. 0.6.0 moves the database from layout 9 to 10, in place (and an older one through the earlier steps first): everything stays; each session keeps the agent it says it is. Upgrade as above (`relevo backup` first, then `deploy/install.sh --enable ./relevo-<0.6.0>`); the server logs the step as it starts. Until a teammate's client updates itself, its notes keep showing the token's label, as before; notes already written keep theirs. `relevo clients` and `relevo sessions` show the agent each session says, in a last column (`-` while it says none). To go back to 0.5.x: the backup in place of the database, then the 0.5.x binary.
 
 ## 7. Each teammate: connect your agent
 

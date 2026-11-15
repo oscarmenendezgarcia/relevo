@@ -718,7 +718,7 @@ fn claim(claimed_by: Option<i64>, session: &Session) -> Option<&'static str> {
 /// order: the thread's participant rows by their key, and each holder's session, token and handle
 /// by theirs. (Lapsed claims were ended when the request was seen.)
 const HELD_BY_SQL: &str = "
-SELECT pe.handle, tk.label, p.claimed_context, p.claimed_at
+SELECT pe.handle, coalesce(cs.agent, tk.label), p.claimed_context, p.claimed_at
 FROM participants p
 JOIN sessions cs ON cs.id = p.claimed_by
 JOIN tokens tk ON tk.id = cs.token_id
@@ -751,7 +751,7 @@ fn held_by(conn: &Connection, thread: &str, me: i64) -> Result<Vec<HolderOut>, A
 fn delivery(conn: &Connection, thread: &str) -> Result<Vec<Delivery>, ApiError> {
     let mut stmt = conn.prepare(&format!(
         "SELECT pe.handle, n.id, p.delivered_at, p.delivered_label, p.delivered_context,
-                ct.label, p.claimed_context, p.claimed_at,
+                coalesce(cs.agent, ct.label), p.claimed_context, p.claimed_at,
                 (SELECT count(*) FROM sessions s
                  LEFT JOIN session_threads st ON st.session_id = s.id AND st.thread_id = p.thread_id
                  WHERE s.person_id = p.person_id
@@ -1254,7 +1254,7 @@ fn write_as(
                     thread_id,
                     caller.person_id,
                     caller.token_id,
-                    caller.label,
+                    session.label,
                     text,
                     now
                 ],

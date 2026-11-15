@@ -86,7 +86,7 @@ enum Command {
     },
     /// List everyone, active or not.
     People,
-    /// List sessions seen in the last 7 days: label, session id, context, last seen, client.
+    /// List sessions seen in the last 7 days: label, session id, context, last seen, client, agent.
     Sessions { handle: Option<String> },
     /// List the client and version each session seen in the last 7 days runs, and whether it is
     /// older than this server (outdated first), with a summary line.
@@ -633,7 +633,7 @@ fn release_notes(conn: &rusqlite::Connection, no_release_notes: bool, now: i64) 
 }
 
 /// `relevo clients`: a tab-separated line per session (handle, label, session, context, client,
-/// version, last seen, standing), outdated first, and a summary of them all. With `outdated`,
+/// version, last seen, standing, agent), outdated first, and a summary of them all. With `outdated`,
 /// only the outdated and unknown ones are listed.
 fn clients(sessions: Vec<db::SessionInfo>, server: &str, outdated: bool) -> (Vec<String>, String) {
     use relevo::release::Standing;
@@ -664,13 +664,14 @@ fn clients(sessions: Vec<db::SessionInfo>, server: &str, outdated: bool) -> (Vec
         .map(|(standing, s)| {
             let (name, version) = s.client_version().unwrap_or(("unknown", "-".to_string()));
             format!(
-                "{}\t{}\t{}\t{}\t{name}\t{version}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{name}\t{version}\t{}\t{}\t{}",
                 s.handle,
                 s.label,
                 s.session.as_deref().unwrap_or("default"),
                 s.context.as_deref().unwrap_or("general"),
                 db::rfc3339(s.last_seen),
-                standing.as_str()
+                standing.as_str(),
+                s.agent.as_deref().unwrap_or("-")
             )
         })
         .collect();
@@ -880,14 +881,15 @@ async fn main() -> Result<()> {
         Command::Sessions { handle } => {
             for s in db::list_sessions(&conn, handle.as_deref(), now)? {
                 println!(
-                    "{}\t{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}",
                     s.handle,
                     s.label,
                     s.session.as_deref().unwrap_or("default"),
                     s.context.as_deref().unwrap_or("general"),
                     db::rfc3339(s.last_seen),
                     s.client_version()
-                        .map_or("unknown".to_string(), |(name, v)| format!("{name}/{v}"))
+                        .map_or("unknown".to_string(), |(name, v)| format!("{name}/{v}")),
+                    s.agent.as_deref().unwrap_or("-")
                 );
             }
         }

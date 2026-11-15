@@ -102,7 +102,7 @@ test("an inbox answer lost on the way is handed over on the next answer, once", 
     const opened = await api(server, ana, "POST", "/api/send", { text: "@oscar Lost answer: is the cache warm?" });
     await until(() => proxy.dropped === 1);
     // The server delivered it to this pi session: it is no longer new there.
-    assert.equal((await oscarDelivery(opened.thread)).by.label, "pi laptop");
+    assert.equal((await oscarDelivery(opened.thread)).by.label, "pi");
 
     await until(() => ext.seen.length === 1);
     assert.equal(ext.sent.length, 1);

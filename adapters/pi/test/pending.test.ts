@@ -89,7 +89,7 @@ test("a thread the agent wrote in, marked seen or read whole while it waited is 
     await ext.session.finishTurn();
     await sleep(1500);
     assert.deepEqual(handed(ext), [first], "nothing more handed over");
-    assert.equal((await oscarDelivery(later[1])).handled_by.label, "pi laptop");
+    assert.equal((await oscarDelivery(later[1])).handled_by.label, "pi");
 
     // A new note in a thread marked seen makes it pending again, and it is handed over.
     await api(server, ana, "POST", "/api/send", { thread: later[1], text: "One more thing: the logs?" });
@@ -121,7 +121,7 @@ test("killed right after a note reached it: the next pi session gets the note wh
   }
   // For the sender: it reached oscar's pi, and nobody has handled it.
   const seen = await oscarDelivery(thread);
-  assert.equal(seen.by.label, "pi laptop");
+  assert.equal(seen.by.label, "pi");
   assert.equal(seen.handled_at, null);
 
   const ext = extension();
@@ -135,7 +135,7 @@ test("killed right after a note reached it: the next pi session gets the note wh
     assert.match(ext.seen[0].content, /New notes \(1\):[\s\S]*Kill test: is the backup running\?/);
     // This one answers it: handled.
     await ext.tool("relevo_send", { thread, text: "Yes, every night at 3." }, home);
-    assert.equal((await oscarDelivery(thread)).handled_by.label, "pi laptop");
+    assert.equal((await oscarDelivery(thread)).handled_by.label, "pi");
   } finally {
     await ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, "tui"));
   }

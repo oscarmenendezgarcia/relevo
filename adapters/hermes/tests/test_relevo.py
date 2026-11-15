@@ -1622,6 +1622,15 @@ class Sessions(Base):
         for session in (a.settings.session, client.resolve_settings().session):
             self.assertIn(session, by_session, rows)
             self.assertEqual(by_session[session][4:6], ["hermes", version])
+            # And which agent it is (`Relevo-Agent`), the last column.
+            self.assertEqual(by_session[session][8], "Hermes")
+
+    async def test_every_request_says_relevo_agent_hermes(self):
+        """Relevo-Agent: Hermes, the agent teammates see (a note's `via`), from the gateway and the tools."""
+        a = self.make_adapter()
+        for settings in (a.settings, client.resolve_settings()):
+            req = client.Api(settings)._request("GET", "/api/inbox")
+            self.assertEqual(req["headers"]["Relevo-Agent"], "Hermes")
 
     async def test_a_claim_is_a_state_not_a_note(self):
         """send(thread, claim: true) with no text: the thread is this session's, nothing is written."""

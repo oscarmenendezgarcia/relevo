@@ -797,9 +797,22 @@ pub fn cache_dir(env: &impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
     }
 }
 
-/// The machine's update lock, held while the returned file is open; `None` when another
-/// `relevo update` holds it.
-pub fn lock(cache: &Path) -> Result<Option<File>> {
+/// The machine's update lock, held until it is dropped.
+pub struct Lock(File);
+
+impl Drop for Lock {
+    /// Unlocked here, not left to closing the file: a process this one starts (`tar`, `git`) gets
+    /// a copy of the file until it runs its program, and while it has one, closing ours alone
+    /// would leave the lock held.
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        // SAFETY: a file descriptor this lock owns.
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+/// The machine's update lock; `None` when another `relevo update` holds it.
+pub fn lock(cache: &Path) -> Result<Option<Lock>> {
     use std::os::fd::AsRawFd;
     fs::DirBuilder::new()
         .recursive(true)
@@ -816,7 +829,7 @@ pub fn lock(cache: &Path) -> Result<Option<File>> {
         .with_context(|| format!("opening {}", path.display()))?;
     // SAFETY: a file descriptor this function owns.
     let r = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    Ok((r == 0).then_some(file))
+    Ok((r == 0).then_some(Lock(file)))
 }
 
 /// Whether an `--auto` check is due at `now` (none in the last hour); when it is, records `now`.

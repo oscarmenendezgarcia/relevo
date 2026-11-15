@@ -1,7 +1,8 @@
 //! Bearer-token authentication: a request acts as the person who owns the token, in the
 //! session named by the `Relevo-Session` and `Relevo-Context` headers (and, through 0.x, with
 //! `Relevo-Mentions` saying whether a reply's mentions are read). `Relevo-Client` says which
-//! client the session runs, for the admin (`relevo clients`).
+//! client the session runs, for the admin (`relevo clients`); `Relevo-Agent`, which agent it is,
+//! for everyone (a note's `via`).
 
 use std::sync::Arc;
 
@@ -33,12 +34,16 @@ pub struct Caller {
     pub client: Option<String>,
     /// Whether `client` was read from the User-Agent rather than said by `Relevo-Client`.
     pub client_inferred: bool,
+    /// `Relevo-Agent`: the agent's name, as teammates see it ("Claude Code", "pi"); `None` when
+    /// absent or not one (see `agent`).
+    pub agent: Option<String>,
 }
 
 const SESSION: HeaderName = HeaderName::from_static("relevo-session");
 const CONTEXT: HeaderName = HeaderName::from_static("relevo-context");
 const MENTIONS: HeaderName = HeaderName::from_static("relevo-mentions");
 const CLIENT: HeaderName = HeaderName::from_static("relevo-client");
+const AGENT: HeaderName = HeaderName::from_static("relevo-agent");
 
 /// A header as trimmed text; `None` when absent.
 fn header(headers: &HeaderMap, name: &HeaderName) -> Result<Option<String>, ApiError> {
@@ -120,6 +125,25 @@ pub fn valid_client(client: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-'))
 }
 
+/// `Relevo-Agent`, trimmed, when it is a name (`valid_agent`). Anything else says nothing, never
+/// an error.
+fn agent(headers: &HeaderMap) -> Option<String> {
+    let agent = std::str::from_utf8(headers.get(AGENT)?.as_bytes())
+        .ok()?
+        .trim();
+    valid_agent(agent).then(|| agent.to_string())
+}
+
+/// An agent's name: 1 to 40 characters, each a letter or digit (of any script), a space or one of
+/// `.-_+()/`. Nothing else, so that it can be shown inside the text an agent trusts (quoted after
+/// "via") without a quote, `@`, `<` or line break to end it early.
+pub fn valid_agent(agent: &str) -> bool {
+    (1..=40).contains(&agent.chars().count())
+        && agent
+            .chars()
+            .all(|c| c.is_alphanumeric() || " .-_+()/".contains(c))
+}
+
 /// The person and token behind the request's bearer token: (person id, handle, token id, label).
 fn owner(parts: &Parts, app: &App) -> Result<(i64, String, String, String), ApiError> {
     let secret = parts
@@ -152,6 +176,7 @@ impl FromRequestParts<Arc<App>> for Caller {
         let (session, context) = session_headers(&parts.headers)?;
         let reads_mentions = mentions_header(&parts.headers)?;
         let (client, client_inferred) = client(&parts.headers);
+        let agent = agent(&parts.headers);
         Ok(Caller {
             person_id,
             handle,
@@ -162,6 +187,7 @@ impl FromRequestParts<Arc<App>> for Caller {
             reads_mentions,
             client,
             client_inferred,
+            agent,
         })
     }
 }

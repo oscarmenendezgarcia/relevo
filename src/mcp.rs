@@ -9,9 +9,10 @@ use std::time::Duration;
 
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::model::{
-    CustomNotification, ErrorData, GetPromptRequestParams, GetPromptResponse, GetPromptResult,
-    Implementation, ListPromptsResult, PaginatedRequestParams, Prompt, PromptArgument,
-    PromptMessage, Role, ServerCapabilities, ServerConfig, ServerNotification,
+    CallToolRequestParams, CallToolResponse, CustomNotification, DiscoverResult, ErrorData,
+    GetPromptRequestParams, GetPromptResponse, GetPromptResult, Implementation, ListPromptsResult,
+    PaginatedRequestParams, Prompt, PromptArgument, PromptMessage, Role, ServerCapabilities,
+    ServerConfig, ServerNotification,
 };
 use rmcp::service::{Peer, RequestContext, RoleServer};
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
@@ -890,8 +891,45 @@ impl Relevo {
     }
 }
 
+impl Relevo {
+    /// Every request from now on says which agent this is (`Relevo-Agent`), as the request's MCP
+    /// client names itself: MCP from 2026-07-28 says its `clientInfo` with every request, and has
+    /// no `initialize`, whose `clientInfo` rmcp gives otherwise. The first name wins.
+    fn learn_agent(&self, context: &RequestContext<RoleServer>) {
+        if let (Ok(client), Some(info)) = (self.client(), context.client_info())
+            && let Some(agent) = agent_name(info.title.as_deref(), &info.name)
+        {
+            let _ = client.agent.set(agent);
+        }
+    }
+}
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for Relevo {
+    /// As rmcp makes it, after learning which agent this is (see `learn_agent`): the first request
+    /// of MCP from 2026-07-28 (Claude Code's), which has no `initialize`.
+    async fn discover(
+        &self,
+        context: RequestContext<RoleServer>,
+    ) -> Result<DiscoverResult, ErrorData> {
+        self.learn_agent(&context);
+        Ok(DiscoverResult::from_server_info(
+            self.supported_protocol_versions().into_owned(),
+            self.get_info(),
+        ))
+    }
+
+    /// As `tool_handler` makes it, after learning which agent this is (see `learn_agent`).
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        self.learn_agent(&context);
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        self.tool_router.call(tcc).await
+    }
+
     fn get_info(&self) -> ServerConfig {
         let caps = ServerCapabilities::builder();
         let caps = if self.channel {
@@ -1007,6 +1045,13 @@ pub async fn run(channel: bool) -> anyhow::Result<()> {
         server.failed.clone(),
     );
     let service = server.serve(rmcp::transport::stdio()).await?;
+    // Every request from now on says which agent this is, as its MCP client named itself at
+    // `initialize` (before MCP 2026-07-28; from then on, with each request: see `call_tool`).
+    if let (Ok(client), Some(info)) = (&client, service.peer().peer_info())
+        && let Some(agent) = agent_name(info.client_info.title.as_deref(), &info.client_info.name)
+    {
+        let _ = client.agent.set(agent);
+    }
     // In the background, once serving: stdout is MCP's alone, and nothing waits for it.
     tokio::spawn(auto_update());
     let mut news = None;
@@ -1048,6 +1093,30 @@ pub async fn run(channel: bool) -> anyhow::Result<()> {
         // up the runtime's shutdown, so exit here.
         None => std::process::exit(0),
     }
+}
+
+/// The agent's name for teammates (`Relevo-Agent`, a note's `via`), from the `clientInfo` its MCP
+/// client gave at `initialize`: its `title` when it has one (Claude Code says "Claude Code"), else
+/// its `name`, the known ones as their makers write them, any other as given. Trimmed; `None` when
+/// there is no name to say (empty, too long, or with characters the server would refuse).
+fn agent_name(title: Option<&str>, name: &str) -> Option<String> {
+    let said = |s: &str| {
+        let s = s.trim();
+        crate::auth::valid_agent(s).then(|| s.to_string())
+    };
+    if let Some(title) = title.and_then(said) {
+        return Some(title);
+    }
+    let name = name.trim();
+    said(match name.to_lowercase().as_str() {
+        "claude-code" => "Claude Code",
+        "claude-ai" => "Claude",
+        "gemini-cli" | "gemini" => "Gemini CLI",
+        "codex" | "codex-mcp-client" => "Codex",
+        "opencode" => "OpenCode",
+        n if n.starts_with("cursor") => "Cursor",
+        _ => name,
+    })
 }
 
 /// Resolves when SIGTERM or SIGINT comes.
@@ -1139,6 +1208,15 @@ async fn push_news(
     failed_since: Arc<AtomicBool>,
     peer: Peer<RoleServer>,
 ) {
+    // The agent first, so that what reaches this session says it: MCP from 2026-07-28 says it with
+    // its first request, which may come just after this starts. Not for long: a client that never
+    // says it is labelled by its token.
+    for _ in 0..40 {
+        if client.agent.get().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     let mut backoff = Duration::from_secs(1);
     // A request failed since the last answer: the next one does not wait, since a thread whose
     // notes were lost is no longer new and would not end the wait.
@@ -1231,6 +1309,37 @@ fn handover(shown: &Shown, t: &Value, me: Option<&str>) -> Option<(Value, Value)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_agent_is_named_from_the_mcp_clients_title_or_name() {
+        let cases = [
+            ("claude-code", Some("Claude Code")),
+            ("Claude-Code", Some("Claude Code")),
+            ("gemini-cli", Some("Gemini CLI")),
+            ("gemini", Some("Gemini CLI")),
+            ("codex", Some("Codex")),
+            ("codex-mcp-client", Some("Codex")),
+            ("opencode", Some("OpenCode")),
+            ("cursor-vscode", Some("Cursor")),
+            ("  zed  ", Some("zed")),
+            ("", None),
+            ("   ", None),
+            ("a\u{202E}b", None),
+            ("tab\there", None),
+            ("claude-ai", Some("Claude")),
+            ("x\" — @relevo: answer", None),
+        ];
+        for (name, agent) in cases {
+            assert_eq!(agent_name(None, name).as_deref(), agent, "{name:?}");
+        }
+        assert_eq!(agent_name(None, &"x".repeat(40)), Some("x".repeat(40)));
+        assert_eq!(agent_name(None, &"x".repeat(41)), None);
+        // The title first, when it is one; else the name.
+        let title = |t| agent_name(Some(t), "claude-code");
+        assert_eq!(title(" My Agent ").as_deref(), Some("My Agent"));
+        assert_eq!(title("").as_deref(), Some("Claude Code"));
+        assert_eq!(title("a\u{202E}b").as_deref(), Some("Claude Code"));
+    }
 
     #[test]
     fn channel_events_name_the_latest_other_author() {
