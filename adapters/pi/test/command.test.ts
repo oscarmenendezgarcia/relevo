@@ -3,7 +3,7 @@
 // it says when the server is out of reach or not configured. Against a real relevo server.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -428,6 +428,56 @@ test("the footer follows the inbox loop: one count when what waits changes", asy
   }
 });
 
+test("the footer says what relevo statusline says: token refused, error, config error, and nothing when not configured", async () => {
+  const start = async (ext: ReturnType<typeof loadExtension>) => {
+    await ext.emit("session_start", { reason: "startup" }, ext.ctx(home, "interactive"));
+    return () => ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, "interactive"));
+  };
+  // A token the server refuses.
+  const refused = loadExtension({ env: { RELEVO_URL: server.url, RELEVO_TOKEN: "rlv_wrong" }, home, wait: 1, minBackoffMs: 50 });
+  let stop = await start(refused);
+  try {
+    await until(() => refused.status() === "<error>relevo ● token refused</error>");
+  } finally {
+    await stop();
+  }
+  // A server that answers, but not with a count.
+  const odd = await fake((req, res) => {
+    if (req.url?.startsWith("/api/timeline")) {
+      res.writeHead(500, { "content-type": "application/json" });
+      return void res.end(JSON.stringify({ error: { code: "INTERNAL", message: "boom" } }));
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ threads: [], team: [], session: { you: "oscar" } }));
+  });
+  const error = loadExtension({ env: { RELEVO_URL: odd.url, RELEVO_TOKEN: "rlv_x" }, home, wait: 1, minBackoffMs: 50 });
+  stop = await start(error);
+  try {
+    await until(() => error.status() === "<error>relevo ● error</error>");
+  } finally {
+    await stop();
+    await odd.close();
+  }
+  const dir = mkdtempSync(join(tmpdir(), "relevo-pi-footer-"));
+  try {
+    // A config file that cannot be read: said in the footer, and once in a notice.
+    const file = join(dir, "config.json");
+    writeFileSync(file, "{ not json");
+    const broken = loadExtension({ env: { RELEVO_CONFIG: file }, home: dir });
+    stop = await start(broken);
+    await stop();
+    assert.equal(broken.status(), "<error>relevo ● config error</error>");
+    assert.ok(broken.notified.some((n) => n.includes("is not JSON")), broken.notified.join("\n"));
+    // Not configured at all: no footer.
+    const none = loadExtension({ env: { RELEVO_CONFIG: join(dir, "none.json") }, home: dir });
+    stop = await start(none);
+    await stop();
+    assert.equal(none.status(), undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("the list: at most ten, then a count; text that cannot break it; wrapped to the width", () => {
   const now = Date.parse("2026-11-08T15:00:00Z") / 1000;
   const at = (s: number) => new Date((now - s) * 1000).toISOString();
@@ -485,8 +535,8 @@ test("a number is bound to the list the person saw when they typed it: a list ru
     [second, first],
   );
   const notes = (await api(s, ana, "GET", `/api/threads/${first}`)).notes.length;
-  await assert.rejects(ext.tool("relevo_send", { thread, text: "Yes." }, home), /Your list changed since you typed \/relevo with 1[^\n]*Nothing was sent\./);
-  await assert.rejects(ext.tool("relevo_thread", { id: thread }, home), /Your list changed since you typed/);
+  await assert.rejects(ext.tool("relevo_send", { thread, text: "Yes." }, home), /Thread 1 of your list is no longer the one you typed \/relevo 1 for: the list changed since\. Run \/relevo again\. Nothing was sent\./);
+  await assert.rejects(ext.tool("relevo_thread", { id: thread }, home), /no longer the one you typed \/relevo 1 for/);
   assert.equal((await api(s, ana, "GET", `/api/threads/${first}`)).notes.length, notes);
   assert.equal((await api(s, ana, "GET", `/api/threads/${second}`)).notes.length, 1);
   // The same number, bound to this list, goes.

@@ -443,15 +443,17 @@ export function resolve(listed: Listed | null, ns: Array<number | ListNumber>): 
   for (const x of ns) {
     const { n, id, note } = typeof x === "number" ? { n: x, id: undefined, note: undefined } : x;
     const row = listed.rows[n - 1];
-    if (id !== undefined && (row?.id !== id || row.lastNote !== note)) {
-      return `Your list changed since you typed /relevo with ${n}: number ${n} is no longer that thread as you saw it. Run /relevo to see it again. Nothing was sent.`;
+    if (id !== undefined && row?.id !== id) {
+      return `Thread ${n} of your list is no longer the one you typed /relevo ${n} for: the list changed since. Run /relevo again. Nothing was sent.`;
     }
     if (!row) {
       return listed.rows.length
         ? `There is no thread ${n} in your last list (1 to ${listed.rows.length}): run /relevo to see it again. Nothing was sent.`
         : "Your last list had nothing waiting on you: run /relevo again. Nothing was sent.";
     }
-    if (!out.includes(row)) out.push(row);
+    // A bound number is judged against the note the person saw when they typed it: a newer one
+    // since refuses as any newer note does.
+    if (!out.some((r) => r.id === row.id)) out.push(id !== undefined && note !== undefined ? { ...row, lastNote: note } : row);
   }
   return out;
 }

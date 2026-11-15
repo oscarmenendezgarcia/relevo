@@ -7,7 +7,7 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Client, RelevoError, newSessionId, unreachable, type Inbox, type SendResult, type Thread } from "./client.ts";
-import { loadConfig } from "./config.ts";
+import { configProblem, loadConfig } from "./config.ts";
 import { detectContext, overrideWarning } from "./context.ts";
 import { InboxLoop, oldestFirst } from "./loop.ts";
 import { listing, releaseOnly, renderArrival, renderInbox, renderTeam, renderTeams, renderThread } from "./render.ts";
@@ -294,23 +294,43 @@ export function relevoExtension(options: Options = {}) {
     let offlineSince: number | null = null;
     /** How many threads wait on the person, for the footer; null while unknown. */
     let waitingNow: number | null = null;
+    /**
+     * What else the footer says, as `relevo statusline` does: the config cannot be read, the
+     * server refused the token, or it answered something other than a count. null when none.
+     */
+    let problem: "config error" | "token refused" | "error" | null = null;
     /** The context whose UI shows the footer: the session's, outside print and JSON modes. */
     let uiCtx: any = null;
 
     /** Keeps whether the server answered: `err` is the failure, none when it answered. */
     function reached(err?: unknown): void {
-      if (err === undefined) offlineSince = null;
-      else if (unreachable(err)) offlineSince ??= nowSecs();
+      if (err === undefined) {
+        offlineSince = null;
+        problem = null;
+      } else if (unreachable(err)) offlineSince ??= nowSecs();
+      else if (err instanceof RelevoError && err.status === 401) problem = "token refused";
     }
 
-    /** The footer: `relevo` muted, ` ● N` in warning when N threads wait, or `relevo ● offline HH:MM` in error. */
+    /** A count or a list that failed: `reached`, and any other answer than a count is `error`. */
+    function readFailed(err: unknown): void {
+      reached(err);
+      if (!unreachable(err) && !(err instanceof RelevoError && err.status === 401)) problem = "error";
+    }
+
+    /**
+     * The footer, in the words and colours of Claude Code's status line (`relevo statusline`):
+     * `relevo` muted, ` ● N` in warning when N threads wait, and in error `relevo ● offline
+     * HH:MM`, `relevo ● token refused`, `relevo ● error` or `relevo ● config error`.
+     */
     function paint(): void {
       const ui = uiCtx?.hasUI ? uiCtx.ui : null;
       if (!ui?.setStatus) return;
       const theme = ui.theme;
       const fg = (color: string, text: string) => (typeof theme?.fg === "function" ? theme.fg(color, text) : text);
       let text = fg("muted", "relevo");
-      if (offlineSince !== null) text = fg("error", `relevo ● offline ${clock(offlineSince, nowSecs())}`);
+      if (problem === "config error") text = fg("error", "relevo ● config error");
+      else if (offlineSince !== null) text = fg("error", `relevo ● offline ${clock(offlineSince, nowSecs())}`);
+      else if (problem) text = fg("error", `relevo ● ${problem}`);
       else if (waitingNow) text += fg("warning", ` ● ${waitingNow}`);
       try {
         ui.setStatus("relevo", text);
@@ -334,9 +354,11 @@ export function relevoExtension(options: Options = {}) {
       try {
         const v = await c.timeline("tab=threads&show=waiting&limit=1");
         reached();
-        return typeof v.counts?.waiting === "number" ? v.counts.waiting : null;
+        if (typeof v.counts?.waiting === "number") return v.counts.waiting;
+        problem = "error";
+        return null;
       } catch (err) {
-        reached(err);
+        readFailed(err);
         paint();
         return null;
       }
@@ -445,7 +467,7 @@ export function relevoExtension(options: Options = {}) {
         if (shown.length) return { state: "list", rows: shown, total: count, handled };
         return { state: "empty", handled };
       } catch (err) {
-        reached(err);
+        readFailed(err);
         paint();
         if (unreachable(err)) return { state: "offline", host: host(c.config.url), since: clock(offlineSince ?? now, now) };
         if (err instanceof RelevoError && err.status === 404) {
@@ -924,12 +946,17 @@ export function relevoExtension(options: Options = {}) {
           // A context from a session that ended: the next start of pi has the update anyway.
         }
       });
-      try {
-        if (!loadConfig(env, home)) return;
-      } catch (err) {
-        if (ctx.hasUI) ctx.ui.notify(describe(err).message, "warning");
+      const unreadable = configProblem(env, home);
+      if (unreadable) {
+        if (ctx.hasUI) {
+          ctx.ui.notify(describe(new Error(unreadable)).message, "warning");
+          uiCtx = ctx;
+          problem = "config error";
+          paint();
+        }
         return;
       }
+      if (!loadConfig(env, home)) return;
       sessionCtx = ctx;
       if (ctx.hasUI) uiCtx = ctx;
       // The footer: one count now; then again when the inbox loop sees a change, and on its own
@@ -957,7 +984,7 @@ export function relevoExtension(options: Options = {}) {
         },
         onAnswer,
         onError(err: unknown, fatal: boolean) {
-          if (unreachable(err)) {
+          if (unreachable(err) || (err instanceof RelevoError && err.status === 401)) {
             reached(err);
             paint();
           }
