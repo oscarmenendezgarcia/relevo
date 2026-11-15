@@ -405,12 +405,47 @@ export function left(waiting: number | null): string {
   return waiting === 0 ? "Nothing else is waiting on you." : `${waiting} left`;
 }
 
-/** The threads of the last list that `ns` name, or why not (nothing sent). */
-export function resolve(listed: Listed | null, ns: number[]): Row[] | string {
+/**
+ * A list number as a tool takes it: `1`, or, as /relevo hands a request to the agent, bound to
+ * the thread and the latest note that number showed when the person typed it (`1@r_abc:n_def`).
+ */
+export interface ListNumber {
+  n: number;
+  id?: string;
+  note?: string;
+}
+
+/** The list numbers in a tool's `thread` or `id` (`"1"`, `"1 3"`, `"1@r_abc:n_def 3@r_ghi:n_jkl"`), when that is all it holds. */
+export function listNumbers(thread: string): ListNumber[] | null {
+  const parts = thread.split(/[ ,]/).filter(Boolean);
+  const out: ListNumber[] = [];
+  for (const p of parts) {
+    const m = /^(\d+)(?:@(r_[A-Za-z0-9_-]+):([A-Za-z0-9_-]*))?$/.exec(p);
+    if (!m) return null;
+    out.push(m[2] === undefined ? { n: Number(m[1]) } : { n: Number(m[1]), id: m[2], note: m[3] });
+  }
+  return out.length ? out : null;
+}
+
+/** Row `row`'s number bound to its thread and latest note, as the request /relevo hands over carries it. */
+export function bind(row: Row): string {
+  return `${row.n}@${row.id}:${row.lastNote}`;
+}
+
+/**
+ * The threads of the last list that `ns` name, or why not (nothing sent). A bound number must
+ * still be that thread with that latest note: a /relevo run between the person typing and the
+ * tool running may have numbered the threads anew.
+ */
+export function resolve(listed: Listed | null, ns: Array<number | ListNumber>): Row[] | string {
   if (!listed) return "There is no list in this session yet: run /relevo first, then use its numbers. Nothing was sent.";
   const out: Row[] = [];
-  for (const n of ns) {
+  for (const x of ns) {
+    const { n, id, note } = typeof x === "number" ? { n: x, id: undefined, note: undefined } : x;
     const row = listed.rows[n - 1];
+    if (id !== undefined && (row?.id !== id || row.lastNote !== note)) {
+      return `Your list changed since you typed /relevo with ${n}: number ${n} is no longer that thread as you saw it. Run /relevo to see it again. Nothing was sent.`;
+    }
     if (!row) {
       return listed.rows.length
         ? `There is no thread ${n} in your last list (1 to ${listed.rows.length}): run /relevo to see it again. Nothing was sent.`

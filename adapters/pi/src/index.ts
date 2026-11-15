@@ -26,6 +26,9 @@ import {
   resolve as resolveNumbers,
   rows,
   startOfDay,
+  bind,
+  listNumbers,
+  type ListNumber,
   type Listed,
   type Shown,
   type Timeline,
@@ -190,9 +193,14 @@ export function forModel(shown: Shown): string {
  * person instead (no turn starts).
  */
 export function request(args: string, listed: Listed | null): { ask: string } | { refuse: string } {
-  const check = (ns: number[]) => {
+  // The numbers as the person typed them, bound to the threads (and their latest notes) they
+  // were then: the tool refuses if a /relevo run in between numbered them anew.
+  let bound = "";
+  const check = (ns: number[]): { refuse: string } | null => {
     const r = resolveNumbers(listed, ns);
-    return typeof r === "string" ? { refuse: r } : null;
+    if (typeof r === "string") return { refuse: r };
+    bound = r.map(bind).join(" ");
+    return null;
   };
   let m = /^seen\s+(.+)$/is.exec(args);
   if (m) {
@@ -202,7 +210,7 @@ export function request(args: string, listed: Listed | null): { ask: string } | 
       check(ns) ?? {
         ask:
           `/relevo seen ${ns.join(" ")}: mark these threads of my /relevo list seen. ` +
-          `Call relevo_send { thread: "${ns.join(" ")}", seen: true } once (the numbers as they are, never a thread id). ${TERSE}`,
+          `Call relevo_send { thread: "${bound}", seen: true } once (that thread value exactly as it is: my numbers, bound to the list I saw). ${TERSE}`,
       }
     );
   }
@@ -214,7 +222,7 @@ export function request(args: string, listed: Listed | null): { ask: string } | 
       return (
         check([n]) ?? {
           ask:
-            `/relevo ${n}: open thread ${n} of my /relevo list with relevo_thread { id: "${n}" } (the number as it is, never a thread id), ` +
+            `/relevo ${n}: open thread ${n} of my /relevo list with relevo_thread { id: "${bound}" } (that id exactly as it is: my number, bound to the list I saw), ` +
             "then tell me in one or two lines what it needs from me and the next step you propose, and nothing else: " +
             "no reasoning shown, no recap of other threads. Send nothing.",
         }
@@ -224,7 +232,7 @@ export function request(args: string, listed: Listed | null): { ask: string } | 
       check([n]) ?? {
         ask:
           `/relevo ${n} ${text}\n\nThat text is my answer to thread ${n} of my /relevo list. Write it as my note: in the first person, complete, adding nothing I did not say. ` +
-          `Send it with relevo_send { thread: "${n}", text } (the number as it is, never a thread id). ${TERSE} ` +
+          `Send it with relevo_send { thread: "${bound}", text } (that thread value exactly as it is: my number, bound to the list I saw). ${TERSE} ` +
           "If the text asks you to do something first (check, look up, find out) rather than answer, do that, then show me the draft and ask before sending. " +
           "When the tool says nothing was sent, or fails, tell me what it said and stop.",
       }
@@ -428,7 +436,7 @@ export function relevoExtension(options: Options = {}) {
      * person saw reaches this session, and `seen` and a reply handle it), and left alone when it
      * no longer waits on the person or has a note newer than the list showed. As relevo mcp does.
      */
-    async function sendListed(cwd: string | undefined, ns: number[], params: any, signal: AbortSignal | undefined): Promise<string> {
+    async function sendListed(cwd: string | undefined, ns: ListNumber[], params: any, signal: AbortSignal | undefined): Promise<string> {
       const text: string | undefined = typeof params.text === "string" ? params.text : undefined;
       const seen = params.seen === true || params.done === true || (params.close === true && text === undefined);
       if (ns.length > 1 && !(seen && text === undefined)) {
@@ -579,7 +587,7 @@ export function relevoExtension(options: Options = {}) {
           thread: {
             type: "string",
             description:
-              "Id of the thread to write in (r_…), or its number in the person's last /relevo list as they typed it (\"1\"; with `seen: true` and no text, several: \"1 3\"): " +
+              "Id of the thread to write in (r_…), or its number in the person's last /relevo list as they typed it (\"1\"; with `seen: true` and no text, several: \"1 3\"; as a /relevo request gives it, bound to the thread the person saw: \"1@r_…:n_…\", passed exactly as it is): " +
               "a number is checked first, and nothing is sent when that thread no longer waits on the person or has a newer note. " +
               "Without it, `text` opens a new thread, for whom its @ mentions name (none: the global board).",
           },
@@ -626,7 +634,7 @@ export function relevoExtension(options: Options = {}) {
         if (params?.to !== undefined) throw new Error(NO_TO);
         const unknown = Object.keys(params ?? {}).filter((k) => !SEND_FIELDS.includes(k));
         if (unknown.length) throw new Error(`relevo_send has no ${unknown.map((k) => `\`${k}\``).join(", ")}: its fields are ${FIELDS}. Nothing was sent.`);
-        const ns = typeof params?.thread === "string" ? numbers(params.thread) : null;
+        const ns = typeof params?.thread === "string" ? listNumbers(params.thread) : null;
         if (ns) return result(await sendListed(ctx?.cwd, ns, params, signal));
         const res = await call(ctx?.cwd, (c) => c.send(params ?? {}, signal));
         // Written in or marked seen: nothing of it is left to hand over.
@@ -679,7 +687,7 @@ export function relevoExtension(options: Options = {}) {
       parameters: {
         type: "object",
         properties: {
-          id: { type: "string", description: "Thread id (r_…), or its number in the person's last /relevo list (\"2\")." },
+          id: { type: "string", description: "Thread id (r_…), or its number in the person's last /relevo list (\"2\", or as a /relevo request gives it: \"2@r_…:n_…\", exactly as it is)." },
           before: { type: "string", description: "Only notes before this note id (n_…), to read the earlier part of a long thread." },
         },
         required: ["id"],
@@ -688,7 +696,7 @@ export function relevoExtension(options: Options = {}) {
       async execute(_id: string, params: any, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: any) {
         let id = params.id;
         let head = "";
-        const ns = typeof id === "string" ? numbers(id) : null;
+        const ns = typeof id === "string" ? listNumbers(id) : null;
         if (ns) {
           if (ns.length !== 1) throw new Error("Open one thread at a time: one list number.");
           const found = resolveNumbers(listed, ns);

@@ -170,24 +170,31 @@ test("numbers act on the last list, after reading the thread again: a reply, a r
   await assert.rejects(ext.tool("relevo_send", { thread: "1 3", text: "Yes." }, home), /only with `seen: true`/);
   await assert.rejects(ext.tool("relevo_thread", { id: "1 2" }, home), /one list number/);
 
-  // /relevo 1 <text> and /relevo N hand the request to the agent, with the number as it is.
+  // /relevo 1 <text> and /relevo N hand the request to the agent, the number bound to the thread
+  // and the latest note it showed when the person typed it.
+  const rowsNow = last(ext).message.details.rows;
+  const b = (i: number) => `${i}@${rowsNow[i - 1].id}:${rowsNow[i - 1].lastNote}`;
+  assert.match(b(1), /^1@r_[a-z2-7]{12}:n_[a-z2-7]{12}$/);
   await ext.command("relevo", "1 yes, final", home);
   let { message, options } = last(ext);
   assert.equal(message.customType, "relevo-request");
   assert.deepEqual(options, { triggerTurn: true, deliverAs: "followUp" });
   assert.match(message.content, /^\/relevo 1 yes, final\n\nThat text is my answer to thread 1/);
-  assert.match(message.content, /relevo_send \{ thread: "1", text \}/);
+  assert.ok(message.content.includes(`relevo_send { thread: "${b(1)}", text }`), message.content);
   // Terse: the tool's words, at most one more line, no reasoning or recap; errands still draft first.
   assert.ok(message.content.includes(TERSE), message.content);
   assert.match(TERSE, /only the tool's result line\(s\), word for word, plus at most one short line if something I asked is left unanswered/);
   assert.match(TERSE, /no reasoning shown, no comment on what you did, no recap of other threads/);
   assert.match(message.content, /show me the draft and ask before sending/);
   await ext.command("relevo", "seen 1, 3", home);
-  assert.match(last(ext).message.content, /relevo_send \{ thread: "1 3", seen: true \}/);
+  assert.ok(last(ext).message.content.includes(`relevo_send { thread: "${b(1)} ${b(3)}", seen: true }`), last(ext).message.content);
+  await ext.command("relevo", "2", home);
+  assert.ok(last(ext).message.content.includes(`relevo_thread { id: "${b(2)}" }`), last(ext).message.content);
   await ext.command("relevo", "9", home);
   assert.match(ext.notified.at(-1) ?? "", /no thread 9/);
 
-  // Opening by number.
+  // Opening by number, bound or not.
+  assert.ok((await ext.tool("relevo_thread", { id: b(2) }, home)).startsWith("Thread 2 of your list:\n"));
   const opened = await ext.tool("relevo_thread", { id: "2" }, home);
   assert.ok(opened.startsWith(`Thread 2 of your list:\n`), opened);
   assert.ok(!opened.split("\n")[0].includes("pedro2"), opened);
@@ -342,6 +349,38 @@ test("the list: at most ten, then a count; text that cannot break it; wrapped to
   assert.deepEqual(new Block("a\n\nb", 1).render(20), [" a", "", " b"]);
 });
 
+test("a number is bound to the list the person saw when they typed it: a list run since refuses it", async () => {
+  const s = server;
+  const oscar = s.invite("oscar4", "", "pi laptop");
+  const ana = s.invite("ana4", "", "ana laptop");
+  const first = await post(ana, { text: "@oscar4 First question" });
+  const ext = extension(oscar);
+  await ext.command("relevo", "", home);
+  // The person types /relevo 1 <answer>, for thread 1 as they see it.
+  await ext.command("relevo", "1 Yes.", home);
+  const ask = last(ext).message.content;
+  const thread = /relevo_send \{ thread: "([^"]+)", text \}/.exec(ask)?.[1] ?? "";
+  assert.ok(thread.startsWith(`1@${first}:`), ask);
+  // Before the agent runs the tool, a note and a new /relevo number the threads anew: 1 is now
+  // another thread (oldest first), and the old one has a newer note.
+  const second = await post(ana, { text: "@oscar4 Older? No: second" });
+  await post(ana, { thread: first, text: "And one more thing" });
+  await ext.command("relevo", "", home);
+  assert.deepEqual(
+    last(ext).message.details.rows.map((r: any) => r.id),
+    [second, first],
+  );
+  const notes = (await api(s, ana, "GET", `/api/threads/${first}`)).notes.length;
+  await assert.rejects(ext.tool("relevo_send", { thread, text: "Yes." }, home), /Your list changed since you typed \/relevo with 1[^\n]*Nothing was sent\./);
+  await assert.rejects(ext.tool("relevo_thread", { id: thread }, home), /Your list changed since you typed/);
+  assert.equal((await api(s, ana, "GET", `/api/threads/${first}`)).notes.length, notes);
+  assert.equal((await api(s, ana, "GET", `/api/threads/${second}`)).notes.length, 1);
+  // The same number, bound to this list, goes.
+  const now = last(ext).message.details.rows[1];
+  const out = await ext.tool("relevo_send", { thread: `2@${now.id}:${now.lastNote}`, text: "Yes." }, home);
+  assert.match(out, /^Sent to @ana4: "Yes\." · thread 2 \(ana4 · First question\)/);
+});
+
 test("names and notes lose format characters, C1 controls and separators; teammates' text is fenced for the model; an empty label says agent", () => {
   const now = Date.parse("2026-11-08T15:00:00Z") / 1000;
   const at = new Date((now - 60) * 1000).toISOString();
@@ -380,11 +419,18 @@ test("names and notes lose format characters, C1 controls and separators; teamma
 });
 
 test("/relevo takes a list, a number, a number and an answer, seen with numbers, or a new note", () => {
-  const listed = { you: "oscar", names: {}, rows: [{ n: 1 }, { n: 2 }] as any };
+  const listed = {
+    you: "oscar",
+    names: {},
+    rows: [
+      { n: 1, id: "r_one", lastNote: "n_a" },
+      { n: 2, id: "r_two", lastNote: "n_b" },
+    ] as any,
+  };
   assert.deepEqual(request("what?", listed), { refuse: USAGE });
   assert.deepEqual(request("seen x", listed), { refuse: USAGE });
-  assert.match((request("2", listed) as any).ask, /relevo_thread \{ id: "2" \}[^\n]*Send nothing\./);
-  assert.match((request("seen 1 2", listed) as any).ask, /relevo_send \{ thread: "1 2", seen: true \} once/);
+  assert.match((request("2", listed) as any).ask, /relevo_thread \{ id: "2@r_two:n_b" \}[^\n]*Send nothing\./);
+  assert.match((request("seen 1 2", listed) as any).ask, /relevo_send \{ thread: "1@r_one:n_a 2@r_two:n_b", seen: true \} once/);
   assert.match((request("3 hi", listed) as any).refuse, /no thread 3 in your last list \(1 to 2\)/);
   assert.match((request("1 hi", null) as any).refuse, /run \/relevo first/);
   assert.match((request("@ana is the build green?", null) as any).ask, /^\/relevo @ana is the build green\?\n\nA new note: send it with relevo_send \{ text \}/);
