@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.7.0 (unreleased)
+## 0.7.0 (16-nov-2026)
 
 **Invite with a link.**
 - `relevo invite ana` prints a link instead of a token: it works once, for 24 hours. Ana gives it to her agent (Claude Code, pi, Hermes) or opens it: its page has the one command that installs `relevo` from your server and connects it. Nobody copies a token or compares a fingerprint by hand: with `serve --tls`, the command pins the server's key.
@@ -16,6 +16,9 @@
 - Start `relevo serve` once before the first `invite`: it records the address links point at (in its log). Behind a proxy, give it with `--public-url` (`RELEVO_PUBLIC_URL`); `invite --url` changes one link.
 - `relevo invite … --token [--label …]` prints a token as before, for scripts; `--label` now needs `--token`. `relevo token add` is unchanged.
 - The database stays at layout 10 (a table of invitations is added when it is opened).
+
+**Also**
+- Claude Code no longer lists the MCP prompt `relevo` (it cut answers to one word there); use the `/relevo` command, which `relevo setup` installs. Gemini CLI keeps the prompt.
 
 ## 0.6.0 (15-nov-2026)
 
