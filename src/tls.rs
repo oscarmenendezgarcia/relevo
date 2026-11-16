@@ -92,6 +92,11 @@ pub fn names(cert: &CertificateDer, name: &ServerName) -> bool {
         .is_ok_and(|ee| ee.verify_is_valid_for_subject_name(name).is_ok())
 }
 
+/// Whether `cert` names `host` (a host name or an IP address, bracketed or not).
+pub fn names_host(cert: &CertificateDer, host: &str) -> bool {
+    server_name(host).is_ok_and(|name| names(cert, &name))
+}
+
 // ---------------------------------------------------------------------------------------------
 // The server's side
 

@@ -81,22 +81,31 @@ fn fixture() -> Fixture {
         5,
         Some(dist),
     );
-    db::set_public(
-        &app.db(),
-        &db::Public {
-            url: Some(URL.into()),
-            pin: Some("PIN+/=".into()),
-            fingerprint: Some("AB:CD".into()),
-        },
-    )
-    .unwrap();
     Fixture { app, _temp: temp }
+}
+
+/// `URL`, as `serve`'s own TLS address: with its key's pin and its certificate's fingerprint.
+fn own() -> db::Address {
+    db::Address {
+        url: URL.into(),
+        pin: Some("PIN+/=".into()),
+        fingerprint: Some("AB:CD".into()),
+    }
+}
+
+/// Another address, with nothing pinned (a proxy's, or plain http).
+fn other(url: &str) -> db::Address {
+    db::Address {
+        url: url.into(),
+        pin: None,
+        fingerprint: None,
+    }
 }
 
 impl Fixture {
     fn invite(&self, handle: &str) -> String {
         let now = self.app.clock.now();
-        db::invite_link(&self.app.db(), handle, "Ana", None, URL, now)
+        db::invite_link(&self.app.db(), handle, "Ana", None, &own(), now)
             .unwrap()
             .code
     }
@@ -335,7 +344,7 @@ async fn the_page_shows_the_invitation_without_using_it() {
     assert!(page.contains("You're invited to Relevo"));
     assert!(page.contains("You'll join as <b>@ana</b> (Ana)"));
     assert!(page.contains(&format!("{URL}/join/{code}</code>")));
-    let curl = format!("curl -sSf --pinnedpubkey sha256//PIN+/= -k {URL}/join/{code}/install");
+    let curl = format!("curl -sS --pinnedpubkey sha256//PIN+/= -k {URL}/join/{code}/install");
     assert!(page.contains(&format!("{curl} | sh</code>")), "{page}");
     assert!(page.contains("One use · expires in 24 h · it never shows your token"));
     // For agents: what to run, and to ask first.
@@ -379,7 +388,7 @@ async fn names_are_text_on_the_page() {
         "eve",
         "<script>alert(1)</script> & \"Eve\"",
         None,
-        URL,
+        &own(),
         NOW,
     )
     .unwrap()
@@ -392,20 +401,12 @@ async fn names_are_text_on_the_page() {
 #[tokio::test]
 async fn without_a_certificate_of_its_own_nothing_is_pinned() {
     let f = fixture();
-    db::set_public(
-        &f.app.db(),
-        &db::Public {
-            url: Some("https://relevo.example.com".into()),
-            ..Default::default()
-        },
-    )
-    .unwrap();
     let code = db::invite_link(
         &f.app.db(),
         "ana",
         "Ana",
         None,
-        "https://relevo.example.com",
+        &other("https://relevo.example.com"),
         NOW,
     )
     .unwrap()
@@ -413,13 +414,28 @@ async fn without_a_certificate_of_its_own_nothing_is_pinned() {
     let (_, _, page) = f.page(&code, "").await;
     assert!(
         page.contains(&format!(
-            "curl -sSf https://relevo.example.com/join/{code}/install | sh"
+            "curl -sS https://relevo.example.com/join/{code}/install | sh"
         )),
         "{page}"
     );
     assert!(!page.contains("pinnedpubkey") && !page.contains(" -k "));
+    assert!(!page.contains("speaks plain http"));
     let (_, script) = f.script(&code).await;
     assert!(script.contains("\npin=''\nfingerprint=''\n"), "{script}");
+
+    // Plain http: the page says to use it only on a network you trust.
+    let code = db::invite_link(
+        &f.app.db(),
+        "bob",
+        "Bob",
+        None,
+        &other("http://10.0.0.5:7878"),
+        NOW,
+    )
+    .unwrap()
+    .code;
+    let (_, _, page) = f.page(&code, "").await;
+    assert!(page.contains("This server speaks plain http: use this link only on a network you"));
 }
 
 fn have(program: &str) -> bool {
@@ -606,6 +622,110 @@ async fn an_address_that_tries_too_many_codes_is_refused_for_an_hour() {
     assert_eq!(status, StatusCode::OK);
 }
 
+#[tokio::test]
+async fn used_and_expired_codes_do_not_count_and_loopback_is_one_address() {
+    let f = fixture();
+    let used = f.invite("ana");
+    assert_eq!(f.join(&used).await.0, StatusCode::OK);
+    let expired = f.invite("bob");
+    f.app.clock.advance(24 * 3600);
+    let post = |peer: &'static str, code: &str| {
+        let (f, body) = (&f, json!({ "code": code }));
+        async move {
+            f.call("POST", "/api/join", Some(body), Some(peer), &[])
+                .await
+                .0
+        }
+    };
+    for _ in 0..20 {
+        assert_eq!(post("10.0.0.1:1", &used).await, StatusCode::GONE);
+        assert_eq!(post("10.0.0.1:1", &expired).await, StatusCode::GONE);
+    }
+    let fresh = f.invite("carl");
+    assert_eq!(post("10.0.0.1:1", &fresh).await, StatusCode::OK);
+
+    // Behind a proxy on this machine, everyone comes from loopback: one address, limited too.
+    for i in 0..10 {
+        let peer = if i % 2 == 0 {
+            "127.0.0.1:1"
+        } else {
+            "[::ffff:127.0.0.1]:2"
+        };
+        assert_eq!(post(peer, "ZZZZ-ZZZZ").await, StatusCode::NOT_FOUND);
+    }
+    let code = f.invite("dora");
+    assert_eq!(
+        post("127.0.0.1:3", &code).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+#[tokio::test]
+async fn everyone_is_refused_past_the_ceiling() {
+    let f = fixture();
+    let code = f.invite("ana");
+    // 200 codes that do not exist, from 20 addresses (10 each).
+    for a in 0..20 {
+        for _ in 0..10 {
+            let peer = format!("10.1.{a}.1:1");
+            let (status, ..) = f
+                .call("GET", "/join/ZZZZ-ZZZZ", None, Some(&peer), &[])
+                .await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+        }
+    }
+    let (status, ..) = f
+        .call(
+            "GET",
+            &format!("/join/{code}"),
+            None,
+            Some("10.2.0.1:1"),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    f.app.clock.advance(3600);
+    let (status, ..) = f
+        .call(
+            "GET",
+            &format!("/join/{code}"),
+            None,
+            Some("10.2.0.1:1"),
+            &[],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn tries_at_once_do_not_pass_the_limit_together() {
+    let f = Arc::new(fixture());
+    let tries: Vec<_> = (0..50)
+        .map(|_| {
+            let f = f.clone();
+            tokio::spawn(async move {
+                let body = json!({ "code": "ZZZZ-ZZZZ" });
+                f.call("POST", "/api/join", Some(body), Some("10.0.0.9:1"), &[])
+                    .await
+                    .0
+            })
+        })
+        .collect();
+    let mut statuses = vec![];
+    for t in tries {
+        statuses.push(t.await.unwrap());
+    }
+    let unknown = statuses
+        .iter()
+        .filter(|s| **s == StatusCode::NOT_FOUND)
+        .count();
+    let refused = statuses
+        .iter()
+        .filter(|s| **s == StatusCode::TOO_MANY_REQUESTS)
+        .count();
+    assert_eq!((unknown, refused), (10, 40));
+}
+
 /// What a running `relevo serve` logged so far.
 fn log_of(file: &Path) -> String {
     std::fs::read_to_string(file).unwrap_or_default()
@@ -697,13 +817,28 @@ fn serve_invite_and_join_for_real() {
         said.contains("\n  https://relevo.example.com/join/"),
         "{said}"
     );
+    // Another address than serve's own TLS one: nothing of serve's certificate goes with it.
+    let code_of = |said: &str| {
+        said.split("/join/")
+            .nth(1)
+            .and_then(|rest| rest.lines().next())
+            .unwrap()
+            .to_string()
+    };
+    let address = |code: &str| {
+        let conn = db::open(db_path).unwrap();
+        match db::find_invite(&conn, code, db::now_unix()).unwrap() {
+            db::Invite::Valid { address, .. } => address,
+            other => panic!("{other:?}"),
+        }
+    };
+    let elsewhere = address(&code_of(&said));
+    assert_eq!((elsewhere.pin, elsewhere.fingerprint), (None, None));
     let said = admin(&["invite", "ana"]);
-    let code = said
-        .split("/join/")
-        .nth(1)
-        .and_then(|rest| rest.lines().next())
-        .unwrap()
-        .to_string();
+    let own = address(&code_of(&said));
+    assert_eq!(own.pin, public.pin);
+    assert_eq!(own.fingerprint, public.fingerprint);
+    let code = code_of(&said);
     assert_eq!(
         said,
         format!(
@@ -716,20 +851,26 @@ fn serve_invite_and_join_for_real() {
     // The script, as the page says to run it, in a new HOME without ~/.local/bin in PATH.
     let home = temp.0.join("home");
     std::fs::create_dir(&home).unwrap();
-    let curl = format!(
-        "curl -sSf --pinnedpubkey sha256//{} -k {url}/join/{code}/install",
-        public.pin.unwrap()
-    );
-    let run = |extra: &str| {
+    let curl =
+        |pin: &str| format!("curl -sS --pinnedpubkey sha256//{pin} -k {url}/join/{code}/install");
+    let pin = public.pin.clone().unwrap();
+    let run_with = |pin: &str, extra: &str| {
         Command::new("sh")
             .arg("-c")
-            .arg(format!("{curl} | sh -s -- {extra}"))
+            .arg(format!("{} | sh -s -- {extra}", curl(pin)))
             .env_clear()
             .env("HOME", &home)
             .env("PATH", "/usr/local/bin:/usr/bin:/bin")
             .output()
             .unwrap()
     };
+    let run = |extra: &str| run_with(&pin, extra);
+    // Another key than the server's, as a machine in between would show: curl refuses it, even
+    // with -k, and nothing is installed (sh is given nothing to run).
+    let out = run_with("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("pinned public key"), "{err}");
+    assert!(!home.join(".local").exists());
     // A binary that is not the one the manifest lists is never installed.
     let file = temp.0.join("dist").join(format!("relevo-{target}"));
     std::fs::write(&file, b"tampered").unwrap();
@@ -773,10 +914,14 @@ fn serve_invite_and_join_for_real() {
             .contains("BEGIN CERTIFICATE")
     );
 
-    // Once: curl says the server refused the script (curl -f leaves sh nothing to run).
+    // Once: the server's answer is a script that says why, and fails.
     let out = run("");
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("410"), "{err}");
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("relevo: This invitation was already used. An invitation works once"),
+        "{err}"
+    );
 
     drop(server);
     let said = log_of(&log);

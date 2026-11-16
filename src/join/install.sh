@@ -3,7 +3,7 @@
 # `relevo connect --join`, which trades the invitation for a token and saves it. The server
 # serves this script for one invitation (docs/install.md, part 7); read it before running it.
 #
-#   curl -sSf <the invitation link>/install | sh [-s -- <options for relevo connect>]
+#   curl -sS <the invitation link>/install | sh [-s -- <options for relevo connect>]
 #
 # It never uses sudo, and never shows the token.
 set -eu
@@ -46,6 +46,7 @@ main() {
     mkdir -p "$dir"
     tmp=$(mktemp "$dir/.relevo.XXXXXX")
     trap 'rm -f "$tmp"' EXIT
+    trap 'exit 1' INT TERM HUP
     echo "Downloading relevo for $what from $url"
     fetch "$url/join/$code/relevo?target=$target" "$tmp" || fail "could not download relevo"
     if command -v sha256sum >/dev/null 2>&1; then
@@ -58,13 +59,17 @@ main() {
     [ "$got" = "$sum" ] || fail "the download is not the file the server lists: nothing installed"
     chmod 755 "$tmp"
     mv -f "$tmp" "$dir/relevo"
-    trap - EXIT
+    trap - EXIT INT TERM HUP
     echo "Installed relevo in $dir/relevo"
     case ":$PATH:" in
         *":$dir:"*) ;;
         *) echo "$dir is not in your PATH: add it in your shell's profile, as export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
     esac
 
+    # The server's fingerprint, unless one was given.
+    for arg in "$@"; do
+        case $arg in --fingerprint | --fingerprint=*) fingerprint= ;; esac
+    done
     set -- connect --join "$code" "$@" "$url"
     if [ -n "$fingerprint" ]; then
         set -- "$@" --fingerprint "$fingerprint"

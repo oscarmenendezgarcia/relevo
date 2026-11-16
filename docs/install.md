@@ -192,7 +192,7 @@ Send it the way you usually talk (a chat message is fine). Ana opens it, or past
 
 The link points at the address the server recorded when it started, which its log says (`invitation links point at this address`): `--public-url` (or `RELEVO_PUBLIC_URL` in the drop-in) when given, else `https://` and the first `--tls-name`, or the address it listens on, and its port. Behind a proxy, set `--public-url https://relevo.example.com`. `relevo invite ana --url …` gives another address for one link. The server must be 0.7.0 or later, and started once, before the first `invite`.
 
-A link already used, or older than 24 hours, shows a page that says so: run `relevo invite ana` again (without `--name`, she keeps hers) for a new one; it replaces the old one if it was not used. Ten links that do not work from one address within an hour, and that address is refused for an hour, so codes cannot be guessed.
+A link already used, or older than 24 hours, shows a page that says so: run `relevo invite ana` again (without `--name`, she keeps hers) for a new one; it replaces the old one if it was not used. Ten links that do not exist from one address within an hour (used or expired ones do not count), and that address is refused for an hour, so codes cannot be guessed; 200 from everyone, and everyone is (the log says so). Behind a proxy on the same machine every visitor comes from loopback, so they share one address's ten. With `relevo serve --tls`, only links to its own address (its port, a name its certificate has) carry its pin: a link `--url` points at a proxy does not.
 
 **Or with a token**, as before 0.7.0 (for scripts, and for agents set up by hand). The token is printed once:
 
@@ -319,7 +319,7 @@ This part is for each person, on their own machine.
 **With the link the owner sent** (from 0.7.0), steps 1 and 2 are one: give the link to your agent (Claude Code, pi, Hermes) and say "join", or open it and paste its command in a terminal:
 
 ```
-curl -sSf --pinnedpubkey sha256//… -k https://192.168.1.50:7878/join/K7Q2-9FPA/install | sh
+curl -sS --pinnedpubkey sha256//… -k https://192.168.1.50:7878/join/K7Q2-9FPA/install | sh
 ```
 
 It installs `relevo` in `~/.local/bin` (without sudo; add that to your `PATH` if it says it is not there) from the team's server, checks it against the SHA-256 the server lists, and runs `relevo connect --join`, which trusts the server's certificate, trades the link for a token of your own and saves it as step 2 says. Rather not pipe to sh? Put `-o relevo-join.sh` in place of `| sh`, read it, then run `sh relevo-join.sh`. The link works once: if it fails, ask the owner for a new one. Then go on with step 3 (an agent you named with `--setup` says what is left for it).

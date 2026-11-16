@@ -388,6 +388,7 @@ async fn connect(
         cert,
         adapters,
     };
+    let joined = join.is_some();
     config.token = match join {
         Some(code) => {
             let joining = client::Client::new(&config, Some(String::new()), "/".into())?;
@@ -395,15 +396,25 @@ async fn connect(
                 .join(code.trim())
                 .await
                 .map_err(|e| anyhow::anyhow!("joining {} with the invitation: {e}", config.url))?;
-            joined["token"].as_str().unwrap_or_default().to_string()
+            let token = joined["token"].as_str().unwrap_or_default().to_string();
+            // Saved at once: the invitation is used, and its token must not be lost to a failure
+            // that comes later.
+            config.token = token.clone();
+            config::save(&path, &config)?;
+            token
         }
         None => connect_token(token)?.trim().to_string(),
     };
     let client = client::Client::new(&config, Some(String::new()), "/".into())?;
-    let people = client
-        .people()
-        .await
-        .map_err(|e| anyhow::anyhow!("checking the token with {}: {e}", config.url))?;
+    let people = client.people().await.map_err(|e| match joined {
+        true => anyhow::anyhow!(
+            "joined {}, and saved its token to {}; but checking it failed: {e}. Relevo is set up \
+             with it: if this goes on, tell whoever invited you",
+            config.url,
+            path.display()
+        ),
+        false => anyhow::anyhow!("checking the token with {}: {e}", config.url),
+    })?;
     // The check is a session of its own: end it, or it stays listed until it is forgotten.
     let _ = client.end(std::time::Duration::from_secs(2)).await;
     config::save(&path, &config)?;
@@ -678,6 +689,37 @@ fn server_tls(
     Ok((Some(cert.server_config()?), public))
 }
 
+/// How an invitation's link reaches the server at `url`: with the key pin and fingerprint of
+/// `serve`'s own certificate (`public`, as `serve` recorded it) only when `url` is `serve`'s own
+/// TLS address: https, the port `serve` speaks TLS on, and a host its certificate names (the one
+/// stored next to the database `db_file`, if it is still the one `serve` uses). Any other address
+/// (a proxy's, say) gets neither: curl checks its certificate as usual.
+fn link_address(db_file: &str, public: &db::Public, url: String) -> Result<db::Address> {
+    let mut address = db::Address {
+        url,
+        pin: None,
+        fingerprint: None,
+    };
+    let (Some(pin), Some(fingerprint), Some(port)) =
+        (&public.pin, &public.fingerprint, public.port)
+    else {
+        return Ok(address);
+    };
+    let parsed = reqwest::Url::parse(&address.url)?;
+    let cert = tls::stored(&tls::dir_for(db_file))?;
+    let own = parsed.scheme() == "https"
+        && parsed.port_or_known_default() == Some(port)
+        && cert.is_some_and(|cert| {
+            tls::key_pin(&cert.chain[0]).is_ok_and(|p| &p == pin)
+                && tls::names_host(&cert.chain[0], parsed.host_str().unwrap_or(""))
+        });
+    if own {
+        address.pin = Some(pin.clone());
+        address.fingerprint = Some(fingerprint.clone());
+    }
+    Ok(address)
+}
+
 /// The address teammates reach the server at, for invitation links: `given`, or else the
 /// scheme, the first of `names` (`--tls-name`) or the address it listens on (`local`; one of
 /// this machine's when it listens on all of them), and its port.
@@ -941,6 +983,9 @@ async fn main() -> Result<()> {
                 listener.local_addr()?,
             )?;
             public.url = Some(url.clone());
+            if public.pin.is_some() {
+                public.port = Some(listener.local_addr()?.port());
+            }
             db::set_public(&app.db(), &public)?;
             tracing::info!(%addr, db = %db_file, %scheme, "relevo listening");
             tracing::info!(
@@ -989,13 +1034,14 @@ async fn main() -> Result<()> {
                         )
                     })?,
                 };
+                let address = link_address(&db_file, &db::public(&conn)?, url)?;
                 let invitation =
-                    db::invite_link(&conn, &handle, &name, about.as_deref(), &url, now)?;
+                    db::invite_link(&conn, &handle, &name, about.as_deref(), &address, now)?;
                 println!(
                     "Invited @{handle} ({name}). Send them this link — it works once, for 24 \
-                     hours:\n\n  {url}/join/{}\n\nThey can open it, or just give it to their \
+                     hours:\n\n  {}/join/{}\n\nThey can open it, or just give it to their \
                      agent (Claude Code, pi, Hermes).",
-                    invitation.code
+                    address.url, invitation.code
                 );
             }
         }

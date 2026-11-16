@@ -6,6 +6,7 @@
 //! that do not work is refused for a while, so that codes cannot be guessed. Codes and tokens are
 //! never logged.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
@@ -25,9 +26,12 @@ use crate::db::{self, Invite};
 use crate::error::ApiError;
 use crate::{App, dist, lock};
 
-/// Codes that do not work one address may try in `FAILURE_WINDOW_SECS`; beyond, every invitation
-/// route refuses it until the oldest of them is that old.
+/// Tries at codes that do not exist one address may make in `FAILURE_WINDOW_SECS`, and all
+/// addresses together; beyond either, every invitation route refuses that address (or everyone)
+/// until the oldest of them is that old. A used or expired code does not count: someone was given
+/// it, and is told to ask for a new one.
 pub const MAX_FAILURES: usize = 10;
+pub const MAX_ALL_FAILURES: usize = 200;
 pub const FAILURE_WINDOW_SECS: i64 = 3600;
 
 const STYLE: &str = include_str!("join/page.css");
@@ -63,45 +67,96 @@ fn address(peer: &Peer) -> IpAddr {
     }
 }
 
-/// Whether `addr` tried `MAX_FAILURES` codes that do not work in the last `FAILURE_WINDOW_SECS`.
-fn limited(app: &App, addr: IpAddr, now: i64) -> bool {
-    lock(&app.join_failures).get(&addr).is_some_and(|times| {
-        times
-            .iter()
-            .filter(|t| **t > now - FAILURE_WINDOW_SECS)
-            .count()
-            >= MAX_FAILURES
-    })
+/// The tries at codes that do not exist, in memory only.
+#[derive(Default)]
+pub(crate) struct Tries {
+    /// When each address (see `address`) made one: those in the window, and older ones until the
+    /// next prune.
+    by_address: HashMap<IpAddr, Vec<i64>>,
+    /// When the old ones were last dropped.
+    pruned_at: i64,
+    /// When the server last logged that it refuses everyone.
+    warned_at: Option<i64>,
 }
 
-/// `addr` tried a code that does not work.
-fn failed(app: &App, addr: IpAddr, now: i64) {
-    let mut all = lock(&app.join_failures);
-    // What is older than the window counts for nothing: dropped, so the map stays small.
-    if all.len() > 1000 {
-        all.retain(|_, times| times.last().is_some_and(|t| *t > now - FAILURE_WINDOW_SECS));
+/// A try at a code under way. It counts as one at a code that does not exist from the moment it
+/// starts, under the lock, so that tries made at once cannot pass the limits together; `forget`
+/// takes it back once the code turns out to exist.
+struct Try<'a> {
+    app: &'a App,
+    addr: IpAddr,
+    at: i64,
+}
+
+/// Starts a try from `addr`, or refuses it when that address, or everyone, made too many.
+fn start(app: &App, addr: IpAddr, now: i64) -> Result<Try<'_>, Refusal> {
+    let fresh = |t: &i64| *t > now - FAILURE_WINDOW_SECS;
+    let count = |times: &Vec<i64>| times.iter().filter(|t| fresh(t)).count();
+    let mut tries = lock(&app.join_tries);
+    if !fresh(&tries.pruned_at) {
+        tries.by_address.retain(|_, times| {
+            times.retain(fresh);
+            !times.is_empty()
+        });
+        tries.pruned_at = now;
     }
-    let times = all.entry(addr).or_default();
-    times.retain(|t| *t > now - FAILURE_WINDOW_SECS);
+    let all: usize = tries.by_address.values().map(count).sum();
+    if all >= MAX_ALL_FAILURES {
+        if !tries.warned_at.is_some_and(|at| fresh(&at)) {
+            tracing::warn!(
+                "{all} tries at invitation codes that do not exist in an hour: every invitation \
+                 route is refused for a while"
+            );
+            tries.warned_at = Some(now);
+        }
+        return Err(Refusal::Limited);
+    }
+    let times = tries.by_address.entry(addr).or_default();
+    if count(times) >= MAX_FAILURES {
+        return Err(Refusal::Limited);
+    }
     times.push(now);
-    if times.len() == MAX_FAILURES {
-        tracing::warn!(address = %addr, "too many invitation codes that do not work: refused for a while");
+    Ok(Try { app, addr, at: now })
+}
+
+impl Try<'_> {
+    /// The code exists (or nothing was looked up): this try does not count.
+    fn forget(self) {
+        let mut tries = lock(&self.app.join_tries);
+        if let Some(times) = tries.by_address.get_mut(&self.addr)
+            && let Some(i) = times.iter().rposition(|t| *t == self.at)
+        {
+            times.remove(i);
+        }
     }
 }
 
 /// Why an invitation route does not go on.
 enum Refusal {
     Limited,
-    Not(Invite),
+    Used(String),
+    Expired(String),
+    Unknown,
     Internal,
+}
+
+impl From<Invite> for Refusal {
+    /// What a code that does not work answers (a valid one is no refusal: it stays `Unknown`).
+    fn from(invite: Invite) -> Self {
+        match invite {
+            Invite::Used(handle) => Refusal::Used(handle),
+            Invite::Expired(handle) => Refusal::Expired(handle),
+            Invite::Valid { .. } | Invite::Unknown => Refusal::Unknown,
+        }
+    }
 }
 
 impl Refusal {
     fn status(&self) -> StatusCode {
         match self {
             Refusal::Limited => StatusCode::TOO_MANY_REQUESTS,
-            Refusal::Not(Invite::Used(_) | Invite::Expired(_)) => StatusCode::GONE,
-            Refusal::Not(_) => StatusCode::NOT_FOUND,
+            Refusal::Used(_) | Refusal::Expired(_) => StatusCode::GONE,
+            Refusal::Unknown => StatusCode::NOT_FOUND,
             Refusal::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -109,9 +164,9 @@ impl Refusal {
     fn code(&self) -> &'static str {
         match self {
             Refusal::Limited => "RATE_LIMITED",
-            Refusal::Not(Invite::Used(_)) => "INVITE_USED",
-            Refusal::Not(Invite::Expired(_)) => "INVITE_EXPIRED",
-            Refusal::Not(_) => "INVITE_UNKNOWN",
+            Refusal::Used(_) => "INVITE_USED",
+            Refusal::Expired(_) => "INVITE_EXPIRED",
+            Refusal::Unknown => "INVITE_UNKNOWN",
             Refusal::Internal => "INTERNAL",
         }
     }
@@ -119,23 +174,23 @@ impl Refusal {
     fn title(&self) -> &'static str {
         match self {
             Refusal::Limited => "Too many tries",
-            Refusal::Not(Invite::Used(_)) => "This invitation was already used",
-            Refusal::Not(Invite::Expired(_)) => "This invitation has expired",
-            Refusal::Not(_) => "This invitation link does not work",
+            Refusal::Used(_) => "This invitation was already used",
+            Refusal::Expired(_) => "This invitation has expired",
+            Refusal::Unknown => "This invitation link does not work",
             Refusal::Internal => "Something went wrong",
         }
     }
 
     fn message(&self) -> String {
         match self {
-            Refusal::Limited => "Too many invitation links that do not work came from your \
-                                 address. Wait an hour, then try again."
+            Refusal::Limited => "Too many invitation links that do not exist were tried, from \
+                                 your address or in all. Wait an hour, then try again."
                 .to_string(),
-            Refusal::Not(Invite::Used(handle) | Invite::Expired(handle)) => format!(
+            Refusal::Used(handle) | Refusal::Expired(handle) => format!(
                 "An invitation works once, for 24 hours. Ask for a new one: on the server, \
                  relevo invite {handle}."
             ),
-            Refusal::Not(_) => "No invitation has this code: check that you have the whole \
+            Refusal::Unknown => "No invitation has this code: check that you have the whole \
                                 link, or ask for a new one."
                 .to_string(),
             Refusal::Internal => "The server could not read the invitation: try again in a \
@@ -155,16 +210,15 @@ impl Refusal {
 
 /// The invitation `code` names, when it works and the client may still try codes.
 fn check(app: &App, peer: &Peer, code: &str) -> Result<Invite, Refusal> {
-    let (addr, now) = (address(peer), app.clock.now());
-    if limited(app, addr, now) {
-        return Err(Refusal::Limited);
+    let now = app.clock.now();
+    let attempt = start(app, address(peer), now)?;
+    let found = db::find_invite(&app.db(), code, now);
+    if !matches!(found, Ok(Invite::Unknown)) {
+        attempt.forget();
     }
-    match db::find_invite(&app.db(), code, now) {
+    match found {
         Ok(found @ Invite::Valid { .. }) => Ok(found),
-        Ok(other) => {
-            failed(app, addr, now);
-            Err(Refusal::Not(other))
-        }
+        Ok(other) => Err(other.into()),
         Err(e) => {
             tracing::error!(error = %e, "reading an invitation");
             Err(Refusal::Internal)
@@ -183,19 +237,17 @@ async fn join(
     peer: Peer,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Json<Value>, ApiError> {
-    let (addr, now) = (address(&peer), app.clock.now());
-    if limited(&app, addr, now) {
-        return Err(Refusal::Limited.api());
-    }
     let body = body.map_err(|e| ApiError::bad_request(e.body_text()))?;
     let req: JoinRequest = serde_json::from_slice(&body)
         .map_err(|e| ApiError::bad_request(format!("the body must be {{ \"code\": … }}: {e}")))?;
-    let redeemed = db::redeem_invite(&app.db(), &req.code, now).map_err(|e| {
-        tracing::error!(error = %e, "using an invitation");
-        ApiError::internal()
-    })?;
+    let now = app.clock.now();
+    let attempt = start(&app, address(&peer), now).map_err(|refusal| refusal.api())?;
+    let redeemed = db::redeem_invite(&app.db(), &req.code, now);
+    if !matches!(redeemed, Ok(Err(Invite::Unknown))) {
+        attempt.forget();
+    }
     match redeemed {
-        Ok(joined) => {
+        Ok(Ok(joined)) => {
             tracing::info!(person = %joined.handle, token = %joined.token.id, "joined with an invitation");
             Ok(Json(json!({
                 "token": joined.token.secret,
@@ -203,9 +255,10 @@ async fn join(
                 "url": joined.url,
             })))
         }
-        Err(state) => {
-            failed(&app, addr, now);
-            Err(Refusal::Not(state).api())
+        Ok(Err(state)) => Err(Refusal::from(state).api()),
+        Err(e) => {
+            tracing::error!(error = %e, "using an invitation");
+            Err(ApiError::internal())
         }
     }
 }
@@ -223,13 +276,14 @@ fn sh_word(s: &str) -> String {
 }
 
 /// The command that runs the install script of `code`, trusting the server by its key's pin when
-/// it has one.
+/// it has one. Without `-f`: when the code does not work, the server's answer is a script that
+/// says why and fails, and sh runs that.
 fn curl_install(url: &str, code: &str, pin: Option<&str>) -> String {
     let trust = pin
         .map(|pin| format!("--pinnedpubkey {} -k ", sh_word(&format!("sha256//{pin}"))))
         .unwrap_or_default();
     format!(
-        "curl -sSf {trust}{}",
+        "curl -sS {trust}{}",
         sh_word(&format!("{url}/join/{code}/install"))
     )
 }
@@ -250,12 +304,38 @@ async fn binaries(app: &App) -> Vec<(String, String)> {
         .collect()
 }
 
+/// `template` with each `@NAME@` of `values` in place, in one pass: a value is never read again,
+/// so one that holds `@NAME@` stays as it is. Any other `@` stays too (`"$@"`).
+fn fill(template: &str, values: &[(&str, String)]) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(at) = rest.find('@') {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 1..];
+        let named = values.iter().find(|(name, _)| {
+            after
+                .strip_prefix(name)
+                .is_some_and(|tail| tail.starts_with('@'))
+        });
+        match named {
+            Some((name, value)) => {
+                out.push_str(value);
+                rest = &after[name.len() + 1..];
+            }
+            None => {
+                out.push('@');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// `GET /join/<code>/install`: the script, or one that says why there is none and fails.
 async fn install(State(app): State<Arc<App>>, peer: Peer, Path(code): Path<String>) -> Response {
-    let found = check(&app, &peer, &code);
-    let public = db::public(&app.db()).unwrap_or_default();
-    let (status, script) = match found {
-        Ok(Invite::Valid { url, .. }) => {
+    let (status, script) = match check(&app, &peer, &code) {
+        Ok(Invite::Valid { address, .. }) => {
             let sums: Vec<String> = binaries(&app)
                 .await
                 .into_iter()
@@ -263,15 +343,17 @@ async fn install(State(app): State<Arc<App>>, peer: Peer, Path(code): Path<Strin
                 .collect();
             let code = db::invite_code(&code).expect("a valid invitation's code");
             let quote = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
-            let script = INSTALL
-                .replace("@URL@", &quote(&url))
-                .replace("@CODE@", &quote(&code))
-                .replace("@PIN@", &quote(public.pin.as_deref().unwrap_or("")))
-                .replace(
-                    "@FINGERPRINT@",
-                    &quote(public.fingerprint.as_deref().unwrap_or("")),
-                )
-                .replace("@SUMS@", &quote(&sums.join("\n")));
+            let values = [
+                ("URL", quote(&address.url)),
+                ("CODE", quote(&code)),
+                ("PIN", quote(address.pin.as_deref().unwrap_or(""))),
+                (
+                    "FINGERPRINT",
+                    quote(address.fingerprint.as_deref().unwrap_or("")),
+                ),
+                ("SUMS", quote(&sums.join("\n"))),
+            ];
+            let script = fill(INSTALL, &values);
             (StatusCode::OK, script)
         }
         Ok(_) => unreachable!("check answers only a valid invitation"),
@@ -394,13 +476,13 @@ async fn page(
     headers: HeaderMap,
 ) -> Response {
     let found = check(&app, &peer, &code);
-    let (handle, name, url, expires_at) = match found {
+    let (handle, name, address, expires_at) = match found {
         Ok(Invite::Valid {
             handle,
             name,
-            url,
+            address,
             expires_at,
-        }) => (handle, name, url, expires_at),
+        }) => (handle, name, address, expires_at),
         Ok(_) => unreachable!("check answers only a valid invitation"),
         Err(refusal) => {
             let main = format!(
@@ -411,11 +493,18 @@ async fn page(
             return html(refusal.status(), refusal.title(), &main);
         }
     };
-    let pin = db::public(&app.db()).unwrap_or_default().pin;
     let targets = binaries(&app).await;
     let code = db::invite_code(&code).expect("a valid invitation's code");
+    let url = &address.url;
     let link = format!("{url}/join/{code}");
-    let command = curl_install(&url, &code, pin.as_deref());
+    let command = curl_install(url, &code, address.pin.as_deref());
+    // Plain http: nothing can show that the server is the one that invited you.
+    let plain = if url.starts_with("http://") {
+        "<p class=\"warn\">This server speaks plain http: use this link only on a network you \
+         trust, such as your office's or a VPN.</p>\n"
+    } else {
+        ""
+    };
     let mac = headers
         .get(header::USER_AGENT)
         .and_then(|ua| ua.to_str().ok())
@@ -466,7 +555,7 @@ data-copy=\"link\">Copy link</button></div>
 <code>~/.local/bin</code> and connects it to this server, without sudo.</p>
 </details>
 </section>
-<p class=\"foot\">One use · expires in {expires} · it never shows your token</p>
+{plain}<p class=\"foot\">One use · expires in {expires} · it never shows your token</p>
 <section class=\"agents\" id=\"for-agents\">
 <h2>For AI agents</h2>
 <p>This page invites the person you work for to join a Relevo server, as @{handle}. Relevo \
@@ -536,6 +625,18 @@ mod tests {
             "2001:db8:1:2::".parse::<IpAddr>().unwrap()
         );
         assert_eq!(address(&None), IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    }
+
+    #[test]
+    fn a_template_is_filled_in_one_pass() {
+        let values = [
+            ("URL", "'@SUMS@'".to_string()),
+            ("SUMS", "'x @URL@'".to_string()),
+        ];
+        assert_eq!(
+            fill("u=@URL@ s=@SUMS@ \"$@\" a@b @NONE@", &values),
+            "u='@SUMS@' s='x @URL@' \"$@\" a@b @NONE@"
+        );
     }
 
     #[test]

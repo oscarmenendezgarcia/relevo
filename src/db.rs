@@ -226,8 +226,8 @@ CREATE TABLE IF NOT EXISTS thread_closes (
 -- What the server keeps about itself, by key: `announced`, the latest version of relevo whose
 -- release notes the server posted on the global board (or would have: see `release`),
 -- `system_person`, the id of the person `relevo` who posts them, and what `serve` last said of
--- the address it serves at, for invitation links (`public_url`, `tls_pin`, `tls_fingerprint`:
--- see `set_public`). Layout 8 brings it (a database of layout 7 gets it as it migrates).
+-- the address it serves at, for invitation links (`public_url`, `tls_pin`, `tls_fingerprint`,
+-- `tls_port`: see `set_public`). Layout 8 brings it (a database of layout 7 gets it as it migrates).
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -241,13 +241,16 @@ CREATE INDEX IF NOT EXISTS participants_handled ON participants(person_id, handl
 CREATE INDEX IF NOT EXISTS notes_by_thread_author ON notes(thread_id, author_id);
 -- Invitations (`relevo invite`): a code that works once, until `expires_at`, to trade for a token
 -- of its person (`POST /api/join`), kept by its SHA-256 only, with the server's address the link
--- gave (`url`). A person has at most one unused invitation: a new one replaces it. Added in 0.7.0
+-- gave (`url`) and, when that is `serve`'s own TLS address, its certificate's key pin and
+-- fingerprint (`pin`, `fingerprint`; see `Address`). A person has at most one unused invitation: a new one replaces it. Added in 0.7.0
 -- without a new layout, as the index above: every database gets it when opened, and nothing
 -- before 0.7.0 reads it.
 CREATE TABLE IF NOT EXISTS invites (
     hash       TEXT PRIMARY KEY,
     person_id  INTEGER NOT NULL REFERENCES people(id),
     url        TEXT NOT NULL,
+    pin         TEXT,
+    fingerprint TEXT,
     created_at INTEGER NOT NULL,
     expires_at INTEGER NOT NULL,
     used_at    INTEGER
@@ -962,14 +965,25 @@ pub struct Invitation {
     pub expires_at: i64,
 }
 
+/// How an invitation's link reaches the server: its address, and, when that is `serve`'s own TLS
+/// address (with a certificate of its own), the certificate's key pin (base64 SHA-256 of its
+/// SubjectPublicKeyInfo, for `curl --pinnedpubkey`) and fingerprint (for `relevo connect
+/// --fingerprint`). Never for another address, a proxy's say: its certificate is another.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Address {
+    pub url: String,
+    pub pin: Option<String>,
+    pub fingerprint: Option<String>,
+}
+
 /// Creates the person, or reuses (and reactivates) an existing one, as `invite` does, then gives
-/// them a new invitation to the server at `url`, in place of an unused one they had.
+/// them a new invitation to the server at `address`, in place of an unused one they had.
 pub fn invite_link(
     conn: &Connection,
     handle: &str,
     name: &str,
     about: Option<&str>,
-    url: &str,
+    address: &Address,
     now: i64,
 ) -> Result<Invitation> {
     let tx = add_person(conn, handle, name, about, now)?;
@@ -986,12 +1000,14 @@ pub fn invite_link(
         expires_at: now + INVITE_LIFETIME_SECS,
     };
     tx.execute(
-        "INSERT INTO invites (hash, person_id, url, created_at, expires_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO invites (hash, person_id, url, pin, fingerprint, created_at, expires_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             invite_hash(&raw).expect("a code of the alphabet"),
             person,
-            url,
+            address.url,
+            address.pin,
+            address.fingerprint,
             now,
             invitation.expires_at
         ],
@@ -1020,11 +1036,11 @@ fn invite_hash(code: &str) -> Option<String> {
 /// What an invitation code is now.
 #[derive(Debug, PartialEq)]
 pub enum Invite {
-    /// It works: for this person, to the server at `url`, until `expires_at`.
+    /// It works: for this person, to the server at `address`, until `expires_at`.
     Valid {
         handle: String,
         name: String,
-        url: String,
+        address: Address,
         expires_at: i64,
     },
     /// It worked once, for this handle.
@@ -1042,7 +1058,8 @@ pub fn find_invite(conn: &Connection, code: &str, now: i64) -> rusqlite::Result<
     };
     let row = conn
         .query_row(
-            "SELECT p.handle, p.name, p.active, i.url, i.expires_at, i.used_at
+            "SELECT p.handle, p.name, p.active, i.url, i.pin, i.fingerprint, i.expires_at,
+                    i.used_at
              FROM invites i JOIN people p ON p.id = i.person_id WHERE i.hash = ?1",
             [hash],
             |r| {
@@ -1050,9 +1067,13 @@ pub fn find_invite(conn: &Connection, code: &str, now: i64) -> rusqlite::Result<
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, bool>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, i64>(4)?,
-                    r.get::<_, Option<i64>>(5)?,
+                    Address {
+                        url: r.get(3)?,
+                        pin: r.get(4)?,
+                        fingerprint: r.get(5)?,
+                    },
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, Option<i64>>(7)?,
                 ))
             },
         )
@@ -1061,10 +1082,10 @@ pub fn find_invite(conn: &Connection, code: &str, now: i64) -> rusqlite::Result<
         None | Some((_, _, false, ..)) => Invite::Unknown,
         Some((handle, .., Some(_))) => Invite::Used(handle),
         Some((handle, _, _, _, expires_at, None)) if expires_at <= now => Invite::Expired(handle),
-        Some((handle, name, _, url, expires_at, None)) => Invite::Valid {
+        Some((handle, name, _, address, expires_at, None)) => Invite::Valid {
             handle,
             name,
-            url,
+            address,
             expires_at,
         },
     })
@@ -1086,7 +1107,9 @@ pub fn redeem_invite(
 ) -> Result<std::result::Result<Joined, Invite>> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let (handle, url) = match find_invite(&tx, code, now)? {
-        Invite::Valid { handle, url, .. } => (handle, url),
+        Invite::Valid {
+            handle, address, ..
+        } => (handle, address.url),
         other => return Ok(Err(other)),
     };
     let hash = invite_hash(code).expect("a valid invitation's code");
@@ -1101,24 +1124,26 @@ pub fn redeem_invite(
 }
 
 /// What `serve` says of the address it serves at, for invitation links: the URL teammates reach
-/// it at, and, when it speaks TLS with a certificate of its own, that certificate's key pin
-/// (base64 SHA-256 of its SubjectPublicKeyInfo, as `curl --pinnedpubkey` takes it) and
-/// fingerprint (as `relevo connect --fingerprint` takes it).
+/// it at, and, when it speaks TLS with a certificate of its own, that certificate's key pin and
+/// fingerprint (see `Address`) and the port it serves it on.
 #[derive(Debug, Default, PartialEq)]
 pub struct Public {
     pub url: Option<String>,
     pub pin: Option<String>,
     pub fingerprint: Option<String>,
+    pub port: Option<u16>,
 }
 
-const PUBLIC_KEYS: [&str; 3] = ["public_url", "tls_pin", "tls_fingerprint"];
+const PUBLIC_KEYS: [&str; 4] = ["public_url", "tls_pin", "tls_fingerprint", "tls_port"];
 
 /// Records `public` in `meta`, in place of what an earlier start said.
 pub fn set_public(conn: &Connection, public: &Public) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
-    for (key, value) in PUBLIC_KEYS
-        .iter()
-        .zip([&public.url, &public.pin, &public.fingerprint])
+    let port = public.port.map(|p| p.to_string());
+    for (key, value) in
+        PUBLIC_KEYS
+            .iter()
+            .zip([&public.url, &public.pin, &public.fingerprint, &port])
     {
         tx.execute("DELETE FROM meta WHERE key = ?1", [key])?;
         if let Some(value) = value {
@@ -1142,6 +1167,7 @@ pub fn public(conn: &Connection) -> rusqlite::Result<Public> {
         url: get(PUBLIC_KEYS[0])?,
         pin: get(PUBLIC_KEYS[1])?,
         fingerprint: get(PUBLIC_KEYS[2])?,
+        port: get(PUBLIC_KEYS[3])?.and_then(|p: String| p.parse().ok()),
     })
 }
 
@@ -1645,18 +1671,24 @@ mod tests {
             assert_eq!(invite_code(bad), None, "{bad}");
         }
         let conn = open(":memory:").unwrap();
+        let x = Address {
+            url: "https://x".into(),
+            pin: None,
+            fingerprint: None,
+        };
         // A new person needs a name; an existing one keeps theirs.
         assert!(person_name(&conn, "ana").is_err());
-        invite_link(&conn, "ana", "Ana", None, "https://x", 0).unwrap();
+        invite_link(&conn, "ana", "Ana", None, &x, 0).unwrap();
         assert_eq!(person_name(&conn, "ana").unwrap(), "Ana");
-        assert!(invite_link(&conn, "team", "T", None, "https://x", 0).is_err());
-        assert!(invite_link(&conn, SYSTEM_HANDLE, "R", None, "https://x", 0).is_err());
+        assert!(invite_link(&conn, "team", "T", None, &x, 0).is_err());
+        assert!(invite_link(&conn, SYSTEM_HANDLE, "R", None, &x, 0).is_err());
 
         assert_eq!(public(&conn).unwrap(), Public::default());
         let full = Public {
             url: Some("https://a:1".into()),
             pin: Some("p".into()),
             fingerprint: Some("f".into()),
+            port: Some(7878),
         };
         set_public(&conn, &full).unwrap();
         assert_eq!(public(&conn).unwrap(), full);

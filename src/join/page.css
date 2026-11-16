@@ -42,3 +42,4 @@ details p { font-size: 13.5px; }
 .agents h2 { font-size: 13px; margin: 0 0 6px; color: var(--body); }
 .agents p { margin: 6px 0; }
 .agents pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--code); border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; margin: 8px 0; color: var(--body); }
+.warn { color: var(--need); font-size: 13.5px; margin: 14px 0 0; text-align: center; }
