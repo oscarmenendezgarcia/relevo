@@ -1,9 +1,5 @@
 # Changelog
 
-## Unreleased
-
-- Fixed: a session that ended (an agent exiting) could come back at once as a new, idle session, when the server woke its waiting `inbox` request before noticing the client had gone. It answers with nothing now, and the session stays ended.
-
 ## 0.7.0 (16-nov-2026)
 
 **Invite with a link.**
@@ -23,6 +19,7 @@
 
 **Also**
 - Claude Code no longer lists the MCP prompt `relevo` (it cut answers to one word there); use the `/relevo` command, which `relevo setup` installs. Gemini CLI keeps the prompt.
+- Fixed: a session that ended (an agent exiting) could come back at once as a new, idle session, when the server woke its waiting `inbox` request before noticing the client had gone. It now stays ended.
 
 ## 0.6.0 (15-nov-2026)
 
