@@ -224,9 +224,10 @@ CREATE TABLE IF NOT EXISTS thread_closes (
     closed_at INTEGER NOT NULL
 );
 -- What the server keeps about itself, by key: `announced`, the latest version of relevo whose
--- release notes the server posted on the global board (or would have: see `release`), and
--- `system_person`, the id of the person `relevo` who posts them. Layout 8 brings it (a database of
--- layout 7 gets it as it migrates).
+-- release notes the server posted on the global board (or would have: see `release`),
+-- `system_person`, the id of the person `relevo` who posts them, and what `serve` last said of
+-- the address it serves at, for invitation links (`public_url`, `tls_pin`, `tls_fingerprint`:
+-- see `set_public`). Layout 8 brings it (a database of layout 7 gets it as it migrates).
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -238,6 +239,20 @@ CREATE INDEX IF NOT EXISTS participants_timeline ON participants(person_id, last
 -- only: every database of this layout gets it when opened.
 CREATE INDEX IF NOT EXISTS participants_handled ON participants(person_id, handled_at);
 CREATE INDEX IF NOT EXISTS notes_by_thread_author ON notes(thread_id, author_id);
+-- Invitations (`relevo invite`): a code that works once, until `expires_at`, to trade for a token
+-- of its person (`POST /api/join`), kept by its SHA-256 only, with the server's address the link
+-- gave (`url`). A person has at most one unused invitation: a new one replaces it. Added in 0.7.0
+-- without a new layout, as the index above: every database gets it when opened, and nothing
+-- before 0.7.0 reads it.
+CREATE TABLE IF NOT EXISTS invites (
+    hash       TEXT PRIMARY KEY,
+    person_id  INTEGER NOT NULL REFERENCES people(id),
+    url        TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used_at    INTEGER
+);
+CREATE INDEX IF NOT EXISTS invites_by_person ON invites(person_id);
 ";
 
 /// Names no person nor team may take: 0.3's whole team, which the deprecated `to` still reads
@@ -920,6 +935,225 @@ pub fn invite(
     label: &str,
     now: i64,
 ) -> Result<NewToken> {
+    check_label(label)?;
+    let tx = add_person(conn, handle, name, about, now)?;
+    let token = add_token(&tx, handle, label, now)?;
+    tx.commit()?;
+    Ok(token)
+}
+
+/// The name of the person with this handle, for `invite` without `--name`.
+pub fn person_name(conn: &Connection, handle: &str) -> Result<String> {
+    let id =
+        person_id(conn, handle).map_err(|e| anyhow::anyhow!("{e:#}: a new person needs --name"))?;
+    Ok(conn.query_row("SELECT name FROM people WHERE id = ?1", [id], |r| r.get(0))?)
+}
+
+/// How long an invitation works.
+pub const INVITE_LIFETIME_SECS: i64 = 24 * 3600;
+
+/// The characters of an invitation code: digits and capitals, without 0, 1, I and O, which are
+/// read for one another. 8 of them are 40 bits.
+const CODE_ALPHABET: &[u8; 32] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+
+/// An invitation as just made: its code, shown once (`XXXX-XXXX`), and never stored.
+pub struct Invitation {
+    pub code: String,
+    pub expires_at: i64,
+}
+
+/// Creates the person, or reuses (and reactivates) an existing one, as `invite` does, then gives
+/// them a new invitation to the server at `url`, in place of an unused one they had.
+pub fn invite_link(
+    conn: &Connection,
+    handle: &str,
+    name: &str,
+    about: Option<&str>,
+    url: &str,
+    now: i64,
+) -> Result<Invitation> {
+    let tx = add_person(conn, handle, name, about, now)?;
+    let person = person_id(&tx, handle)?;
+    tx.execute(
+        "DELETE FROM invites WHERE person_id = ?1 AND used_at IS NULL",
+        [person],
+    )?;
+    let raw: String = (0..8)
+        .map(|_| CODE_ALPHABET[rand::random_range(0..32)] as char)
+        .collect();
+    let invitation = Invitation {
+        code: invite_code(&raw).expect("a code of the alphabet"),
+        expires_at: now + INVITE_LIFETIME_SECS,
+    };
+    tx.execute(
+        "INSERT INTO invites (hash, person_id, url, created_at, expires_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            invite_hash(&raw).expect("a code of the alphabet"),
+            person,
+            url,
+            now,
+            invitation.expires_at
+        ],
+    )?;
+    tx.commit()?;
+    Ok(invitation)
+}
+
+/// A code as `relevo invite` prints it (`XXXX-XXXX`), from one given in any case, with or
+/// without its `-`; `None` when it cannot be a code.
+pub fn invite_code(code: &str) -> Option<String> {
+    let raw: String = code
+        .chars()
+        .filter(|c| *c != '-')
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    (raw.len() == 8 && raw.bytes().all(|c| CODE_ALPHABET.contains(&c)))
+        .then(|| format!("{}-{}", &raw[..4], &raw[4..]))
+}
+
+/// The hash a code is stored by: of its 8 characters, without the `-`.
+fn invite_hash(code: &str) -> Option<String> {
+    invite_code(code).map(|code| hash_token(&code.replace('-', "")))
+}
+
+/// What an invitation code is now.
+#[derive(Debug, PartialEq)]
+pub enum Invite {
+    /// It works: for this person, to the server at `url`, until `expires_at`.
+    Valid {
+        handle: String,
+        name: String,
+        url: String,
+        expires_at: i64,
+    },
+    /// It worked once, for this handle.
+    Used(String),
+    /// It was not used in time, for this handle.
+    Expired(String),
+    /// No such code (never made, replaced, or of a person since deactivated).
+    Unknown,
+}
+
+/// What `code` is at `now`. Reads only: the pages that show an invitation do not use it.
+pub fn find_invite(conn: &Connection, code: &str, now: i64) -> rusqlite::Result<Invite> {
+    let Some(hash) = invite_hash(code) else {
+        return Ok(Invite::Unknown);
+    };
+    let row = conn
+        .query_row(
+            "SELECT p.handle, p.name, p.active, i.url, i.expires_at, i.used_at
+             FROM invites i JOIN people p ON p.id = i.person_id WHERE i.hash = ?1",
+            [hash],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, bool>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, Option<i64>>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    Ok(match row {
+        None | Some((_, _, false, ..)) => Invite::Unknown,
+        Some((handle, .., Some(_))) => Invite::Used(handle),
+        Some((handle, _, _, _, expires_at, None)) if expires_at <= now => Invite::Expired(handle),
+        Some((handle, name, _, url, expires_at, None)) => Invite::Valid {
+            handle,
+            name,
+            url,
+            expires_at,
+        },
+    })
+}
+
+/// An invitation used: for whom, to which server, and the token it was traded for.
+pub struct Joined {
+    pub handle: String,
+    pub url: String,
+    pub token: NewToken,
+}
+
+/// Uses `code`: when it works, marks it used and issues a new token for its person, labelled
+/// `joined <date>`, in one step; otherwise says what it is, and changes nothing.
+pub fn redeem_invite(
+    conn: &Connection,
+    code: &str,
+    now: i64,
+) -> Result<std::result::Result<Joined, Invite>> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let (handle, url) = match find_invite(&tx, code, now)? {
+        Invite::Valid { handle, url, .. } => (handle, url),
+        other => return Ok(Err(other)),
+    };
+    let hash = invite_hash(code).expect("a valid invitation's code");
+    tx.execute(
+        "UPDATE invites SET used_at = ?2 WHERE hash = ?1",
+        params![hash, now],
+    )?;
+    let date = rfc3339(now);
+    let token = add_token(&tx, &handle, &format!("joined {}", &date[..10]), now)?;
+    tx.commit()?;
+    Ok(Ok(Joined { handle, url, token }))
+}
+
+/// What `serve` says of the address it serves at, for invitation links: the URL teammates reach
+/// it at, and, when it speaks TLS with a certificate of its own, that certificate's key pin
+/// (base64 SHA-256 of its SubjectPublicKeyInfo, as `curl --pinnedpubkey` takes it) and
+/// fingerprint (as `relevo connect --fingerprint` takes it).
+#[derive(Debug, Default, PartialEq)]
+pub struct Public {
+    pub url: Option<String>,
+    pub pin: Option<String>,
+    pub fingerprint: Option<String>,
+}
+
+const PUBLIC_KEYS: [&str; 3] = ["public_url", "tls_pin", "tls_fingerprint"];
+
+/// Records `public` in `meta`, in place of what an earlier start said.
+pub fn set_public(conn: &Connection, public: &Public) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    for (key, value) in PUBLIC_KEYS
+        .iter()
+        .zip([&public.url, &public.pin, &public.fingerprint])
+    {
+        tx.execute("DELETE FROM meta WHERE key = ?1", [key])?;
+        if let Some(value) = value {
+            tx.execute(
+                "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+                params![key, value],
+            )?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// What `serve` last recorded with `set_public`.
+pub fn public(conn: &Connection) -> rusqlite::Result<Public> {
+    let get = |key: &str| {
+        conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+            .optional()
+    };
+    Ok(Public {
+        url: get(PUBLIC_KEYS[0])?,
+        pin: get(PUBLIC_KEYS[1])?,
+        fingerprint: get(PUBLIC_KEYS[2])?,
+    })
+}
+
+/// The person part of `invite` and `invite_link`: creates the person, or reuses (and
+/// reactivates) an existing one, in a transaction the caller commits.
+fn add_person<'c>(
+    conn: &'c Connection,
+    handle: &str,
+    name: &str,
+    about: Option<&str>,
+    now: i64,
+) -> Result<Transaction<'c>> {
     if !valid_handle(handle) {
         bail!("handle must match ^[a-z0-9][a-z0-9_-]{{1,31}}$");
     }
@@ -931,7 +1165,6 @@ pub fn invite(
     if let Some(about) = about {
         one_line("about", about)?;
     }
-    check_label(label)?;
     // IMMEDIATE so the team-name check and the insert are one atomic step: a concurrent
     // `team add <handle>` sees the person and fails, not a silent duplicate @-name.
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
@@ -945,9 +1178,7 @@ pub fn invite(
          ON CONFLICT (handle) DO UPDATE SET name = ?2, about = coalesce(?3, about), active = 1",
         params![handle, name, about, now],
     )?;
-    let token = add_token(&tx, handle, label, now)?;
-    tx.commit()?;
-    Ok(token)
+    Ok(tx)
 }
 
 fn check_label(label: &str) -> Result<()> {
@@ -1149,12 +1380,17 @@ pub fn list_sessions(
 }
 
 /// Deactivated people can no longer authenticate nor receive new threads. Every token of theirs
-/// is revoked for good, and its sessions forgotten with their claims: `invite` brings them back
-/// with a new token, and they find their threads again. Returns how many tokens it revoked.
+/// is revoked for good, and its sessions forgotten with their claims, and an unused invitation of
+/// theirs is dropped: `invite` brings them back, and they find their threads again. Returns how
+/// many tokens it revoked.
 pub fn deactivate(conn: &Connection, handle: &str, now: i64) -> Result<usize> {
     let id = person_id(conn, handle)?;
     let tx = conn.unchecked_transaction()?;
     tx.execute("UPDATE people SET active = 0 WHERE id = ?1", [id])?;
+    tx.execute(
+        "DELETE FROM invites WHERE person_id = ?1 AND used_at IS NULL",
+        [id],
+    )?;
     let revoked = tx.execute(
         "UPDATE tokens SET revoked_at = ?2 WHERE person_id = ?1 AND revoked_at IS NULL",
         params![id, now],
@@ -1392,6 +1628,44 @@ mod tests {
         assert_eq!(people[0].name, "Ana B");
         assert_eq!(list_tokens(&conn, Some("ana")).unwrap().len(), 2);
         assert!(invite(&conn, "team", "T", None, "x", 0).is_err());
+    }
+
+    #[test]
+    fn invitation_codes_and_the_servers_address() {
+        assert_eq!(invite_code("k7q29fpa").as_deref(), Some("K7Q2-9FPA"));
+        assert_eq!(invite_code("K7Q2-9FPA").as_deref(), Some("K7Q2-9FPA"));
+        for bad in [
+            "K7Q2-9FP",
+            "K7Q2-9FPA2",
+            "K0Q2-9FPA",
+            "K1Q2-9FPA",
+            "KIQ2-9FPA",
+            "KOQ2-9FPA",
+        ] {
+            assert_eq!(invite_code(bad), None, "{bad}");
+        }
+        let conn = open(":memory:").unwrap();
+        // A new person needs a name; an existing one keeps theirs.
+        assert!(person_name(&conn, "ana").is_err());
+        invite_link(&conn, "ana", "Ana", None, "https://x", 0).unwrap();
+        assert_eq!(person_name(&conn, "ana").unwrap(), "Ana");
+        assert!(invite_link(&conn, "team", "T", None, "https://x", 0).is_err());
+        assert!(invite_link(&conn, SYSTEM_HANDLE, "R", None, "https://x", 0).is_err());
+
+        assert_eq!(public(&conn).unwrap(), Public::default());
+        let full = Public {
+            url: Some("https://a:1".into()),
+            pin: Some("p".into()),
+            fingerprint: Some("f".into()),
+        };
+        set_public(&conn, &full).unwrap();
+        assert_eq!(public(&conn).unwrap(), full);
+        let url_only = Public {
+            url: Some("https://b".into()),
+            ..Public::default()
+        };
+        set_public(&conn, &url_only).unwrap();
+        assert_eq!(public(&conn).unwrap(), url_only);
     }
 
     #[test]
