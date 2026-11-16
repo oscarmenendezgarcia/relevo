@@ -2,14 +2,14 @@
 :root {
   color-scheme: dark light;
   --bg: #0b0c0f; --text: #e7e9ee; --body: #b9bec8; --faint: #7f8896; --line: #1c1f26;
-  --soft: #14161b; --code: #08090c; --need: #f5c451; --need-text: #1a1405; --focus: #7c9cff;
+  --soft: #14161b; --code: #08090c; --need: #f5c451; --need-text: #1a1405; --focus: #7c9cff; --brand: #9794ff; --brand-text: #0b0c0f;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
 @media (prefers-color-scheme: light) {
   :root {
     --bg: #ffffff; --text: #15161a; --body: #4a5160; --faint: #616a78; --line: #e3e5ea;
-    --soft: #f5f6f8; --code: #eef0f3; --need: #9e6400; --need-text: #ffffff; --focus: #4f6bed;
+    --soft: #f5f6f8; --code: #eef0f3; --need: #9e6400; --need-text: #ffffff; --focus: #4f6bed; --brand: #5b4fd8; --brand-text: #ffffff;
   }
 }
 * { box-sizing: border-box; }
@@ -30,11 +30,11 @@ code, pre { font: 12.5px/1.45 var(--mono); }
 .row code { flex: 1; min-width: 0; background: var(--code); border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; overflow-wrap: anywhere; }
 .row code.cmd { white-space: nowrap; overflow-x: auto; overflow-wrap: normal; }
 @media (max-width: 480px) { .row { flex-direction: column; align-items: stretch; } .row button { height: 40px; } }
-button { font: 700 13px var(--sans); border: 0; border-radius: 8px; padding: 0 14px; height: 36px; min-width: 76px; cursor: pointer; white-space: nowrap; background: var(--need); color: var(--need-text); }
+button { font: 700 13px var(--sans); border: 0; border-radius: 8px; padding: 0 14px; height: 36px; min-width: 76px; cursor: pointer; white-space: nowrap; background: var(--brand); color: var(--brand-text); }
 button.ghost { background: var(--line); color: var(--text); }
 .tabs { display: flex; gap: 4px; margin: 0 0 8px; }
 .tabs button { font-weight: 500; font-size: 12.5px; height: auto; min-width: 0; padding: 6px 12px; border-radius: 999px; background: var(--line); color: var(--body); }
-.tabs button[aria-selected="true"] { background: var(--text); color: var(--bg); }
+.tabs button[aria-selected="true"] { background: var(--brand); color: var(--brand-text); }
 .card p.under { margin: 8px 0 0; font-size: 13px; color: var(--faint); }
 details { margin-top: 10px; }
 summary { cursor: pointer; color: var(--body); font-size: 13.5px; }
