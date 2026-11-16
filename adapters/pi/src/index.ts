@@ -271,6 +271,9 @@ function result(text: string, details: Record<string, unknown> = {}) {
   return { content: [{ type: "text" as const, text }], details };
 }
 
+/** The segment the footer goes to in pi-powerbar, which replaces pi's footer with its own. */
+const POWERBAR_SEGMENT = "relevo";
+
 export function relevoExtension(options: Options = {}) {
   const env = options.env ?? process.env;
   const home = options.home ?? homedir();
@@ -287,6 +290,9 @@ export function relevoExtension(options: Options = {}) {
      * relevo_thread. The loop hands a pending note over again only if it is not here.
      */
     const shown = new Set<string>();
+    // Offered in pi-powerbar's settings, so the person can put it on either side of its footer.
+    // pi-powerbar must load before this extension to hear it.
+    emitEvent("powerbar:register-segment", { id: POWERBAR_SEGMENT, label: "Relevo" });
 
     /** The last /relevo list of this session: what the numbers of relevo_send and relevo_thread refer to. */
     let listed: Listed | null = null;
@@ -324,18 +330,34 @@ export function relevoExtension(options: Options = {}) {
      */
     function paint(): void {
       const ui = uiCtx?.hasUI ? uiCtx.ui : null;
-      if (!ui?.setStatus) return;
+      if (!ui) return;
+      // What it says, and the one colour a powerbar segment takes for all of it.
+      let [plain, color] = ["relevo", "muted"];
+      if (problem === "config error") [plain, color] = ["relevo ● config error", "error"];
+      else if (offlineSince !== null) [plain, color] = [`relevo ● offline ${clock(offlineSince, nowSecs())}`, "error"];
+      else if (problem) [plain, color] = [`relevo ● ${problem}`, "error"];
+      else if (waitingNow) [plain, color] = [`relevo ● ${waitingNow}`, "warning"];
+      // pi-powerbar draws a footer of its own, with only the segments sent to it: the same
+      // words, as the segment `relevo`. Nobody listens when it is not installed.
+      emitEvent("powerbar:update", { id: POWERBAR_SEGMENT, text: plain, color });
+      if (!ui.setStatus) return;
       const theme = ui.theme;
-      const fg = (color: string, text: string) => (typeof theme?.fg === "function" ? theme.fg(color, text) : text);
-      let text = fg("muted", "relevo");
-      if (problem === "config error") text = fg("error", "relevo ● config error");
-      else if (offlineSince !== null) text = fg("error", `relevo ● offline ${clock(offlineSince, nowSecs())}`);
-      else if (problem) text = fg("error", `relevo ● ${problem}`);
-      else if (waitingNow) text += fg("warning", ` ● ${waitingNow}`);
+      const fg = (c: string, t: string) => (typeof theme?.fg === "function" ? theme.fg(c, t) : t);
+      // In pi's own footer, "relevo" stays muted beside the count.
+      const text = color === "warning" ? fg("muted", "relevo") + fg("warning", plain.slice("relevo".length)) : fg(color, plain);
       try {
         ui.setStatus("relevo", text);
       } catch {
         // A context from a session that ended.
+      }
+    }
+
+    /** An event on pi's bus, for other extensions (pi-powerbar); none on a pi without one. */
+    function emitEvent(name: string, data: unknown): void {
+      try {
+        (pi as any).events?.emit?.(name, data);
+      } catch {
+        // A listener's failure is not Relevo's.
       }
     }
 
