@@ -952,7 +952,7 @@ fn look(app: &App, caller: &Caller, all: bool, first: bool) -> Result<Look, ApiE
     lapse(&tx, app, now)?;
     let found = match find(&tx, caller)? {
         Some(session) => look(&tx, &session, now)?,
-        // Forgotten while waiting (its token started too many others): answer, which records it.
+        // Forgotten while waiting: answer (see `answer_inbox`).
         None => Look {
             new: true,
             lapse_in: None,
@@ -963,11 +963,42 @@ fn look(app: &App, caller: &Caller, all: bool, first: bool) -> Result<Look, ApiE
 }
 
 /// The inbox as it is now, delivering the threads it returns. `arrived` as in `touch`.
+///
+/// A waiting request answering for a session forgotten while it waited (ended by its client, or
+/// its token started too many others) answers with nothing and does not record it again: an ended
+/// session stays ended, though its client went away before the server noticed. A client still
+/// there records it with its next request.
 fn answer_inbox(app: &App, caller: &Caller, all: bool, arrived: bool) -> Result<Value, ApiError> {
-    as_session(app, caller, arrived, |tx, session, now| {
+    if arrived {
+        return as_session(app, caller, true, |tx, session, now| {
+            inbox_of(tx, caller, Some(session), all, now)
+        });
+    }
+    let mut conn = app.db();
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let now = app.clock.now();
+    let session = match find(&tx, caller)? {
+        Some(_) => Some(touch(&tx, app, caller, now, false)?),
+        None => None,
+    };
+    let out = inbox_of(&tx, caller, session.as_ref(), all, now)?;
+    tx.commit()?;
+    Ok(out)
+}
+
+/// The inbox of `session` (`None`: one forgotten, with nothing), delivering the threads it returns.
+fn inbox_of(
+    tx: &Connection,
+    caller: &Caller,
+    session: Option<&Session>,
+    all: bool,
+    now: i64,
+) -> Result<Value, ApiError> {
+    let mut threads = Vec::new();
+    let mut more = 0;
+    if let Some(session) = session {
         let page = page(tx, session, all)?;
-        let more = inbox_count(tx, session, all)?.saturating_sub(page.len());
-        let mut threads = Vec::new();
+        more = inbox_count(tx, session, all)?.saturating_sub(page.len());
         for candidate in &page {
             let row = find_thread(tx, session, &candidate.thread)?;
             let mut out = thread_out(tx, session, &row)?;
@@ -984,29 +1015,33 @@ fn answer_inbox(app: &App, caller: &Caller, all: bool, arrived: bool) -> Result<
             refresh(tx, &row.id)?;
             threads.push(out);
         }
-        let team = team(tx, now)?;
-        let teams = teams(tx)?;
-        tracing::info!(
-            person = %caller.handle,
-            session = session.id,
-            all,
-            threads = threads.len(),
-            more,
-            "inbox"
-        );
-        Ok(json!({
-            "team": team,
-            "teams": teams,
-            // `you`: which member of `team` this session speaks for.
-            "session": {
-                "label": session.label,
-                "context": session.context,
-                "you": caller.handle,
-            },
-            "threads": threads,
-            "more": more,
-        }))
-    })
+    }
+    let team = team(tx, now)?;
+    let teams = teams(tx)?;
+    tracing::info!(
+        person = %caller.handle,
+        session = session.map(|s| s.id),
+        all,
+        threads = threads.len(),
+        more,
+        "inbox"
+    );
+    let label = session.map_or_else(
+        || caller.agent.as_ref().unwrap_or(&caller.label),
+        |s| &s.label,
+    );
+    Ok(json!({
+        "team": team,
+        "teams": teams,
+        // `you`: which member of `team` this session speaks for.
+        "session": {
+            "label": label,
+            "context": session.map_or(&caller.context, |s| &s.context),
+            "you": caller.handle,
+        },
+        "threads": threads,
+        "more": more,
+    }))
 }
 
 async fn thread(

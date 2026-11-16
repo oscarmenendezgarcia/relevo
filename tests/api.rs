@@ -3466,6 +3466,31 @@ async fn a_session_that_ends_releases_its_threads_to_the_persons_other_sessions_
     assert_eq!(sessions.len(), 1, "the ended session is forgotten");
 }
 
+/// Its client goes away before ending it, but the server may not notice that before the end
+/// wakes the request (behind a proxy, it may never).
+#[tokio::test]
+async fn an_ended_sessions_own_waiting_request_does_not_bring_it_back() {
+    let t = team(&["ana", "bob"]);
+    let short = t.agent("bob", "term-short", "pagos-api");
+    let id = t.ok("ana", json!({ "to": ["bob"], "text": "q" })).await;
+    short.inbox().await;
+    short.ok(json!({ "thread": id, "claim": true })).await;
+    let waiter = tokio::spawn({
+        let short = short.clone();
+        async move { short.get("/api/inbox?wait=30").await }
+    });
+    until_waiting(&t.app, 1).await;
+    assert_eq!(short.end().await.0, StatusCode::OK);
+    let (status, v) = waiter.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["threads"], json!([]), "{v}");
+    assert!(
+        db::list_sessions(&t.app.db(), Some("bob"), T0)
+            .unwrap()
+            .is_empty()
+    );
+}
+
 #[tokio::test]
 async fn ending_a_session_twice_or_one_never_seen_is_fine() {
     let t = team(&["ana", "bob"]);
