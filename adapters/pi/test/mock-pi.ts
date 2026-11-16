@@ -20,6 +20,8 @@ export function loadExtension(options: Options) {
   const statuses: Array<[string, string | undefined]> = [];
   const handlers = new Map<string, Array<(event: any, ctx: any) => unknown>>();
   const sent: Sent[] = [];
+  /** Events the extension emitted on pi's bus, in order (pi-powerbar's among them). */
+  const events: Array<[string, any]> = [];
   const notified: string[] = [];
   /** The level of each notice in `notified`. */
   const levels: string[] = [];
@@ -104,6 +106,14 @@ export function loadExtension(options: Options) {
       handlers.set(event, [...(handlers.get(event) ?? []), handler]);
       return () => {};
     },
+    events: {
+      emit(name: string, data: any) {
+        events.push([name, data]);
+      },
+      on() {
+        return () => {};
+      },
+    },
     sendMessage(message: any, opts: any) {
       sent.push({ message, options: opts });
       if (opts?.deliverAs === "nextTurn") return;
@@ -141,6 +151,11 @@ export function loadExtension(options: Options) {
     /** The footer's latest `relevo` status, its colours as tags. */
     status(): string | undefined {
       return statuses.filter(([k]) => k === "relevo").at(-1)?.[1];
+    },
+    events,
+    /** The latest pi-powerbar segment the extension sent, as pi-powerbar receives it. */
+    powerbar(): any {
+      return events.filter(([n, d]) => n === "powerbar:update" && d.id === "relevo").at(-1)?.[1];
     },
     /** Runs `/name args` the way pi does. */
     async command(name: string, args: string, cwd: string, mode = "interactive"): Promise<void> {

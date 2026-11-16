@@ -146,6 +146,12 @@ test("/relevo lists what waits, oldest first, read only, into the session withou
   assert.equal((await oscarIn(direct)).note, null);
   // The footer: the count in warning.
   assert.equal(ext.status(), "<muted>relevo</muted><warning> ● 3</warning>");
+  // And pi-powerbar's segment, offered in its settings at load, says the same in one colour.
+  assert.deepEqual(ext.events.find(([n]) => n === "powerbar:register-segment"), [
+    "powerbar:register-segment",
+    { id: "relevo", label: "Relevo" },
+  ]);
+  assert.deepEqual(ext.powerbar(), { id: "relevo", text: "relevo ● 3", color: "warning" });
 });
 
 test("numbers act on the last list, after reading the thread again: a reply, a refusal, a newer note, seen", async () => {
@@ -255,6 +261,8 @@ test("numbers act on the last list, after reading the thread again: a reply, a r
   await ext.command("relevo", "", home);
   assert.equal(last(ext).message.details.state, "empty");
   assert.equal(draw(last(ext).message.details, plainTheme), "✓ Nothing is waiting on you. Your agents handled 4 today.");
+  assert.equal(ext.status(), "<muted>relevo</muted>");
+  assert.deepEqual(ext.powerbar(), { id: "relevo", text: "relevo", color: "muted" });
   await assert.rejects(ext.tool("relevo_send", { thread: "1", seen: true }, home), /nothing waiting on you/);
 });
 
@@ -277,6 +285,8 @@ test("/relevo says when the server is out of reach, and the footer goes offline;
     message.content,
   );
   assert.match(ext.status() ?? "", /^<error>relevo ● offline \d\d:\d\d<\/error>$/);
+  assert.equal(ext.powerbar()?.color, "error");
+  assert.match(ext.powerbar()?.text ?? "", /^relevo ● offline \d\d:\d\d$/);
 
   const empty = mkdtempSync(join(tmpdir(), "relevo-pi-none-"));
   try {
