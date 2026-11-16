@@ -128,7 +128,7 @@ cmp -s "$fake/relevo-new" "$bin" || fail "new binary not installed"
 rm "$fake/systemctl.log"
 
 echo "the backup the timer runs works with the installed binary"
-RELEVO_DB=$data/relevo.db "$bin" invite ana --name Ana >/dev/null
+RELEVO_DB=$data/relevo.db "$bin" invite ana --name Ana --token >/dev/null
 RELEVO_DB=$data/relevo.db "$bin" backup --keep 14 "$data/backups" >/dev/null
 [ "$(find "$data/backups" -name '????????-??????.db' | wc -l)" = 1 ] || fail "no backup written"
 

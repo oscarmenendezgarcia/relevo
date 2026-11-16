@@ -65,19 +65,33 @@ enum Command {
         /// as announced). RELEVO_RELEASE_NOTES=0 does the same.
         #[arg(long)]
         no_release_notes: bool,
+        /// The address teammates reach this server at, for invitation links
+        /// (https://relevo.example.com behind a proxy). [default: the scheme, the first
+        /// --tls-name or the address it listens on, and its port]
+        #[arg(long, value_name = "URL", env = "RELEVO_PUBLIC_URL")]
+        public_url: Option<String>,
     },
     /// Print the SHA-256 fingerprint of the certificate `serve --tls` uses, for teammates to
     /// compare with what `relevo connect` shows.
     TlsFingerprint,
-    /// Create a person (or reuse and reactivate one) and print a new token once.
+    /// Create a person (or reuse and reactivate one) and print a link that invites them: it
+    /// works once, for 24 hours, and gets their agent a token of its own.
     Invite {
         handle: String,
+        /// Their name; needed for a new person [default: the name they have].
         #[arg(long)]
-        name: String,
+        name: Option<String>,
         #[arg(long)]
         about: Option<String>,
-        #[arg(long, default_value = "agent")]
-        label: String,
+        /// Print a token now, once, instead of a link (for scripts, and the way before 0.7.0).
+        #[arg(long)]
+        token: bool,
+        /// The label of the token of --token [default: agent].
+        #[arg(long, requires = "token")]
+        label: Option<String>,
+        /// The server's address for the link [default: the one `relevo serve` recorded].
+        #[arg(long, value_name = "URL", conflicts_with = "token")]
+        url: Option<String>,
     },
     /// Manage agent tokens.
     Token {
@@ -132,6 +146,13 @@ enum Command {
         /// Do not offer Claude Code's status line.
         #[arg(long)]
         no_statusline: bool,
+        /// Join with an invitation's code (from `relevo invite`'s link) instead of a token: the
+        /// server trades it, once, for a token of your own.
+        #[arg(long, value_name = "CODE", conflicts_with = "token")]
+        join: Option<String>,
+        /// The agent to set Relevo up for, once connected.
+        #[arg(long, value_enum)]
+        setup: Option<Agent>,
     },
     /// Open your timeline in the browser: the board and your threads, read only (it delivers,
     /// handles and claims nothing). Serves it on 127.0.0.1 until Ctrl-C.
@@ -182,6 +203,14 @@ enum Command {
         #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
         keep: Option<u32>,
     },
+}
+
+/// The agents `connect --setup` knows.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum Agent {
+    ClaudeCode,
+    Pi,
+    Hermes,
 }
 
 #[derive(Subcommand)]
@@ -325,9 +354,15 @@ async fn trust(url: &str, given: Option<&str>) -> Result<Option<String>> {
     Ok(Some(tls::pem(&seen.cert)))
 }
 
-/// Trusts the server (https), checks the token with `GET /api/people` and saves the server, the
-/// token and the certificate to pin, if any.
-async fn connect(url: &str, token: Option<String>, fingerprint: Option<String>) -> Result<()> {
+/// Trusts the server (https), gets the token (given, or traded for the invitation code `join`),
+/// checks it with `GET /api/people` and saves the server, the token and the certificate to pin,
+/// if any.
+async fn connect(
+    url: &str,
+    token: Option<String>,
+    fingerprint: Option<String>,
+    join: Option<String>,
+) -> Result<()> {
     let url = config::normalize_url(url)?;
     let cert = if url.starts_with("https://") {
         trust(&url, fingerprint.as_deref()).await?
@@ -343,16 +378,27 @@ async fn connect(url: &str, token: Option<String>, fingerprint: Option<String>) 
         .flatten()
         .map(|c| c.adapters)
         .unwrap_or_default();
-    let config = config::Config {
+    // Before the token goes out (or comes back), not after.
+    if let Some(warning) = config::plain_http_warning(&url) {
+        eprintln!("{warning}");
+    }
+    let mut config = config::Config {
         url,
-        token: connect_token(token)?.trim().to_string(),
+        token: String::new(),
         cert,
         adapters,
     };
-    // Before the token goes out, not after.
-    if let Some(warning) = config::plain_http_warning(&config.url) {
-        eprintln!("{warning}");
-    }
+    config.token = match join {
+        Some(code) => {
+            let joining = client::Client::new(&config, Some(String::new()), "/".into())?;
+            let joined = joining
+                .join(code.trim())
+                .await
+                .map_err(|e| anyhow::anyhow!("joining {} with the invitation: {e}", config.url))?;
+            joined["token"].as_str().unwrap_or_default().to_string()
+        }
+        None => connect_token(token)?.trim().to_string(),
+    };
     let client = client::Client::new(&config, Some(String::new()), "/".into())?;
     let people = client
         .people()
@@ -362,6 +408,7 @@ async fn connect(url: &str, token: Option<String>, fingerprint: Option<String>) 
     let _ = client.end(std::time::Duration::from_secs(2)).await;
     config::save(&path, &config)?;
     // `team` lists everyone on the server, whatever teams there are.
+    let you = people["you"].as_str().unwrap_or_default().to_string();
     let people = people["team"].as_array().map(Vec::len).unwrap_or(0);
     let pinned = if config.cert.is_some() {
         " with its certificate"
@@ -369,11 +416,30 @@ async fn connect(url: &str, token: Option<String>, fingerprint: Option<String>) 
         ""
     };
     println!(
-        "connected to {} ({people} people on it); saved{pinned} to {}",
+        "connected to {} as @{you} ({people} people on it); saved{pinned} to {}",
         config.url,
         path.display()
     );
     Ok(())
+}
+
+/// After `connect --setup`: what is left to do for that agent.
+// TODO(invite phase 2): set the agent up here (Claude Code's MCP server, pi's extension, Hermes's
+// plugin, from the dist), rather than saying how.
+fn setup_hint(agent: Agent) {
+    match agent {
+        Agent::ClaudeCode => {
+            let relevo = std::env::current_exe()
+                .map(|exe| exe.display().to_string())
+                .unwrap_or_else(|_| "relevo".to_string());
+            println!(
+                "To finish, add Relevo to Claude Code, then restart it:\n  claude mcp add \
+                 --scope user relevo -- {relevo} mcp"
+            );
+        }
+        Agent::Pi => println!("To finish, add Relevo to pi: docs/install.md, part 7."),
+        Agent::Hermes => println!("To finish, add Relevo to Hermes: docs/install.md, part 7."),
+    }
 }
 
 /// After `connect`: installs the /relevo command for Claude Code when Claude Code's folder is
@@ -556,14 +622,17 @@ fn check_tls(tls: bool, names: &[String], cert: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-/// What `serve` speaks TLS with, if anything, and the fingerprint it prints.
+/// What `serve` speaks TLS with, if anything, and the fingerprint it prints. With a certificate
+/// of its own (`--tls`), also that certificate's key pin and fingerprint, for invitation links
+/// (the rest of `Public` is left to the caller); one of yours is taken as one the teammates'
+/// machines trust.
 fn server_tls(
     db_file: &str,
     tls: bool,
     names: &[String],
     cert: Option<&Path>,
     key: Option<&Path>,
-) -> Result<Option<std::sync::Arc<rustls::ServerConfig>>> {
+) -> Result<(Option<std::sync::Arc<rustls::ServerConfig>>, db::Public)> {
     let cert = match (tls, cert, key) {
         (_, Some(cert), Some(key)) => tls::load(cert, key)?,
         (true, _, _) => {
@@ -595,13 +664,49 @@ fn server_tls(
             }
             cert
         }
-        _ => return Ok(None),
+        _ => return Ok((None, db::Public::default())),
     };
     println!(
         "TLS certificate SHA-256 fingerprint: {}",
         cert.fingerprint()
     );
-    Ok(Some(cert.server_config()?))
+    let mut public = db::Public::default();
+    if tls {
+        public.pin = Some(tls::key_pin(&cert.chain[0])?);
+        public.fingerprint = Some(cert.fingerprint());
+    }
+    Ok((Some(cert.server_config()?), public))
+}
+
+/// The address teammates reach the server at, for invitation links: `given`, or else the
+/// scheme, the first of `names` (`--tls-name`) or the address it listens on (`local`; one of
+/// this machine's when it listens on all of them), and its port.
+fn public_url(
+    given: Option<&str>,
+    scheme: &str,
+    names: &[String],
+    local: SocketAddr,
+) -> Result<String> {
+    if let Some(given) = given {
+        return config::normalize_url(given);
+    }
+    let host = match names.first() {
+        Some(name) => name.clone(),
+        None if local.ip().is_unspecified() => tls::network_addresses()
+            .first()
+            .map_or_else(|| "localhost".to_string(), |ip| ip.to_string()),
+        None => local.ip().to_string(),
+    };
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host
+    };
+    let port = local.port();
+    Ok(match (scheme, port) {
+        ("https", 443) | ("http", 80) => format!("{scheme}://{host}"),
+        _ => format!("{scheme}://{host}:{port}"),
+    })
 }
 
 /// Posts this version's release notes on the global board, once (`relevo::release`). A failure is
@@ -691,13 +796,20 @@ async fn main() -> Result<()> {
             no_command,
             statusline,
             no_statusline,
+            join,
+            setup,
         } => {
-            connect(&url, token, fingerprint).await?;
+            connect(&url, token, fingerprint, join).await?;
+            // Set up for Claude Code: its command and status line, without asking.
+            let claude = matches!(setup, Some(Agent::ClaudeCode));
             if !no_command {
-                offer_command(command);
+                offer_command(command || claude);
             }
             if !no_statusline {
-                offer_statusline(statusline);
+                offer_statusline(statusline || claude);
+            }
+            if let Some(agent) = setup {
+                setup_hint(agent);
             }
             return Ok(());
         }
@@ -805,8 +917,9 @@ async fn main() -> Result<()> {
             tls_key,
             dist,
             no_release_notes,
+            public_url: given_url,
         } => {
-            let tls = server_tls(
+            let (tls, mut public) = server_tls(
                 &db_file,
                 tls,
                 &tls_name,
@@ -821,7 +934,19 @@ async fn main() -> Result<()> {
             let app = App::with_dist(conn, Clock::system(), team_questions_per_day, Some(dist));
             let listener = tokio::net::TcpListener::bind(addr).await?;
             let scheme = if tls.is_some() { "https" } else { "http" };
+            let url = public_url(
+                given_url.as_deref(),
+                scheme,
+                &tls_name,
+                listener.local_addr()?,
+            )?;
+            public.url = Some(url.clone());
+            db::set_public(&app.db(), &public)?;
             tracing::info!(%addr, db = %db_file, %scheme, "relevo listening");
+            tracing::info!(
+                %url,
+                "invitation links point at this address (--public-url changes it)"
+            );
             // Posted once the server can serve: bound, with its TLS set up.
             release_notes(&app.db(), no_release_notes, db::now_unix());
             if tls.is_none() && !addr.ip().is_loopback() {
@@ -842,10 +967,37 @@ async fn main() -> Result<()> {
             handle,
             name,
             about,
+            token,
             label,
+            url,
         } => {
-            let token = db::invite(&conn, &handle, &name, about.as_deref(), &label, now)?;
-            print_token(&handle, &label, &token);
+            let name = match name {
+                Some(name) => name,
+                None => db::person_name(&conn, &handle)?,
+            };
+            if token {
+                let label = label.as_deref().unwrap_or("agent");
+                let token = db::invite(&conn, &handle, &name, about.as_deref(), label, now)?;
+                print_token(&handle, label, &token);
+            } else {
+                let url = match url {
+                    Some(url) => config::normalize_url(&url)?,
+                    None => db::public(&conn)?.url.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "the server has not said its address yet: start `relevo serve` (0.7.0 \
+                             or later) once, or give it with --url https://…"
+                        )
+                    })?,
+                };
+                let invitation =
+                    db::invite_link(&conn, &handle, &name, about.as_deref(), &url, now)?;
+                println!(
+                    "Invited @{handle} ({name}). Send them this link — it works once, for 24 \
+                     hours:\n\n  {url}/join/{}\n\nThey can open it, or just give it to their \
+                     agent (Claude Code, pi, Hermes).",
+                    invitation.code
+                );
+            }
         }
         Command::Token { command } => match command {
             TokenCommand::Add { handle, label } => {
@@ -1050,11 +1202,22 @@ mod tests {
         assert!(parse(&["--tls-cert", "c.pem", "--tls-key", "k.pem"]).is_some());
 
         let cli = Cli::try_parse_from(["relevo", "invite", "ana", "--name", "Ana"]).unwrap();
-        let Command::Invite { label, about, .. } = cli.command else {
+        let Command::Invite {
+            label,
+            about,
+            token,
+            ..
+        } = cli.command
+        else {
             panic!("not invite")
         };
-        assert_eq!(label, "agent");
-        assert_eq!(about, None);
+        assert_eq!((label, about, token), (None, None, false));
+        // A label is for the token of --token, and a link's address is not.
+        assert!(Cli::try_parse_from(["relevo", "invite", "ana", "--label", "x"]).is_err());
+        assert!(
+            Cli::try_parse_from(["relevo", "invite", "ana", "--token", "--url", "https://x"])
+                .is_err()
+        );
 
         unsafe {
             std::env::set_var("RELEVO_DB", "/srv/team.db");

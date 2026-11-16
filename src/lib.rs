@@ -11,6 +11,7 @@ pub mod context;
 pub mod db;
 pub mod dist;
 pub mod error;
+pub mod join;
 pub mod mcp;
 pub mod mention;
 pub mod release;
@@ -46,6 +47,8 @@ pub struct App {
     news: Mutex<HashMap<i64, watch::Sender<()>>>,
     /// Waiting `inbox` requests, per token id.
     waits: Mutex<HashMap<String, usize>>,
+    /// When each address last tried invitation codes that do not work (`crate::join`).
+    join_failures: Mutex<HashMap<std::net::IpAddr, Vec<i64>>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -71,6 +74,7 @@ impl App {
             dist,
             news: Mutex::new(HashMap::new()),
             waits: Mutex::new(HashMap::new()),
+            join_failures: Mutex::new(HashMap::new()),
         })
     }
 

@@ -301,7 +301,7 @@ fn without_relevo_db_an_admin_command_never_creates_a_database_here() {
             .unwrap()
     };
     for args in [
-        &["invite", "ana", "--name", "Ana"][..],
+        &["invite", "ana", "--name", "Ana", "--token"][..],
         &["people"][..],
         &["backup", "copy.db"][..],
     ] {
@@ -318,7 +318,7 @@ fn without_relevo_db_an_admin_command_never_creates_a_database_here() {
     // One that is already there is used, as before.
     relevo(
         dir.join("relevo.db").to_str().unwrap(),
-        &["invite", "ana", "--name", "Ana"],
+        &["invite", "ana", "--name", "Ana", "--token"],
     );
     let out = run(&["people"]);
     assert!(
@@ -371,7 +371,7 @@ fn only_serve_migrates_a_layout_5_to_9_database_and_check_db_says_so() {
         );
         for args in [
             &["people"][..],
-            &["invite", "dan", "--name", "Dan"][..],
+            &["invite", "dan", "--name", "Dan", "--token"][..],
             &["team", "add", "backend"][..],
             &["teams"][..],
         ] {
@@ -423,7 +423,7 @@ fn teams_are_kept_from_the_cli() {
         assert!(err.contains(says), "{args:?}: {err}");
     };
     for h in ["ana", "bob", "old"] {
-        relevo(path, &["invite", h, "--name", h]);
+        relevo(path, &["invite", h, "--name", h, "--token"]);
     }
     relevo(path, &["deactivate", "old"]);
     let said = relevo(path, &["team", "add", "backend", "--title", "Backend"]);
@@ -436,7 +436,10 @@ fn teams_are_kept_from_the_cli() {
     fails(&["team", "add", "team"], "reserved");
     fails(&["team", "add", "equipo"], "reserved");
     fails(&["team", "add", "backend"], "already");
-    fails(&["invite", "backend", "--name", "B"], "name of a team");
+    fails(
+        &["invite", "backend", "--name", "B", "--token"],
+        "name of a team",
+    );
     // Joining: active people only, nothing changed otherwise; twice is said, not an error.
     let said = relevo(path, &["team", "join", "backend", "ana", "bob"]);
     assert_eq!(said, "ana joined backend\nbob joined backend\n");
@@ -455,7 +458,7 @@ fn teams_are_kept_from_the_cli() {
     assert!(said.contains("removed team backend"), "{said}");
     assert_eq!(relevo(path, &["teams"]), "front\t\t\n");
     // The name is free again, for a team or a person.
-    relevo(path, &["invite", "backend", "--name", "B"]);
+    relevo(path, &["invite", "backend", "--name", "B", "--token"]);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -478,7 +481,7 @@ fn relevo_is_the_servers_own_name_and_in_no_list() {
         relevo::release::announce(&conn, env!("CARGO_PKG_VERSION"), &release, true, 0).unwrap();
     }
     for args in [
-        &["invite", "relevo", "--name", "Mine"][..],
+        &["invite", "relevo", "--name", "Mine", "--token"][..],
         &["team", "add", "relevo"][..],
         &["token", "add", "relevo", "--label", "x"][..],
     ] {

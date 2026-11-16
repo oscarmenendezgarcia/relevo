@@ -114,7 +114,7 @@ export async function startServer(
     cert: certFile && readFileSync(certFile, "utf8"),
     certFile,
     invite(handle, about = "", label = "pi test") {
-      const args = ["invite", handle, "--name", handle, "--label", label, "--db", db];
+      const args = ["invite", handle, "--name", handle, "--token", "--label", label, "--db", db];
       if (about) args.push("--about", about);
       const out = execFileSync(bin, args, { encoding: "utf8" });
       const token = out.split("\n").find((l) => l.startsWith("rlv_"));
