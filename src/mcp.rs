@@ -952,17 +952,26 @@ impl ServerHandler for Relevo {
     }
 
     /// The prompt `relevo`: the /relevo command's text (`adapters/claude-code/commands/relevo.md`),
-    /// for clients that turn MCP prompts into commands (Gemini CLI's `/relevo`, Claude Code's
-    /// `/mcp__relevo__relevo`).
+    /// for clients that turn MCP prompts into commands (Gemini CLI's `/relevo`); not
+    /// listed to Claude Code, which has the command file.
     async fn list_prompts(
         &self,
         _: Option<PaginatedRequestParams>,
-        _: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListPromptsResult, ErrorData> {
+        // Not for Claude Code: it refuses to run a prompt whose required argument is missing (so
+        // `/relevo:relevo` with nothing after it failed instead of listing), and it splits the
+        // words at spaces, one to each argument, so an answer would lose all but its first word.
+        // There the /relevo command file is the way (`relevo connect --command`, docs/agents.md).
+        if context
+            .client_info()
+            .and_then(|info| agent_name(info.title.as_deref(), &info.name))
+            .is_some_and(|agent| agent == "Claude Code")
+        {
+            return Ok(ListPromptsResult::with_all_items(Vec::new()));
+        }
         // Required, though it may be empty (the list): Gemini CLI gives a prompt's words only to
         // its required arguments, all of them to the one there is; an optional one gets none.
-        // Claude Code splits them at spaces, one word to each argument, so only the first word
-        // arrives there: in Claude Code, the /relevo command file is the way (docs/agents.md).
         let args = PromptArgument::new(PROMPT_ARG)
             .with_description("N <your answer> | N | seen N… | @name <note>; empty to list")
             .with_required(true);

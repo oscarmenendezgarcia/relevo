@@ -118,6 +118,17 @@ impl Mcp {
 
     /// Runs `cmd` (a `relevo mcp`) and initializes it.
     async fn spawn(cmd: Command) -> Mcp {
+        // A title, as Claude Code gives, and a name that maps to something else: the title is
+        // the agent (not the name, nor the token's label, "laptop").
+        Mcp::spawn_as(
+            cmd,
+            json!({ "name": "claude-code-test", "title": "Claude Code", "version": "0" }),
+        )
+        .await
+    }
+
+    /// Runs `cmd` (a `relevo mcp`) and initializes it as the MCP client `client_info`.
+    async fn spawn_as(cmd: Command, client_info: Value) -> Mcp {
         let mut mcp = Mcp::run(cmd);
         mcp.init = mcp
             .request(
@@ -125,9 +136,7 @@ impl Mcp {
                 json!({
                     "protocolVersion": "2025-06-18",
                     "capabilities": {},
-                    // A title, as Claude Code gives, and a name that maps to something else: the
-                    // title is the agent (not the name, nor the token's label, "laptop").
-                    "clientInfo": { "name": "claude-code-test", "title": "Claude Code", "version": "0" }
+                    "clientInfo": client_info
                 }),
             )
             .await;
@@ -2569,7 +2578,14 @@ async fn waiting_says_when_the_server_is_out_of_reach_or_not_connected() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_relevo_prompt_is_the_command() {
     let s = server(&["oscar"]).await;
-    let mut mcp = Mcp::start(&s, "oscar", &s.dir, None, &[]).await;
+    let home = s.dir.join("home-gemini");
+    std::fs::create_dir(&home).unwrap();
+    let mut cmd = relevo(&home);
+    cmd.arg("mcp")
+        .env("RELEVO_URL", &s.url)
+        .env("RELEVO_TOKEN", &s.tokens["oscar"])
+        .current_dir(&s.dir);
+    let mut mcp = Mcp::spawn_as(cmd, json!({ "name": "gemini-cli", "version": "0" })).await;
     assert!(
         mcp.init["capabilities"]["prompts"].is_object(),
         "{}",
@@ -2716,4 +2732,36 @@ async fn connect_installs_the_relevo_command_for_claude_code() {
         std::fs::read_to_string(other.join("commands/relevo.md")).unwrap(),
         contents(version)
     );
+}
+
+/// Claude Code is not offered the prompt: it refuses to run one whose required argument is
+/// missing, and passes it only the first word; it has the /relevo command file instead. Asked
+/// for by name anyway, the prompt still answers.
+#[tokio::test(flavor = "multi_thread")]
+async fn claude_code_is_not_offered_the_relevo_prompt() {
+    let s = server(&["oscar"]).await;
+    for client in [
+        json!({ "name": "claude-code", "version": "0" }),
+        json!({ "name": "claude-code-test", "title": "Claude Code", "version": "0" }),
+    ] {
+        let home = s.dir.join(format!("home-{}", db::random_id("")));
+        std::fs::create_dir(&home).unwrap();
+        let mut cmd = relevo(&home);
+        cmd.arg("mcp")
+            .env("RELEVO_URL", &s.url)
+            .env("RELEVO_TOKEN", &s.tokens["oscar"])
+            .current_dir(&s.dir);
+        let mut mcp = Mcp::spawn_as(cmd, client.clone()).await;
+        let list = mcp.request("prompts/list", json!({})).await;
+        assert_eq!(list["prompts"], json!([]), "{client}: {list}");
+        let got = mcp
+            .request("prompts/get", json!({ "name": "relevo" }))
+            .await;
+        let text = got["messages"][0]["content"]["text"].as_str().unwrap();
+        assert!(
+            text.starts_with("This is my /relevo command. Arguments: ``\n"),
+            "{text}"
+        );
+        mcp.close().await;
+    }
 }
