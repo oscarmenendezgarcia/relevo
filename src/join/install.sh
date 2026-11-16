@@ -47,7 +47,7 @@ main() {
     tmp=$(mktemp "$dir/.relevo.XXXXXX")
     trap 'rm -f "$tmp"' EXIT
     trap 'exit 1' INT TERM HUP
-    echo "Downloading relevo for $what from $url"
+    echo "Downloading relevo for $what"
     fetch "$url/join/$code/relevo?target=$target" "$tmp" || fail "could not download relevo"
     if command -v sha256sum >/dev/null 2>&1; then
         got=$(sha256sum "$tmp" | cut -d ' ' -f 1)
@@ -60,11 +60,7 @@ main() {
     chmod 755 "$tmp"
     mv -f "$tmp" "$dir/relevo"
     trap - EXIT INT TERM HUP
-    echo "Installed relevo in $dir/relevo"
-    case ":$PATH:" in
-        *":$dir:"*) ;;
-        *) echo "$dir is not in your PATH: add it in your shell's profile, as export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
-    esac
+    echo "Installed in ~/.local/bin/relevo"
 
     # The server's fingerprint, unless one was given.
     for arg in "$@"; do
@@ -76,10 +72,21 @@ main() {
     fi
     # Its questions go to the terminal of a person running this (not of an agent, whose output
     # is no terminal): standard input is this script.
+    status=0
     if [ -t 1 ] && (: </dev/tty) 2>/dev/null; then
-        exec "$dir/relevo" "$@" </dev/tty
+        "$dir/relevo" "$@" </dev/tty || status=$?
+    else
+        "$dir/relevo" "$@" </dev/null || status=$?
     fi
-    exec "$dir/relevo" "$@" </dev/null
+    case ":$PATH:" in
+        *":$dir:"*) ;;
+        *)
+            echo
+            echo "Note: ~/.local/bin is not in your PATH. To type \`relevo\` yourself, add to your shell profile:"
+            echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+            ;;
+    esac
+    exit "$status"
 }
 
 main "$@"

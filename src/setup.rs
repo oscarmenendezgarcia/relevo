@@ -119,7 +119,7 @@ pub async fn run(named: &[Agent], command: Option<bool>, statusline: Option<bool
         }
     } else if !found.is_empty() && std::io::stdin().is_terminal() {
         let labels: Vec<&str> = found.iter().map(|a| a.label()).collect();
-        println!("Set up your agents? Found: {}", labels.join(", "));
+        println!("\nFound {}.", and(&labels));
         for agent in &found {
             let question = format!("  Add Relevo to {}{}? [Y/n] ", agent.label(), agent.what());
             let yes = read_line(&question)
@@ -134,8 +134,8 @@ pub async fn run(named: &[Agent], command: Option<bool>, statusline: Option<bool
         let labels: Vec<&str> = found.iter().map(|a| a.label()).collect();
         let args: Vec<&str> = found.iter().map(|a| a.arg()).collect();
         println!(
-            "Found {} (no terminal to ask): to add Relevo to {}, run\n  {} setup {}",
-            labels.join(", "),
+            "\nFound {} (no terminal to ask). To add Relevo to {}, run\n  {} setup {}",
+            and(&labels),
             if found.len() == 1 { "it" } else { "them" },
             relevo().display(),
             args.join(" ")
@@ -143,25 +143,33 @@ pub async fn run(named: &[Agent], command: Option<bool>, statusline: Option<bool
     }
     if !chosen.contains(&Agent::ClaudeCode) && !declined {
         if command != Some(false) {
-            offer_command(command == Some(true));
+            offer_command(command == Some(true), false);
         }
         if statusline != Some(false) {
-            offer_statusline(statusline == Some(true));
+            offer_statusline(statusline == Some(true), false);
         }
     }
     let mut done = vec![];
     for agent in chosen {
         match set_up(agent, command, statusline).await {
-            Ok(()) => done.push(agent.restart()),
+            Ok(()) => done.push(agent),
             Err(e) => eprintln!("Could not add Relevo to {}: {e:#}", agent.label()),
         }
     }
-    if let Some((last, rest)) = done.split_last() {
-        let all = match rest {
-            [] => last.to_string(),
-            _ => format!("{} and {last}", rest.join(", ")),
-        };
-        println!("Done. Restart {all} to load Relevo.");
+    if !done.is_empty() {
+        let labels: Vec<&str> = done.iter().map(|a| a.label()).collect();
+        let restart: Vec<&str> = done.iter().map(|a| a.restart()).collect();
+        println!("Added Relevo to {}.", and(&labels));
+        println!("\nDone. Restart {} to load Relevo.", and(&restart));
+    }
+}
+
+/// "a", "a and b", "a, b and c".
+fn and(items: &[&str]) -> String {
+    match items.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.to_string(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
     }
 }
 
@@ -212,34 +220,32 @@ async fn set_up(agent: Agent, command: Option<bool>, statusline: Option<bool>) -
         Agent::ClaudeCode => {
             // `claude mcp get` fails for a server it does not have.
             let mcp = if run_program("claude", &["mcp", "get", "relevo"]).is_ok() {
-                println!("Claude Code already has the MCP server relevo: left as it is");
                 Ok(())
             } else {
                 let exe = relevo();
                 let exe = exe.to_string_lossy();
-                let args = ["mcp", "add", "--scope", "user", "relevo", "--", &exe, "mcp"];
-                run_program("claude", &args).map(|()| {
-                    println!("added the MCP server relevo to Claude Code ({exe} mcp)");
-                })
+                run_program(
+                    "claude",
+                    &["mcp", "add", "--scope", "user", "relevo", "--", &exe, "mcp"],
+                )
             };
             // The command and the status line work with an MCP server added by hand, too.
             if command != Some(false) {
-                offer_command(true);
+                offer_command(true, true);
             }
             if statusline != Some(false) {
-                offer_statusline(true);
+                offer_statusline(true, true);
             }
             mcp?;
         }
         Agent::Pi => {
             let dir = pi_dir()?;
-            let version = install(Kind::Pi, &dir).await?;
+            install(Kind::Pi, &dir).await?;
             run_program("pi", &["install", &dir.to_string_lossy()])?;
-            println!("added Relevo {version} to pi ({})", dir.display());
         }
         Agent::Hermes => {
             let dir = hermes_dir()?;
-            let version = install(Kind::Hermes, &dir).await?;
+            install(Kind::Hermes, &dir).await?;
             // As adapters/hermes/README.md says: the plugin, its turns in chats, the gateway's
             // relevo platform (the server and token from the config `connect` saved), whom it
             // answers there (the Relevo team is the trust boundary), and its tools.
@@ -258,10 +264,6 @@ async fn set_up(agent: Agent, command: Option<bool>, statusline: Option<bool>) -
             ] {
                 run_program("hermes", args)?;
             }
-            println!(
-                "added Relevo {version} to Hermes ({}), enabled",
-                dir.display()
-            );
         }
     }
     Ok(())
@@ -275,8 +277,9 @@ async fn install(kind: Kind, dir: &Path) -> Result<String> {
 
 /// After `connect`: installs the /relevo command for Claude Code when Claude Code's folder is
 /// here and the person says yes (`force`: without asking). A file Relevo did not write, or that
-/// was edited, is replaced only when the person at the terminal says so. Never fails.
-pub fn offer_command(force: bool) {
+/// was edited, is replaced only when the person at the terminal says so. Never fails. `quiet`
+/// leaves out what went as expected (installed, up to date).
+pub fn offer_command(force: bool, quiet: bool) {
     use crate::claude_command::{self as command, Installed};
     use std::io::IsTerminal;
     let Some(dir) = command::claude_dir(&config::env) else {
@@ -297,6 +300,7 @@ pub fn offer_command(force: bool) {
         }
     };
     let install = |done: &str| match command::install(&path) {
+        Ok(()) if quiet => {}
         Ok(()) => println!(
             "{done} the /relevo command for Claude Code in {}",
             path.display()
@@ -304,6 +308,7 @@ pub fn offer_command(force: bool) {
         Err(e) => eprintln!("the /relevo command for Claude Code: not installed: {e:#}"),
     };
     match command::state(&path) {
+        Ok(Installed::Ours { current: true, .. }) if quiet => {}
         Ok(Installed::Ours { current: true, .. }) => println!(
             "the /relevo command for Claude Code is up to date in {}",
             path.display()
@@ -351,8 +356,9 @@ pub fn offer_command(force: bool) {
 /// After `connect`: sets Claude Code's status line to `relevo statusline` when Claude Code's
 /// folder is here, its settings have no status line, and the person says yes (`force`: without
 /// asking). A status line that is not Relevo's, or settings that are not valid JSON, are never
-/// changed: it says how to add Relevo by hand. Never fails.
-pub fn offer_statusline(force: bool) {
+/// changed: it says how to add Relevo by hand. Never fails. `quiet` leaves out what went as
+/// expected (set, already Relevo's).
+pub fn offer_statusline(force: bool, quiet: bool) {
     use crate::statusline::{self, Setting};
     use std::io::IsTerminal;
     let Some(dir) = crate::claude_command::claude_dir(&config::env) else {
@@ -367,6 +373,7 @@ pub fn offer_statusline(force: bool) {
         Err(_) => "relevo statusline".to_string(),
     };
     match statusline::setting(&path) {
+        Ok(Setting::Ours) if quiet => {}
         Ok(Setting::Ours) => println!(
             "Claude Code's status line already shows Relevo ({})",
             path.display()
@@ -401,6 +408,7 @@ pub fn offer_statusline(force: bool) {
             };
             if force || (terminal && yes()) {
                 match statusline::install(&path, &command) {
+                    Ok(()) if quiet => {}
                     Ok(()) => println!(
                         "set Claude Code's status line to `{command}` in {}",
                         path.display()

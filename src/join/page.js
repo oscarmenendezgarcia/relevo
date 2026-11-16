@@ -13,8 +13,9 @@ for (const button of document.querySelectorAll("[data-copy]")) {
       getSelection().addRange(range);
       document.execCommand("copy");
     }
-    button.textContent = "Copied";
-    setTimeout(() => { button.textContent = label; }, 1500);
+    const said = document.getElementById("copied");
+    button.textContent = said.textContent = "Copied";
+    setTimeout(() => { button.textContent = label; said.textContent = ""; }, 1500);
   });
 }
 const tabs = document.querySelectorAll("[role=tab]");

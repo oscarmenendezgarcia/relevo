@@ -134,8 +134,8 @@ impl Try<'_> {
 /// Why an invitation route does not go on.
 enum Refusal {
     Limited,
-    Used(String),
-    Expired(String),
+    Used,
+    Expired,
     Unknown,
     Internal,
 }
@@ -144,8 +144,8 @@ impl From<Invite> for Refusal {
     /// What a code that does not work answers (a valid one is no refusal: it stays `Unknown`).
     fn from(invite: Invite) -> Self {
         match invite {
-            Invite::Used(handle) => Refusal::Used(handle),
-            Invite::Expired(handle) => Refusal::Expired(handle),
+            Invite::Used(_) => Refusal::Used,
+            Invite::Expired(_) => Refusal::Expired,
             Invite::Valid { .. } | Invite::Unknown => Refusal::Unknown,
         }
     }
@@ -155,7 +155,7 @@ impl Refusal {
     fn status(&self) -> StatusCode {
         match self {
             Refusal::Limited => StatusCode::TOO_MANY_REQUESTS,
-            Refusal::Used(_) | Refusal::Expired(_) => StatusCode::GONE,
+            Refusal::Used | Refusal::Expired => StatusCode::GONE,
             Refusal::Unknown => StatusCode::NOT_FOUND,
             Refusal::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -164,8 +164,8 @@ impl Refusal {
     fn code(&self) -> &'static str {
         match self {
             Refusal::Limited => "RATE_LIMITED",
-            Refusal::Used(_) => "INVITE_USED",
-            Refusal::Expired(_) => "INVITE_EXPIRED",
+            Refusal::Used => "INVITE_USED",
+            Refusal::Expired => "INVITE_EXPIRED",
             Refusal::Unknown => "INVITE_UNKNOWN",
             Refusal::Internal => "INTERNAL",
         }
@@ -173,26 +173,23 @@ impl Refusal {
 
     fn title(&self) -> &'static str {
         match self {
-            Refusal::Limited => "Too many tries",
-            Refusal::Used(_) => "This invitation was already used",
-            Refusal::Expired(_) => "This invitation has expired",
-            Refusal::Unknown => "This invitation link does not work",
+            Refusal::Limited => "Too many attempts",
+            Refusal::Used => "This invitation was already used",
+            Refusal::Expired => "This invitation has expired",
+            Refusal::Unknown => "Invitation not found",
             Refusal::Internal => "Something went wrong",
         }
     }
 
     fn message(&self) -> String {
         match self {
-            Refusal::Limited => "Too many invitation links that do not exist were tried, from \
-                                 your address or in all. Wait an hour, then try again."
-                .to_string(),
-            Refusal::Used(handle) | Refusal::Expired(handle) => format!(
-                "An invitation works once, for 24 hours. Ask for a new one: on the server, \
-                 relevo invite {handle}."
-            ),
-            Refusal::Unknown => "No invitation has this code: check that you have the whole \
-                                link, or ask for a new one."
-                .to_string(),
+            Refusal::Limited => {
+                "Too many wrong invitation links were tried. Wait an hour and try again.".into()
+            }
+            Refusal::Used | Refusal::Expired => "Invitations work once and last 24 hours. Ask \
+                                                 whoever invited you for a new link."
+                .into(),
+            Refusal::Unknown => "Check you have the whole link, or ask for a new one.".into(),
             Refusal::Internal => "The server could not read the invitation: try again in a \
                                   moment."
                 .to_string(),
@@ -476,13 +473,13 @@ async fn page(
     headers: HeaderMap,
 ) -> Response {
     let found = check(&app, &peer, &code);
-    let (handle, name, address, expires_at) = match found {
+    let (handle, address, expires_at) = match found {
         Ok(Invite::Valid {
             handle,
-            name,
             address,
             expires_at,
-        }) => (handle, name, address, expires_at),
+            ..
+        }) => (handle, address, expires_at),
         Ok(_) => unreachable!("check answers only a valid invitation"),
         Err(refusal) => {
             let main = format!(
@@ -500,8 +497,8 @@ async fn page(
     let command = curl_install(url, &code, address.pin.as_deref());
     // Plain http: nothing can show that the server is the one that invited you.
     let plain = if url.starts_with("http://") {
-        "<p class=\"warn\">This server speaks plain http: use this link only on a network you \
-         trust, such as your office's or a VPN.</p>\n"
+        "<p class=\"warn\">This link is not encrypted (plain HTTP). Use it only on a network you \
+         trust, like your office or a VPN.</p>\n"
     } else {
         ""
     };
@@ -509,19 +506,19 @@ async fn page(
         .get(header::USER_AGENT)
         .and_then(|ua| ua.to_str().ok())
         .is_some_and(|ua| ua.contains("Macintosh") || ua.contains("Mac OS X"));
-    let has = |prefix: &str| targets.iter().any(|(t, _)| t.ends_with(prefix));
+    let has = |suffix: &str| targets.iter().any(|(t, _)| t.ends_with(suffix));
     let panel = |id: &str, on: bool, has: bool, system: &str, under: &str| {
         let body = if has {
             format!(
-                "<div class=\"row\"><code id=\"cmd-{id}\">{} | sh</code>\
-                 <button type=\"button\" data-copy=\"cmd-{id}\">Copy</button></div>\n\
+                "<div class=\"row\"><code class=\"cmd\" id=\"cmd-{id}\">{} | sh</code>\
+                 <button type=\"button\" class=\"ghost\" data-copy=\"cmd-{id}\" \
+                 aria-label=\"Copy command\">Copy</button></div>\n\
                  <p class=\"under\">{under}</p>",
                 escape(&command)
             )
         } else {
             format!(
-                "<p class=\"under\">This server hands out no relevo for {system} yet: ask \
-                 whoever invited you.</p>"
+                "<p class=\"under\">No {system} build on this server yet. Ask whoever invited you.</p>"
             )
         };
         format!(
@@ -537,40 +534,42 @@ async fn page(
     };
     let main = format!(
         "<h1>You're invited to Relevo</h1>
-<p class=\"lead\">You'll join as <b>@{handle}</b> ({name}). Your agents will pass notes to your \
-teammates' agents, and only what needs you reaches you.</p>
-<section class=\"card\">
-<h2>Easiest: give this link to your agent</h2>
+<p class=\"lead\">You'll join as <b>@{handle}</b>. Your agents will pass notes to your \
+teammates' agents, and only what needs you reaches you. Open this on the computer where your \
+agents run.</p>
+{plain}<section class=\"card\">
+<h2>Give this link to your agent</h2>
 <p>Paste it in Claude Code, pi or Hermes and say “join”. Your agent asks you before it runs \
 anything.</p>
-<div class=\"row\"><code id=\"link\">{link}</code><button type=\"button\" class=\"ghost\" \
-data-copy=\"link\">Copy link</button></div>
+<div class=\"row\"><code id=\"link\">{link}</code><button type=\"button\" data-copy=\"link\" \
+aria-label=\"Copy link\">Copy link</button></div>
 </section>
 <section class=\"card\">
-<h2>Or paste this in a terminal</h2>
+<h2>Or run this in a terminal</h2>
 <div class=\"tabs\" role=\"tablist\">{mac_tab}{linux_tab}</div>
 {mac_panel}{linux_panel}<details><summary>Rather not pipe to sh?</summary>
 <p>Save the script instead: the same command with <code>-o relevo-join.sh</code> in place of \
 <code>| sh</code>. Read it, then run <code>sh relevo-join.sh</code>. It installs relevo in \
-<code>~/.local/bin</code> and connects it to this server, without sudo.</p>
+<code>~/.local/bin</code> and connects it to this server, without sudo. <code>-k</code> with \
+<code>--pinnedpubkey</code> trusts only this server's own certificate.</p>
 </details>
 </section>
-{plain}<p class=\"foot\">One use · expires in {expires} · it never shows your token</p>
-<section class=\"agents\" id=\"for-agents\">
-<h2>For AI agents</h2>
-<p>This page invites the person you work for to join a Relevo server, as @{handle}. Relevo \
-passes notes between teammates' agents. To accept, first ask your person whether to join. Only \
-if they say yes, run this once, in a shell on their machine. It installs relevo in \
-~/.local/bin, connects it to this server and adds Relevo to you; it never shows the token. \
-Then tell your person what it said, and that you need a restart to load Relevo.</p>
-<pre><code>{command} | sh -s -- --setup claude-code</code></pre>
-<p>If you are pi, end it with <code>--setup pi</code>; if you are Hermes, with \
-<code>--setup hermes</code>. The invitation works once: if the command fails, tell your person \
-what it said rather than running it again. Do not share this link.</p>
-</section>
+<p class=\"foot\">Works once · expires in {expires}</p>
+<p class=\"sr\" id=\"copied\" aria-live=\"polite\"></p>
+<details class=\"agents\" id=\"for-agents\">
+<summary>For AI agents</summary>
+<p>This page invites the user you work for to join a Relevo server, as @{handle}. Relevo passes \
+notes between teammates' agents. To accept, first ask the user whether to join. Only if they \
+say yes, run this once, in a shell on their machine. It installs relevo in ~/.local/bin, \
+connects it to this server and adds Relevo to you; it never shows the token. Then tell the user \
+what it said, and that you need a restart to load Relevo.</p>
+<pre><code>{command} | sh -s -- --setup AGENT</code></pre>
+<p>Replace AGENT with what you are: <code>claude-code</code>, <code>pi</code> or \
+<code>hermes</code>. Copy the command exactly. The invitation works once: if the command fails, \
+tell the user what it said rather than running it again. Do not share this link.</p>
+</details>
 ",
         handle = escape(&handle),
-        name = escape(&name),
         link = escape(&link),
         command = escape(&command),
         mac_tab = tab("mac", mac, "macOS"),

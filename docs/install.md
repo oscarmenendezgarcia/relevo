@@ -325,14 +325,19 @@ curl -sS --pinnedpubkey sha256//… -k https://192.168.1.50:7878/join/K7Q2-9FPA/
 It installs `relevo` in `~/.local/bin` (without sudo; add that to your `PATH` if it says it is not there) from the team's server, checks it against the SHA-256 the server lists, and runs `relevo connect --join`, which trusts the server's certificate, trades the link for a token of your own and saves it as step 2 says. Then it asks, for each agent it finds (`claude`, `pi`, `hermes` on your `PATH`), whether to add Relevo to it, and does it (step 3 says what each gets):
 
 ```
-Set up your agents? Found: Claude Code, pi
+Downloading relevo for Linux (ARM64)
+Installed in ~/.local/bin/relevo
+Connected to https://192.168.1.50:7878 as @ana (5 people)
+
+Found Claude Code and pi.
   Add Relevo to Claude Code (MCP server, /relevo, status line)? [Y/n] y
   Add Relevo to pi? [Y/n] y
-…
+Added Relevo to Claude Code and pi.
+
 Done. Restart Claude Code and pi to load Relevo.
 ```
 
-An agent that runs the line for you passes `| sh -s -- --setup claude-code` (or `pi`, `hermes`; several with commas) and nothing is asked. Rather not pipe to sh? Put `-o relevo-join.sh` in place of `| sh`, read it, then run `sh relevo-join.sh`. The link works once: if it fails, ask the owner for a new one. Later, `relevo setup` (or `relevo setup pi`, say) sets up an agent you install after.
+An agent that runs the line for you passes `| sh -s -- --setup claude-code` (or `pi`, `hermes`: the page tells it to put what it is; several with commas) and nothing is asked. Rather not pipe to sh? Put `-o relevo-join.sh` in place of `| sh`, read it, then run `sh relevo-join.sh`. The link works once: if it fails, ask the owner for a new one. Later, `relevo setup` (or `relevo setup pi`, say) sets up an agent you install after.
 
 **With a token** the owner sent:
 

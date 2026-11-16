@@ -410,6 +410,14 @@ async fn connect(
     // `team` lists everyone on the server, whatever teams there are.
     let you = people["you"].as_str().unwrap_or_default().to_string();
     let people = people["team"].as_array().map(Vec::len).unwrap_or(0);
+    if joined {
+        let people = match people {
+            1 => "1 person".to_string(),
+            n => format!("{n} people"),
+        };
+        println!("Connected to {} as @{you} ({people})", config.url);
+        return Ok(());
+    }
     let pinned = if config.cert.is_some() {
         " with its certificate"
     } else {

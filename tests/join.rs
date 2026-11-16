@@ -229,7 +229,7 @@ async fn an_invitation_works_once_and_gets_a_token_that_works() {
         body["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("relevo invite ana")
+            .contains("Ask whoever invited you for a new link")
     );
     assert_eq!(db::list_tokens(&f.app.db(), Some("ana")).unwrap().len(), 1);
 }
@@ -280,7 +280,10 @@ async fn an_invitation_expires_after_24_hours() {
     let (status, _, page) = f.page(&code, "").await;
     assert_eq!(status, StatusCode::GONE);
     assert!(page.contains("This invitation has expired"), "{page}");
-    assert!(page.contains("relevo invite ana"), "{page}");
+    assert!(
+        page.contains("Invitations work once and last 24 hours. Ask whoever invited you"),
+        "{page}"
+    );
     assert!(
         db::list_tokens(&f.app.db(), Some("ana"))
             .unwrap()
@@ -343,19 +346,22 @@ async fn the_page_shows_the_invitation_without_using_it() {
     assert_eq!(page.matches("<script>").count(), 1);
 
     assert!(page.contains("You're invited to Relevo"));
-    assert!(page.contains("You'll join as <b>@ana</b> (Ana)"));
+    assert!(page.contains("You'll join as <b>@ana</b>. "));
+    assert!(page.contains("Open this on the computer where your agents run."));
+    assert!(!page.contains("not encrypted"));
     assert!(page.contains(&format!("{URL}/join/{code}</code>")));
     let curl = format!("curl -sS --pinnedpubkey sha256//PIN+/= -k {URL}/join/{code}/install");
     assert!(page.contains(&format!("{curl} | sh</code>")), "{page}");
-    assert!(page.contains("One use · expires in 24 h · it never shows your token"));
-    // For agents: what to run, and to ask first.
-    assert!(page.contains("For AI agents"));
-    assert!(page.contains(&format!("{curl} | sh -s -- --setup claude-code")));
-    assert!(page.contains("first ask your person"));
+    assert!(page.contains("Works once · expires in 24 h"));
+    // For agents, folded but in the page: what to run, and to ask first.
+    assert!(page.contains("<details class=\"agents\" id=\"for-agents\">\n<summary>For AI agents"));
+    assert!(page.contains(&format!("{curl} | sh -s -- --setup AGENT")));
+    assert!(page.contains("Replace AGENT with what you are: <code>claude-code</code>"));
+    assert!(page.contains("first ask the user"));
     // On Linux, the Linux tab; the dist has no binary for macOS, and says so there.
     assert!(page.contains("aria-controls=\"panel-linux\" aria-selected=\"true\""));
     assert!(page.contains("<div id=\"panel-mac\" role=\"tabpanel\" hidden>"));
-    assert!(page.contains("no relevo for macOS yet"));
+    assert!(page.contains("No macOS build on this server yet. Ask whoever invited you."));
     // From a Mac, the macOS tab.
     let (_, _, page) = f
         .page(&code, "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5)")
@@ -371,14 +377,11 @@ async fn the_page_shows_the_invitation_without_using_it() {
         page.contains("<h1>This invitation was already used</h1>"),
         "{page}"
     );
-    assert!(page.contains("Ask for a new one: on the server, relevo invite ana."));
+    assert!(page.contains("Ask whoever invited you for a new link."));
     assert!(!page.contains("curl"));
     let (status, _, page) = f.page("ZZZZ-ZZZZ", "").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert!(
-        page.contains("This invitation link does not work"),
-        "{page}"
-    );
+    assert!(page.contains("<h1>Invitation not found</h1>"), "{page}");
 }
 
 #[tokio::test]
@@ -395,7 +398,8 @@ async fn names_are_text_on_the_page() {
     .unwrap()
     .code;
     let (_, _, page) = f.page(&code, "").await;
-    assert!(page.contains("(&lt;script&gt;alert(1)&lt;/script&gt; &amp; &quot;Eve&quot;)"));
+    // The name is not on the page; nothing of it runs.
+    assert!(!page.contains("alert(1)"), "{page}");
     assert_eq!(page.matches("<script>").count(), 1);
 }
 
@@ -419,8 +423,8 @@ async fn without_a_certificate_of_its_own_nothing_is_pinned() {
         )),
         "{page}"
     );
-    assert!(!page.contains("pinnedpubkey") && !page.contains(" -k "));
-    assert!(!page.contains("speaks plain http"));
+    assert!(!page.contains("sha256//") && !page.contains(" -k https"));
+    assert!(!page.contains("not encrypted"));
     let (_, script) = f.script(&code).await;
     assert!(script.contains("\npin=''\nfingerprint=''\n"), "{script}");
 
@@ -436,7 +440,9 @@ async fn without_a_certificate_of_its_own_nothing_is_pinned() {
     .unwrap()
     .code;
     let (_, _, page) = f.page(&code, "").await;
-    assert!(page.contains("This server speaks plain http: use this link only on a network you"));
+    assert!(page.contains(
+        "<p class=\"warn\">This link is not encrypted (plain HTTP). Use it only on a network you"
+    ));
 }
 
 fn have(program: &str) -> bool {
@@ -595,7 +601,11 @@ async fn an_address_that_tries_too_many_codes_is_refused_for_an_hour() {
         )
         .await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-    assert!(String::from_utf8(page).unwrap().contains("Too many tries"));
+    assert!(
+        String::from_utf8(page)
+            .unwrap()
+            .contains("Too many attempts")
+    );
     let (status, ..) = f
         .call(
             "GET",
@@ -905,19 +915,20 @@ fn serve_invite_and_join_for_real() {
     assert!(out.status.success(), "{said}{err}");
     let installed = home.join(".local/bin/relevo");
     assert_eq!(std::fs::read(&installed).unwrap(), binary);
-    assert!(said.contains("is not in your PATH"), "{said}");
     assert!(
-        said.contains(&format!("connected to {url} as @ana (1 people on it)")),
+        said.starts_with("Downloading relevo for ")
+            && said.contains(&format!(
+                ")\nInstalled in ~/.local/bin/relevo\nConnected \
+             to {url} as @ana (1 person)\nAdded Relevo to Claude Code.\n\nDone. Restart Claude \
+             Code to load Relevo.\n\nNote: ~/.local/bin is not in your PATH. To type `relevo` \
+             yourself, add to your shell profile:\n  export PATH=\"$HOME/.local/bin:$PATH\"\n"
+            )),
         "{said}"
     );
     let installed_path = installed.display().to_string();
     assert_eq!(
         std::fs::read_to_string(&ran).unwrap(),
         format!("mcp get relevo\nmcp add --scope user relevo -- {installed_path} mcp\n")
-    );
-    assert!(
-        said.contains("Done. Restart Claude Code to load Relevo."),
-        "{said}"
     );
     assert!(home.join(".claude/commands/relevo.md").exists());
     let config: Value =
@@ -938,7 +949,7 @@ fn serve_invite_and_join_for_real() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{err}");
     assert!(
-        err.contains("relevo: This invitation was already used. An invitation works once"),
+        err.contains("relevo: This invitation was already used. Invitations work once"),
         "{err}"
     );
 

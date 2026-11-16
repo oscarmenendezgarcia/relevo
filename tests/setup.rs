@@ -227,10 +227,10 @@ async fn named_agents_are_set_up_without_asking() {
         .map(|a| a["kind"].as_str().unwrap())
         .collect();
     assert_eq!(kinds, ["pi", "hermes"]);
-    assert!(said.contains("added Relevo 0.7.0 to pi"), "{said}");
-    assert!(
-        said.contains("Done. Restart Claude Code, pi and the Hermes gateway to load Relevo."),
-        "{said}"
+    assert_eq!(
+        said,
+        "Added Relevo to Claude Code, pi and Hermes.\n\nDone. Restart Claude Code, pi and the \
+         Hermes gateway to load Relevo.\n"
     );
 
     // Again: the MCP server Claude Code has is left alone, the adapters are installed again.
@@ -255,8 +255,8 @@ async fn without_a_terminal_nothing_changes_and_it_says_what_to_run() {
     assert!(out.status.success(), "{said}");
     assert!(
         said.contains(&format!(
-            "Found Claude Code, pi, Hermes (no terminal to ask): to add Relevo to them, run\n  {} \
-             setup claude-code pi hermes",
+            "Found Claude Code, pi and Hermes (no terminal to ask). To add Relevo to them, run\n  \
+             {} setup claude-code pi hermes",
             env!("CARGO_BIN_EXE_relevo")
         )),
         "{said}"
