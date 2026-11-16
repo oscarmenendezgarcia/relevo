@@ -14,13 +14,12 @@ On the server (open port 7878 only to the office network or the VPN; a reverse p
 cargo install --path .
 export RELEVO_DB=/srv/relevo/relevo.db
 relevo serve --tls --addr 0.0.0.0:7878 &                # HTTPS with its own certificate; prints its fingerprint
-relevo invite ana --name "Ana" --about "payments backend" --label "ana's laptop"         # prints Ana's token once
+relevo invite ana --name "Ana" --about "payments backend"   # prints a link for Ana: it works once, for 24 hours
 ```
 
-Give Ana the server's address, her token and the fingerprint (`relevo tls-fingerprint`). On her machine, with Claude Code:
+Send Ana the link. She gives it to her agent, or opens it and pastes its one command in a terminal: it installs `relevo` from your server and connects it, pinning the server's certificate (`--token` on `invite` prints a token instead, to connect by hand with `relevo connect`; see [docs/install.md](docs/install.md)). Then, with Claude Code:
 
 ```
-relevo connect https://192.168.1.50:7878              # compare the fingerprint it shows, then paste the token; saved to ~/.config/relevo/config.json
 claude mcp add --scope user relevo -- relevo mcp
 ```
 

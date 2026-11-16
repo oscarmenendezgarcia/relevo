@@ -3,7 +3,7 @@
 //! connection and the whole request, and connections at once, in all and per address.
 
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
+use axum::extract::ConnectInfo;
 
 use http_body::{Body as _, Frame, SizeHint};
 use hyper::body::Incoming;
@@ -106,7 +107,7 @@ pub async fn serve(
         let _ = tcp.set_nodelay(true);
         let (router, limits, acceptor) = (router.clone(), limits.clone(), acceptor.clone());
         tokio::spawn(async move {
-            connection(tcp, acceptor, router, limits).await;
+            connection(tcp, peer, acceptor, router, limits).await;
             drop((permit, slot));
         });
     }
@@ -158,6 +159,7 @@ impl Drop for AddressSlot {
 
 async fn connection(
     tcp: TcpStream,
+    peer: SocketAddr,
     acceptor: Option<tokio_rustls::TlsAcceptor>,
     router: Router,
     limits: Arc<Limits>,
@@ -165,18 +167,19 @@ async fn connection(
     // The head's time runs from the connection, the TLS handshake included.
     let watch = Arc::new(Watch::new(Phase::Head(Instant::now() + limits.head)));
     match acceptor {
-        None => http(tcp, router, limits, watch).await,
+        None => http(tcp, peer, router, limits, watch).await,
         Some(acceptor) => {
             let shake = tokio::time::timeout_at(watch.deadline(), acceptor.accept(tcp)).await;
             if let Ok(Ok(tls)) = shake {
-                http(tls, router, limits, watch).await;
+                http(tls, peer, router, limits, watch).await;
             }
         }
     }
 }
 
-/// Serves HTTP/1.1 on `io` until the client closes it or misses a deadline of `watch`.
-async fn http<S>(io: S, router: Router, limits: Arc<Limits>, watch: Arc<Watch>)
+/// Serves HTTP/1.1 on `io` until the client closes it or misses a deadline of `watch`. Each
+/// request carries the client's address (`ConnectInfo`), for the limits on invitation codes.
+async fn http<S>(io: S, peer: SocketAddr, router: Router, limits: Arc<Limits>, watch: Arc<Watch>)
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -191,12 +194,13 @@ where
         let (router, limits, watch) = (router.clone(), limits.clone(), in_service.clone());
         async move {
             watch.busy(req.body().is_end_stream(), &limits);
-            let req = req.map(|body| {
+            let mut req = req.map(|body| {
                 Body::new(Timed {
                     body,
                     watch: watch.clone(),
                 })
             });
+            req.extensions_mut().insert(ConnectInfo(peer));
             let res = router.oneshot(req).await;
             // Writing the answer counts as idle: a client that does not read it is closed too.
             watch.set(Phase::Idle(Instant::now() + limits.idle));

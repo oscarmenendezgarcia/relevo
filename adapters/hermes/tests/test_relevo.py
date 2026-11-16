@@ -164,7 +164,7 @@ class Server:
         return client.pinned_context(self.cert) if self.cert else True
 
     def _invite(self, handle: str, name: str, about: str, label: str) -> str:
-        out = subprocess.run([RELEVO_BIN, "invite", handle, "--name", name, "--about", about, "--label", label,
+        out = subprocess.run([RELEVO_BIN, "invite", handle, "--name", name, "--about", about, "--token", "--label", label,
                               "--db", self.db], check=True, capture_output=True, text=True).stdout
         return next(line.strip() for line in out.splitlines() if line.strip().startswith("rlv_"))
 

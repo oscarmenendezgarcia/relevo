@@ -1,0 +1,48 @@
+/* The invitation page (/join/<code>): the look of relevo web (src/web/app.css), self-contained. */
+:root {
+  color-scheme: dark light;
+  --bg: #0b0c0f; --text: #e7e9ee; --body: #b9bec8; --faint: #7f8896; --line: #1c1f26;
+  --soft: #14161b; --code: #08090c; --need: #f5c451; --need-text: #1a1405; --focus: #7c9cff; --brand: #9794ff; --brand-text: #0b0c0f;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #ffffff; --text: #15161a; --body: #4a5160; --faint: #616a78; --line: #e3e5ea;
+    --soft: #f5f6f8; --code: #eef0f3; --need: #9e6400; --need-text: #ffffff; --focus: #4f6bed; --brand: #5b4fd8; --brand-text: #ffffff;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 var(--sans); -webkit-font-smoothing: antialiased; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 4px; }
+[hidden] { display: none !important; }
+main { max-width: 600px; margin: 0 auto; padding: 28px 20px 64px; }
+header { display: flex; align-items: center; gap: 10px; margin-bottom: 30px; font-weight: 700; }
+header svg { width: 24px; height: 24px; display: block; }
+h1 { font-size: 23px; line-height: 1.3; margin: 0 0 6px; }
+.lead { color: var(--body); margin: 0 0 22px; }
+.lead b { color: var(--text); }
+.card { background: var(--soft); border: 1px solid var(--line); border-radius: 12px; padding: 15px 16px; margin: 12px 0; }
+.card h2 { font-size: 15px; margin: 0 0 4px; }
+.card p { color: var(--body); font-size: 14px; margin: 2px 0 10px; }
+.row { display: flex; gap: 8px; align-items: flex-start; }
+code, pre { font: 12.5px/1.45 var(--mono); }
+.row code { flex: 1; min-width: 0; background: var(--code); border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; overflow-wrap: anywhere; }
+.row code.cmd { white-space: nowrap; overflow-x: auto; overflow-wrap: normal; }
+@media (max-width: 480px) { .row { flex-direction: column; align-items: stretch; } .row button { height: 40px; } }
+button { font: 700 13px var(--sans); border: 0; border-radius: 8px; padding: 0 14px; height: 36px; min-width: 76px; cursor: pointer; white-space: nowrap; background: var(--brand); color: var(--brand-text); }
+button.ghost { background: var(--line); color: var(--text); }
+.tabs { display: flex; gap: 4px; margin: 0 0 8px; }
+.tabs button { font-weight: 500; font-size: 12.5px; height: auto; min-width: 0; padding: 6px 12px; border-radius: 999px; background: var(--line); color: var(--body); }
+.tabs button[aria-selected="true"] { background: var(--brand); color: var(--brand-text); }
+.card p.under { margin: 8px 0 0; font-size: 13px; color: var(--faint); }
+details { margin-top: 10px; }
+summary { cursor: pointer; color: var(--body); font-size: 13.5px; }
+details p { font-size: 13.5px; }
+.foot { color: var(--faint); font-size: 12.5px; margin: 18px 0 0; text-align: center; }
+.agents { margin-top: 44px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--faint); font-size: 13px; }
+.agents summary { font-size: 13px; }
+.agents p { margin: 6px 0; }
+.agents pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--code); border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; margin: 8px 0; color: var(--body); }
+.warn { color: var(--need); font-size: 13.5px; margin: -10px 0 18px; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }

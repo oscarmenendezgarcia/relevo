@@ -33,6 +33,16 @@ pub fn fingerprint(cert: &CertificateDer) -> String {
         .join(":")
 }
 
+/// The pin of a certificate's key, as `curl --pinnedpubkey sha256//<pin>` takes it: the base64
+/// SHA-256 of its SubjectPublicKeyInfo (DER).
+pub fn key_pin(cert: &CertificateDer) -> Result<String> {
+    use base64::Engine;
+    let cert = webpki::EndEntityCert::try_from(cert)
+        .map_err(|e| anyhow!("reading the certificate: {e}"))?;
+    let spki = cert.subject_public_key_info();
+    Ok(base64::engine::general_purpose::STANDARD.encode(Sha256::digest(spki.as_ref())))
+}
+
 /// Whether `given` (hex, with or without colons or spaces, any case) is `fingerprint`.
 pub fn same_fingerprint(given: &str, fingerprint: &str) -> bool {
     let hex = |s: &str| -> String {
@@ -80,6 +90,11 @@ fn server_name(name: &str) -> Result<ServerName<'static>> {
 pub fn names(cert: &CertificateDer, name: &ServerName) -> bool {
     webpki::EndEntityCert::try_from(cert)
         .is_ok_and(|ee| ee.verify_is_valid_for_subject_name(name).is_ok())
+}
+
+/// Whether `cert` names `host` (a host name or an IP address, bracketed or not).
+pub fn names_host(cert: &CertificateDer, host: &str) -> bool {
+    server_name(host).is_ok_and(|name| names(cert, &name))
 }
 
 // ---------------------------------------------------------------------------------------------

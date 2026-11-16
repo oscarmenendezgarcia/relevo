@@ -27,7 +27,7 @@ GET /api/dist/manifest.sig
 GET /api/dist/<name>          a file the manifest lists, as is
 ```
 
-They answer `NOT_FOUND` when there is no dist, or no such file. The server logs a warning at start when the dist's version is not its own. It never signs anything and holds no key.
+They answer `NOT_FOUND` when there is no dist, or no such file. `relevo setup pi` and `relevo setup hermes` (and the invitation link) install an adapter for the first time from the same files, checked against the manifest's size and SHA-256 (the server is the one the person joined, as for the install script's binary); from then on `relevo update` checks the signature. The binaries are also handed out, without a token, to whoever holds an invitation that still works (`GET /join/<code>/relevo?target=<triple>`, see `docs/protocol.md`, "Invitations"), for the install script of the invitation link. The server logs a warning at start when the dist's version is not its own. It never signs anything and holds no key.
 
 ## The clients
 

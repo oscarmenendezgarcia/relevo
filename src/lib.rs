@@ -11,12 +11,14 @@ pub mod context;
 pub mod db;
 pub mod dist;
 pub mod error;
+pub mod join;
 pub mod mcp;
 pub mod mention;
 pub mod release;
 pub mod render;
 pub mod serve;
 pub mod session;
+pub mod setup;
 pub mod statusline;
 pub mod timeline;
 pub mod tls;
@@ -46,6 +48,8 @@ pub struct App {
     news: Mutex<HashMap<i64, watch::Sender<()>>>,
     /// Waiting `inbox` requests, per token id.
     waits: Mutex<HashMap<String, usize>>,
+    /// The tries at invitation codes that do not exist (`crate::join`).
+    join_tries: Mutex<join::Tries>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -71,6 +75,7 @@ impl App {
             dist,
             news: Mutex::new(HashMap::new()),
             waits: Mutex::new(HashMap::new()),
+            join_tries: Mutex::default(),
         })
     }
 

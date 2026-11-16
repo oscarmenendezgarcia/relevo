@@ -125,17 +125,28 @@ pub async fn file(
     if !valid_name(&name) {
         return Err(not_found());
     }
-    if name != MANIFEST && name != SIGNATURE {
-        // Only what the manifest lists: nothing else that may sit in the directory.
-        let manifest = match tokio::fs::read(dir.join(MANIFEST)).await {
-            Ok(bytes) => Manifest::parse(&bytes).map_err(|_| not_found())?,
-            Err(_) => return Err(not_found()),
-        };
-        if manifest.file(&name).is_none() {
-            return Err(not_found());
-        }
+    // Only what the manifest lists: nothing else that may sit in the directory.
+    if name != MANIFEST
+        && name != SIGNATURE
+        && read_manifest(dir)
+            .await
+            .is_none_or(|m| m.file(&name).is_none())
+    {
+        return Err(not_found());
     }
-    let file = match tokio::fs::File::open(dir.join(&name)).await {
+    send(dir, &name).await
+}
+
+/// The manifest of the dist in `dir`, if there is one that can be read.
+pub async fn read_manifest(dir: &Path) -> Option<Manifest> {
+    let bytes = tokio::fs::read(dir.join(MANIFEST)).await.ok()?;
+    Manifest::parse(&bytes).ok()
+}
+
+/// The file `name` of the dist in `dir`, as is (`NOT_FOUND` when it is missing).
+pub async fn send(dir: &Path, name: &str) -> Result<Response, ApiError> {
+    let not_found = || ApiError::not_found("no such file in this server's dist");
+    let file = match tokio::fs::File::open(dir.join(name)).await {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(not_found()),
         Err(e) => {

@@ -517,6 +517,66 @@ pub async fn run(config: &Config, setup: &Setup, check: bool) -> Result<Vec<Step
     Ok(steps)
 }
 
+/// Installs adapter `kind` in `dir` (a new or empty folder, or one of that adapter, replaced in
+/// one step) from the dist of the server `config` names, and registers `dir` for updates. The
+/// archive is checked against the size and SHA-256 the server's manifest lists, as the
+/// invitation's install script checks the binary: it comes from the server the person joined,
+/// trusted as that script trusted it (its pinned key, or an authority). Updates check the
+/// release's signature from then on. Returns the version installed.
+pub async fn install_from_server(
+    config: &Config,
+    env: &impl Fn(&str) -> Option<String>,
+    kind: Kind,
+    dir: &Path,
+) -> Result<String> {
+    let client = Client::new(config, Some(String::new()), "/".into())?;
+    let from = |what: &str, e: client::Error| anyhow!("fetching {what} from {}: {e}", config.url);
+    let manifest = client
+        .fetch(
+            &format!("/api/dist/{MANIFEST}"),
+            MAX_MANIFEST,
+            SMALL_TIMEOUT,
+        )
+        .await
+        .map_err(|e| match e {
+            client::Error::Api { status: 404, .. } => {
+                anyhow!("{} hands out no clients", config.url)
+            }
+            e => from("the manifest", e),
+        })?;
+    let manifest = Manifest::parse(&manifest)?;
+    let file = manifest
+        .files
+        .iter()
+        .find(|f| f.kind == kind.name())
+        .ok_or_else(|| anyhow!("{} hands out no {}", config.url, kind.label()))?;
+    let bytes = client
+        .fetch(&format!("/api/dist/{}", file.name), file.size, FILE_TIMEOUT)
+        .await
+        .map_err(|e| from(&file.name, e))?;
+    matches(file, &bytes)?;
+    // The folder itself: a link to it stays a link.
+    let dir = &fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    if in_git_checkout(dir) {
+        bail!("{} is {IN_GIT}: left as it is", dir.display());
+    }
+    let empty = fs::read_dir(dir).map(|mut d| d.next().is_none());
+    match empty {
+        Ok(true) => {}
+        Ok(false) => {
+            kind.version_in(dir)
+                .map_err(|e| anyhow!("{e:#}: left as it is"))?;
+        }
+        Err(_) => fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?,
+    }
+    let (version, at) = (manifest.version.clone(), dir.to_path_buf());
+    tokio::task::spawn_blocking(move || install_adapter(kind, &at, &bytes, &version))
+        .await
+        .map_err(|e| anyhow!("{e}"))??;
+    register(env, kind, &fs::canonicalize(dir)?)?;
+    Ok(manifest.version)
+}
+
 const IN_GIT: &str = "in a git checkout: update it with git";
 
 /// Whether `dir` is in a git checkout (a `.git`, folder or file, in it or above it). Such a folder

@@ -138,26 +138,21 @@ impl Client {
         if let Some(agent) = self.agent.get() {
             req = req.header("relevo-agent", agent);
         }
-        let res = req.send().await.map_err(network)?;
-        let status = res.status();
-        let bytes = res.bytes().await.map_err(network)?;
-        let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        if status.is_success() {
-            if !body.is_object() {
-                return Err(Error::BadResponse(format!("{status}, not a JSON object")));
-            }
-            return Ok(body);
-        }
-        let err = &body["error"];
-        Err(Error::Api {
-            status: status.as_u16(),
-            code: err["code"].as_str().unwrap_or("HTTP_ERROR").to_string(),
-            message: err["message"]
-                .as_str()
-                .map(str::to_string)
-                .unwrap_or_else(|| format!("the server answered {status}")),
-            body,
-        })
+        answer(req).await
+    }
+
+    /// `POST /api/join`: trades an invitation's code for a token of its person (`token`, with
+    /// `handle` and `url`). It needs no token, and sends none.
+    pub async fn join(&self, code: &str) -> Result<Value, Error> {
+        let req = self
+            .http
+            .post(format!("{}/api/join", self.url))
+            .json(&serde_json::json!({ "code": code }))
+            .timeout(TIMEOUT);
+        shaped(
+            answer(req).await,
+            &[("token", Value::is_string), ("handle", Value::is_string)],
+        )
     }
 
     /// `GET path` with the token alone, no session or context (it counts as no session's
@@ -339,6 +334,30 @@ impl Error {
             Error::BadResponse(_) => false,
         }
     }
+}
+
+/// Sends `req`, and reads its answer: a JSON object, or the server's error.
+async fn answer(req: reqwest::RequestBuilder) -> Result<Value, Error> {
+    let res = req.send().await.map_err(network)?;
+    let status = res.status();
+    let bytes = res.bytes().await.map_err(network)?;
+    let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    if status.is_success() {
+        if !body.is_object() {
+            return Err(Error::BadResponse(format!("{status}, not a JSON object")));
+        }
+        return Ok(body);
+    }
+    let err = &body["error"];
+    Err(Error::Api {
+        status: status.as_u16(),
+        code: err["code"].as_str().unwrap_or("HTTP_ERROR").to_string(),
+        message: err["message"]
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("the server answered {status}")),
+        body,
+    })
 }
 
 /// A 502, 503 or 504 without Relevo's error body: a proxy's answer, not the server's.

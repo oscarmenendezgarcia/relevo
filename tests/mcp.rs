@@ -1776,7 +1776,7 @@ fn admin(db: &Path, args: &[&str]) -> String {
 
 /// A new person's token on `db`.
 fn invite(db: &Path, handle: &str) -> String {
-    let out = admin(db, &["invite", handle, "--name", handle]);
+    let out = admin(db, &["invite", handle, "--name", handle, "--token"]);
     out.lines().nth(1).unwrap().to_string()
 }
 
