@@ -24,6 +24,6 @@ jobs:
       - run: cargo test --locked
       - name: Installer and units
         run: |
-          shellcheck deploy/*.sh
+          shellcheck deploy/*.sh src/join/install.sh
           cargo build --locked
           deploy/test-install.sh target/debug/relevo
