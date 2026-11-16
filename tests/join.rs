@@ -4,6 +4,7 @@
 //! for real are in `serve_invite_and_join_for_real`.
 
 use std::net::SocketAddr;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -851,6 +852,19 @@ fn serve_invite_and_join_for_real() {
     // The script, as the page says to run it, in a new HOME without ~/.local/bin in PATH.
     let home = temp.0.join("home");
     std::fs::create_dir(&home).unwrap();
+    // A stand-in for Claude Code's `claude`, which records how it was run.
+    let bin = temp.0.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let ran = temp.0.join("claude.log");
+    std::fs::write(
+        bin.join("claude"),
+        format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\n[ \"$1 $2\" = 'mcp get' ] && exit 1\nexit 0\n",
+            ran.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755)).unwrap();
     let curl =
         |pin: &str| format!("curl -sS --pinnedpubkey sha256//{pin} -k {url}/join/{code}/install");
     let pin = public.pin.clone().unwrap();
@@ -860,7 +874,7 @@ fn serve_invite_and_join_for_real() {
             .arg(format!("{} | sh -s -- {extra}", curl(pin)))
             .env_clear()
             .env("HOME", &home)
-            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
             .output()
             .unwrap()
     };
@@ -896,8 +910,13 @@ fn serve_invite_and_join_for_real() {
         said.contains(&format!("connected to {url} as @ana (1 people on it)")),
         "{said}"
     );
+    let installed_path = installed.display().to_string();
+    assert_eq!(
+        std::fs::read_to_string(&ran).unwrap(),
+        format!("mcp get relevo\nmcp add --scope user relevo -- {installed_path} mcp\n")
+    );
     assert!(
-        said.contains("claude mcp add --scope user relevo --"),
+        said.contains("Done. Restart Claude Code to load Relevo."),
         "{said}"
     );
     assert!(home.join(".claude/commands/relevo.md").exists());

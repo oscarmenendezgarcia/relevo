@@ -56,6 +56,16 @@ claude mcp add --scope user relevo -- relevo mcp --channel
 claude --dangerously-load-development-channels server:relevo
 ```
 
+## Setting agents up
+
+`relevo setup [claude-code] [pi] [hermes]` (and `relevo connect --setup …`, which the invitation link's install script runs) sets Relevo up for agents on this machine, with the server and token `relevo connect` saved. The agents named are set up without asking; with none named, a terminal is asked about each agent whose program (`claude`, `pi`, `hermes`) is on `PATH` ("Add Relevo to pi? [Y/n]"), and without a terminal nothing changes: it says what to run. One that fails is said, and the others go on. For each:
+
+- **Claude Code**: `claude mcp add --scope user relevo -- <this relevo> mcp`, unless `claude mcp get relevo` finds one already (left as it is); then the `/relevo` command and the status line, as `relevo connect --command --statusline` (a file or a status line that is not Relevo's is never replaced). Restart Claude Code to load it.
+- **pi**: the extension from the server's dist (`relevo-pi-<version>.tar.gz`), unpacked into `$XDG_DATA_HOME/relevo/pi` (`~/.local/share/relevo/pi`), then `pi install` of that folder, and registered for updates. Restart pi.
+- **Hermes**: the plugin from the server's dist (`relevo-hermes-<version>.tar.gz`), into `plugins/relevo` of `$HERMES_HOME` (`~/.hermes`), then, with Hermes's own commands: `hermes plugins enable relevo`, `hermes config set plugins.entries.relevo.allow_gateway_injection true` (so `/relevo` in chats hands answers to Hermes), `hermes config set platforms.relevo.enabled true` (its gateway platform, with the server and token `relevo connect` saved), `hermes config set RELEVO_ALLOW_ALL_USERS true` (it answers any teammate: the server is the trust boundary), and `hermes tools enable relevo` for the `relevo` and `cli` platforms; registered for updates. Restart the Hermes gateway (`hermes gateway restart`) when it suits you.
+
+A folder there that is not that adapter, or one in a git checkout, is left as it is. The adapters are checked against the size and SHA-256 the server's manifest lists (the server the person joined); `relevo update` checks the release's signature from then on.
+
 ## The `/relevo` command (Claude Code)
 
 What waits on the person, and acting on it, without leaving Claude Code. It is a custom command, `adapters/claude-code/commands/relevo.md`, built into the binary; its prompt has Claude use the tools above:

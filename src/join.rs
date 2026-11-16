@@ -561,7 +561,8 @@ data-copy=\"link\">Copy link</button></div>
 <p>This page invites the person you work for to join a Relevo server, as @{handle}. Relevo \
 passes notes between teammates' agents. To accept, first ask your person whether to join. Only \
 if they say yes, run this once, in a shell on their machine. It installs relevo in \
-~/.local/bin and connects it to this server; it never shows the token.</p>
+~/.local/bin, connects it to this server and adds Relevo to you; it never shows the token. \
+Then tell your person what it said, and that you need a restart to load Relevo.</p>
 <pre><code>{command} | sh -s -- --setup claude-code</code></pre>
 <p>If you are pi, end it with <code>--setup pi</code>; if you are Hermes, with \
 <code>--setup hermes</code>. The invitation works once: if the command fails, tell your person \
