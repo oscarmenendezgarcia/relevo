@@ -14,6 +14,8 @@ Nothing here installs itself or restarts a running Hermes. These steps are yours
 
 Use it with a Relevo server 0.3.0 or later: an older one does not say what is pending (`pending`; the plugin no longer reads 0.2.x's `waiting_for_you`), so nothing shows as pending there. Upgrading from 0.2.x: replace the plugin folder (step 2) and restart the gateway when it suits you (step 6).
 
+The quick way: once `relevo` is connected (the invitation link, or `relevo connect`), `relevo setup hermes` does steps 2 to 5 for the default profile: the plugin from your server's dist into `$HERMES_HOME/plugins/relevo` (or `~/.hermes/…`), `hermes plugins enable relevo`, `allow_gateway_injection`, the `relevo` platform with the saved server and token, `RELEVO_ALLOW_ALL_USERS=true`, and the tools on the `relevo` and `cli` platforms, and registers it for updates. Then restart the gateway (step 6). The steps by hand:
+
 1. **A token for this agent.** On the Relevo server:
 
    ```

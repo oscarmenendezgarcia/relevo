@@ -44,6 +44,8 @@ You need pi, Node 22.18 or later (pi's own Node is fine), and a token from your 
 
    With a certificate (`cert`, for the server saved with it, or `RELEVO_CERT`, whatever the server), the extension trusts that certificate alone for an `https://` server, as `relevo mcp` does: the server must present exactly it, valid for the host in the URL (one an office authority signed is trusted on its own, without that authority), and any other is refused, even one a public authority signed, before the token is sent; run `relevo connect` again when the server has a new certificate. Node's `fetch` cannot take a certificate to trust without the `undici` package, so these requests go through `node:https`, with the same timeouts, the same waiting inbox and the same ending on shutdown. A certificate that cannot be read, or is not PEM, makes the tools say so, and nothing waits in the background. Without a certificate, an `https://` server is checked against the authorities Node trusts, and plain `http://` is unchanged (a certificate is not used for it).
 
+   Or let `relevo` do steps 1 and 2: the invitation link (`relevo connect --join`) asks, and `relevo setup pi` installs the extension from your server's dist into `~/.local/share/relevo/pi`, runs `pi install` on it and registers it for updates.
+
 2. Install the extension from this directory (no build step, no dependencies: pi loads the TypeScript directly):
 
    ```sh
