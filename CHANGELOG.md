@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: a session that ended (an agent exiting) could come back at once as a new, idle session, when the server woke its waiting `inbox` request before noticing the client had gone. It answers with nothing now, and the session stays ended.
+
 ## 0.7.0 (16-nov-2026)
 
 **Invite with a link.**
