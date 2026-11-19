@@ -368,6 +368,20 @@ function addedThreads(known, threads) {
   return threads.filter((t) => !known.has(t.id));
 }
 
+/// What a refresh does to the conversations read before (`convos`, by thread id), now that the
+/// rows are `threads`. One whose thread has another number of notes than its row says is out of
+/// date: opened, it would end on another reply than the row's latest. An open one is read again
+/// (the copy shown stays until then), as is an open one not read yet; a closed one is dropped, to
+/// be read when it is opened.
+function convoUpdates(convos, open, threads) {
+  const row = new Map(threads.map((t) => [t.id, t]));
+  const outdated = (id) => convos.has(id) && row.has(id) && convos.get(id).notes.length !== row.get(id).notes;
+  return {
+    reload: [...open].filter((id) => !convos.has(id) || outdated(id)),
+    drop: [...convos.keys()].filter((id) => !open.has(id) && outdated(id)),
+  };
+}
+
 /// One @mention at the start of a note (a handle, maybe with a context), and what separates it
 /// from the next.
 const LEADING_MENTION = /^@[A-Za-z0-9][A-Za-z0-9_-]{1,31}(?:\/[A-Za-z0-9._@/-]*)?[\s,:;]*/;
@@ -415,6 +429,7 @@ if (typeof module === 'object' && module.exports) {
     togglesRow,
     rowKeydown,
     addedThreads,
+    convoUpdates,
     short,
     noteTime,
     ago,
@@ -661,12 +676,9 @@ if (typeof document !== 'undefined') {
       fine();
       render(fresh);
       if (added) announce(added === 1 ? '1 new thread' : added + ' new threads');
-      // A conversation open whose thread grew is read again; the copy shown stays until then.
-      state.open.forEach((id) => {
-        const t = all.find((x) => x.id === id);
-        const was = before.get(id);
-        if (!state.convos.has(id) || (t && was && t.notes !== was.notes)) loadConvo(id);
-      });
+      const { reload, drop } = convoUpdates(state.convos, state.open, all);
+      drop.forEach((id) => state.convos.delete(id));
+      reload.forEach((id) => loadConvo(id));
     } catch (err) {
       if (gen !== state.gen) return;
       state.failed = true;

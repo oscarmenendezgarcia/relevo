@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.1 (unreleased)
+
+- `relevo web`: a conversation opened, closed and opened again after a new reply ended on the old reply while its row showed the new one. It is read again now.
+
 ## 0.7.0 (16-nov-2026)
 
 **Invite with a link.**
