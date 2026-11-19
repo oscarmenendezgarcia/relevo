@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.7.1 (unreleased)
+## 0.7.1 (19-nov-2026)
 
-- `relevo web`: a conversation opened, closed and opened again after a new reply ended on the old reply while its row showed the new one. It is read again now.
+- Fixed: in `relevo web`, an opened thread now always ends on the same latest reply its row shows, also after new replies arrived while it was closed.
 
 ## 0.7.0 (16-nov-2026)
 
