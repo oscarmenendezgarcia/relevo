@@ -4,7 +4,7 @@
 'use strict';
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { parseNote, parseInline, toDom, preview, rowText, leadingMentions, pickKey, askShown, focusAfter, togglesRow, rowKeydown, addedThreads, short, noteTime, ago, absolute } = require(
+const { parseNote, parseInline, toDom, preview, rowText, leadingMentions, pickKey, askShown, focusAfter, togglesRow, rowKeydown, addedThreads, convoUpdates, short, noteTime, ago, absolute } = require(
   path.join(__dirname, '..', '..', 'src', 'web', 'app.js')
 );
 
@@ -275,6 +275,20 @@ check('*Load more* knows the rows it added, in order', () => {
   assert.deepEqual(addedThreads(known, page).map((t) => t.id), ['c', 'd']);
   assert.deepEqual(addedThreads(known, [{ id: 'a' }]), []);
   assert.deepEqual(addedThreads(new Set(), []).map((t) => t.id), []);
+});
+
+check('a conversation read before its thread grew is not shown again as it was', () => {
+  const convo = (n) => ({ notes: Array.from({ length: n }, (_, i) => ({ id: 'n' + i })) });
+  // a: opened, closed, and then a reply came (the bug: opened again, it ended on the old reply).
+  // b: open, and a reply came. c: closed, nothing new. d: open, not read yet. e: read, then gone
+  // from the rows (another page): kept.
+  const convos = new Map([['a', convo(6)], ['b', convo(3)], ['c', convo(2)], ['e', convo(4)]]);
+  const open = new Set(['b', 'd']);
+  const rows = [{ id: 'a', notes: 7 }, { id: 'b', notes: 4 }, { id: 'c', notes: 2 }, { id: 'd', notes: 5 }];
+  assert.deepEqual(convoUpdates(convos, open, rows), { reload: ['b', 'd'], drop: ['a'] });
+  // Nothing grew: nothing to do.
+  const same = [{ id: 'a', notes: 6 }, { id: 'b', notes: 3 }, { id: 'c', notes: 2 }];
+  assert.deepEqual(convoUpdates(convos, new Set(['b']), same), { reload: [], drop: [] });
 });
 
 // `check` is synchronous: these run after it, and fail the process when they fail.
