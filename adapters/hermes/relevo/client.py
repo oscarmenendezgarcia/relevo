@@ -803,15 +803,16 @@ def speaks_for(me: Optional[str]) -> str:
 
 
 def render_team(team: list, me: Optional[str] = None) -> str:
-    """The people on the server (the protocol's `team` list): handle, name, about, the teams they are
-    in, and where their agents work now."""
+    """The people on the server (the protocol's `team` list): handle, name (and `bot`, for one
+    marked as a bot), about, the teams they are in, and where their agents work now."""
     lines = ["People (mention one with @handle):"]
     for person in team or []:
         live = person.get("contexts") or []
         about = f": {person.get('about')}" if person.get("about") else ""
         you = ", you" if me and person.get("handle") == me else ""
+        bot = ", bot" if person.get("bot") is True else ""
         teams = person.get("teams") or []
-        lines.append(f"- @{person.get('handle')} ({person.get('name')}{you}){about}"
+        lines.append(f"- @{person.get('handle')} ({person.get('name')}{bot}{you}){about}"
                      + (f"; in {_handles(teams)}" if teams else "")
                      + (f" [live in {', '.join(live)}]" if live else ""))
     return "\n".join(lines)

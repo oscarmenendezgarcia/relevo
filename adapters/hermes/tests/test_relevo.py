@@ -1359,6 +1359,10 @@ class Tools(Base):
         self.assertNotIn("Teams", client.render_inbox({"team": [], "session": {}, "threads": []}, "oscar"))
         nobody = client.render_teams([{"name": "ops", "title": "", "members": []}])
         self.assertEqual(nobody, "Teams (mention one with @name: it reaches its members):\n- @ops: nobody active")
+        # A person marked as a bot says so, as relevo mcp and pi say it.
+        bot = client.render_team([{"handle": "reviewer", "name": "Reviewer", "about": "reviews diffs and PRs",
+                                   "contexts": [], "teams": [], "bot": True}], "oscar")
+        self.assertEqual(bot, "People (mention one with @handle):\n- @reviewer (Reviewer, bot): reviews diffs and PRs")
 
     def test_the_inbox_says_who_else_holds_each_thread(self):
         """`held_by`: one line per teammate who holds it, as a state, as relevo mcp's inbox says it."""
