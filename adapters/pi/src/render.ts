@@ -43,14 +43,15 @@ export function listing(names: string[]): string {
   return at.length < 2 ? (at[0] ?? "") : `${at.slice(0, -1).join(", ")} and ${at[at.length - 1]}`;
 }
 
-/** The people on the server (the protocol's `team` list): handle, name, about, the teams they are in, and where their agents work now. */
+/** The people on the server (the protocol's `team` list): handle, name (and `bot`, for one marked as a bot), about, the teams they are in, and where their agents work now. */
 export function renderTeam(team: Person[], me?: string): string {
   const lines = team.map((p) => {
     const about = p.about ? `: ${p.about}` : "";
     const teams = p.teams?.length ? `; in ${p.teams.map((t) => `@${t}`).join(", ")}` : "";
     const live = p.contexts?.length ? ` (live in ${p.contexts.join(", ")})` : "";
     const you = p.handle === me ? ", you" : "";
-    return `- @${p.handle} (${p.name}${you})${about}${teams}${live}`;
+    const bot = p.bot ? ", bot" : "";
+    return `- @${p.handle} (${p.name}${bot}${you})${about}${teams}${live}`;
   });
   return ["People (mention one with @handle):", ...lines].join("\n");
 }

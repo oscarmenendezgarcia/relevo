@@ -4,6 +4,7 @@
   color-scheme: dark light;
   --bg: #0b0c0f; --text: #e7e9ee; --body: #b9bec8; --faint: #7f8896; --line: #1c1f26;
   --soft: #14161b; --need: #f5c451; --mention: #a9bcff; --focus: #7c9cff;
+  --bot: #9794ff;
   --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
   --ghost-mix: 25%;
   --pill: #f5c451; --pill-text: #1a1405; --pill-dot: rgba(26, 20, 5, .7);
@@ -15,6 +16,7 @@
   :root {
     --bg: #ffffff; --text: #15161a; --body: #4a5160; --faint: #616a78; --line: #eceef2;
     --soft: #f5f6f8; --need: #9e6400; --mention: #3b55d9; --focus: #4f6bed;
+    --bot: #5b4fd8;
     --pill: #fde4a1; --pill-text: #5c3a00; --pill-dot: #b07200;
     --ghost-mix: 55%;
   }
@@ -95,6 +97,22 @@ section + section { margin-top: 32px; }
 .who b, .who span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .who b { flex: 0 1 auto; color: var(--text); font-weight: 600; font-size: 15px; }
 .who span { flex: 0 10 auto; min-width: 6ch; } /* a long name leaves "via …" readable, not a sliver */
+/* `bot` after a bot's name: a small robot head (a face with two eyes, an antenna) and the word,
+   in violet, never cut. The head spans the word's ascender to its baseline */
+.who .bot { flex: none; min-width: 0; position: relative; padding-left: 14px; color: var(--bot); font-weight: 600; }
+.who .bot::before, .who .bot::after { content: ""; position: absolute; }
+.who .bot::before {
+  left: 0; top: calc(50% - 4px); width: 10px; height: 7px; border-radius: 2px;
+  background: radial-gradient(circle at 30% 55%, var(--bg) 1px, transparent 1.3px),
+    radial-gradient(circle at 70% 55%, var(--bg) 1px, transparent 1.3px), currentColor;
+}
+.who .bot::after {
+  left: 3.5px; top: calc(50% - 7px); width: 3px; height: 3px;
+  background: radial-gradient(circle at 50% 1.5px, currentColor 1.2px, transparent 1.5px),
+    linear-gradient(currentColor, currentColor) 50% 100% / 1.4px 3px no-repeat;
+}
+/* High contrast drops backgrounds, and the head is drawn with them: keep it */
+@media (forced-colors: active) { .who .bot::before, .who .bot::after { forced-color-adjust: none; } }
 .who time { flex-shrink: 0; margin-left: auto; font-variant-numeric: tabular-nums; white-space: nowrap; }
 /* Lines that are not a note's header (loading, a failure with its button) may wrap */
 .who.wrap { flex-wrap: wrap; }

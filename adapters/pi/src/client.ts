@@ -28,6 +28,8 @@ export interface Person {
   contexts: string[];
   /** The teams they are in (servers before 0.4.0 leave it out). */
   teams?: string[];
+  /** Marked as a bot (left out otherwise, and by servers before 0.8.0). */
+  bot?: boolean;
 }
 
 /** A team on the server: whom `@name` reaches. */

@@ -402,6 +402,31 @@ async fn people_lists_every_active_person_with_about() {
     assert_eq!(v["you"], "bob");
 }
 
+#[tokio::test]
+async fn a_bot_is_marked_in_every_people_list() {
+    let t = team(&["ana", "reviewer"]);
+    db::set_bot(&t.app.db(), "reviewer", true).unwrap();
+    let (_, v) = t.get("ana", "/api/people").await;
+    // `bot` only on a bot: everyone else's entry is as before.
+    assert_eq!(v["team"][0].get("bot"), None);
+    assert_eq!(
+        v["team"][1],
+        json!({ "handle": "reviewer", "name": "REVIEWER", "about": "reviewer things",
+                "contexts": [], "teams": [], "bot": true })
+    );
+    let (_, v) = t.get("reviewer", "/api/inbox").await;
+    assert_eq!(v["team"][1]["bot"], true);
+    assert_eq!(v["team"][0].get("bot"), None);
+    // And in what a mention of nobody lists.
+    let (status, v) = t.send("ana", json!({ "text": "@nobody hi" })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(v["error"]["valid"][1]["bot"], true);
+    // Unmarked, it is a person like any other again.
+    db::set_bot(&t.app.db(), "reviewer", false).unwrap();
+    let (_, v) = t.get("ana", "/api/people").await;
+    assert_eq!(v["team"][1].get("bot"), None);
+}
+
 // ---------- direct threads and delivery ----------
 
 #[tokio::test]

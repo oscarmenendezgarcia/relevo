@@ -256,6 +256,11 @@ CREATE TABLE IF NOT EXISTS invites (
     used_at    INTEGER
 );
 CREATE INDEX IF NOT EXISTS invites_by_person ON invites(person_id);
+-- The people marked as bots (`relevo invite --bot`, `relevo bot`). A table, not a column, as
+-- `invites`: added in 0.8.0 without a new layout, and nothing before 0.8.0 reads it.
+CREATE TABLE IF NOT EXISTS bots (
+    person_id INTEGER PRIMARY KEY REFERENCES people(id)
+);
 ";
 
 /// Names no person nor team may take: 0.3's whole team, which the deprecated `to` still reads
@@ -1040,6 +1045,8 @@ pub enum Invite {
     Valid {
         handle: String,
         name: String,
+        /// Their person is marked as a bot.
+        bot: bool,
         address: Address,
         expires_at: i64,
     },
@@ -1059,7 +1066,7 @@ pub fn find_invite(conn: &Connection, code: &str, now: i64) -> rusqlite::Result<
     let row = conn
         .query_row(
             "SELECT p.handle, p.name, p.active, i.url, i.pin, i.fingerprint, i.expires_at,
-                    i.used_at
+                    i.used_at, EXISTS (SELECT 1 FROM bots WHERE person_id = p.id)
              FROM invites i JOIN people p ON p.id = i.person_id WHERE i.hash = ?1",
             [hash],
             |r| {
@@ -1074,17 +1081,21 @@ pub fn find_invite(conn: &Connection, code: &str, now: i64) -> rusqlite::Result<
                     },
                     r.get::<_, i64>(6)?,
                     r.get::<_, Option<i64>>(7)?,
+                    r.get::<_, bool>(8)?,
                 ))
             },
         )
         .optional()?;
     Ok(match row {
         None | Some((_, _, false, ..)) => Invite::Unknown,
-        Some((handle, .., Some(_))) => Invite::Used(handle),
-        Some((handle, _, _, _, expires_at, None)) if expires_at <= now => Invite::Expired(handle),
-        Some((handle, name, _, address, expires_at, None)) => Invite::Valid {
+        Some((handle, .., Some(_), _)) => Invite::Used(handle),
+        Some((handle, _, _, _, expires_at, None, _)) if expires_at <= now => {
+            Invite::Expired(handle)
+        }
+        Some((handle, name, _, address, expires_at, None, bot)) => Invite::Valid {
             handle,
             name,
+            bot,
             address,
             expires_at,
         },
@@ -1320,12 +1331,16 @@ pub struct PersonInfo {
     pub name: String,
     pub about: String,
     pub active: bool,
+    pub bot: bool,
 }
+
+/// Whether the person `people.id` is marked as a bot, as SQL.
+pub const IS_BOT_SQL: &str = "EXISTS (SELECT 1 FROM bots WHERE person_id = people.id)";
 
 /// Everyone on the server but its own person (`SYSTEM_HANDLE`).
 pub fn list_people(conn: &Connection) -> Result<Vec<PersonInfo>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT handle, name, about, active FROM people
+        "SELECT handle, name, about, active, {IS_BOT_SQL} FROM people
          WHERE id IS NOT {SYSTEM_PERSON_SQL} ORDER BY handle"
     ))?;
     let rows = stmt.query_map([], |r| {
@@ -1334,6 +1349,7 @@ pub fn list_people(conn: &Connection) -> Result<Vec<PersonInfo>> {
             name: r.get(1)?,
             about: r.get(2)?,
             active: r.get(3)?,
+            bot: r.get(4)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1346,6 +1362,18 @@ pub fn set_about(conn: &Connection, handle: &str, about: &str) -> Result<()> {
         "UPDATE people SET about = ?2 WHERE id = ?1",
         params![id, about],
     )?;
+    Ok(())
+}
+
+/// Marks the person as a bot, or not.
+pub fn set_bot(conn: &Connection, handle: &str, bot: bool) -> Result<()> {
+    let id = person_id(conn, handle)?;
+    let sql = if bot {
+        "INSERT OR IGNORE INTO bots (person_id) VALUES (?1)"
+    } else {
+        "DELETE FROM bots WHERE person_id = ?1"
+    };
+    conn.execute(sql, [id])?;
     Ok(())
 }
 

@@ -47,6 +47,7 @@ class Row:
     reply: Optional[str]  # the latest note's first line, when there is one
     subject: str  # its first line, short: names it in an action's answer
     last_note: str  # the latest note the list showed: an action refuses when a newer one came since
+    bot: bool = False  # the opener is a bot: `Reviewer (bot)`
 
 
 @dataclass
@@ -149,8 +150,10 @@ def _kind(t: dict) -> str:
     return str(t.get("kind") or "")
 
 
-def rows(you: str, names: dict, threads: list, now: int) -> list:
-    """The rows of the list: `threads` are the timeline's, oldest first; at most MAX_SHOWN."""
+def rows(you: str, names: dict, threads: list, now: int, bots: Optional[set] = None) -> list:
+    """The rows of the list: `threads` are the timeline's, oldest first; at most MAX_SHOWN. A name in
+    `bots` says `(bot)`, as the people list's `(Reviewer, bot)`; the person stays "You"."""
+    bots = (bots or set()) - {you}
     out = []
     for i, t in enumerate(threads[:MAX_SHOWN]):
         first = t.get("first_note") if isinstance(t.get("first_note"), dict) else None
@@ -164,9 +167,11 @@ def rows(you: str, names: dict, threads: list, now: int) -> list:
             n=i + 1, id=str(t.get("id") or ""), who=_name(names, you, opener), kind=_kind(t),
             age=age(now - (at if at is not None else now)), replies=replies if replies > 1 else 0,
             mentioned=t.get("kind") == "global", first=first_line(text, True, LINE_CHARS),
-            reply_by=None if not last or last.get("author") == opener else _name(names, you, last.get("author") or ""),
+            reply_by=None if not last or last.get("author") == opener
+            else _name(names, you, last.get("author") or "") + (" (bot)" if last.get("author") in bots else ""),
             reply=first_line(last.get("text") or "", False, LINE_CHARS) if last else None,
-            subject=first_line(text, True, SUBJECT_CHARS), last_note=str(latest.get("id") or "")))
+            subject=first_line(text, True, SUBJECT_CHARS), last_note=str(latest.get("id") or ""),
+            bot=opener in bots))
     return out
 
 
@@ -360,7 +365,8 @@ def render(shown: dict, style: Plain) -> str:
                 else style.italic(style.esc(" · ".join(meta(r)))) if isinstance(style, Markdown)
                 else " · ".join(meta(r)))
         out.append("")
-        out.append(f"{style.number(style.num_col(r.n))}  {style.bold(style.esc(r.who))}{dot}{head}")
+        tag = " " + style.italic("(bot)") if r.bot else ""
+        out.append(f"{style.number(style.num_col(r.n))}  {style.bold(style.esc(r.who))}{tag}{dot}{head}")
         out.append(style.indent + _mentions(style, r.first))
         if r.reply is not None:
             by = f"{r.reply_by}: " if r.reply_by else ""
@@ -557,7 +563,7 @@ def _all_waiting(api: client.Api, since: int) -> tuple:
     """Every thread waiting on the person, oldest first, and how many they handled since `since` (unix
     seconds): the first page asks that count too (`handled_since`); a server before 0.6.0 refuses it,
     and the page is asked again without it, with no count (None)."""
-    threads, names, before, handled_since, handled = [], {}, None, since, None
+    threads, names, bots, before, handled_since, handled = [], {}, set(), None, since, None
     pages = 0
     while pages < MAX_PAGES:
         params = {"tab": "threads", "show": "waiting", "limit": "50"}
@@ -577,11 +583,13 @@ def _all_waiting(api: client.Api, since: int) -> tuple:
             h = (v.get("counts") or {}).get("handled")
             handled = h if isinstance(h, int) and not isinstance(h, bool) else None
         names.update(v.get("names") or {})
+        got_bots = v.get("bots")  # servers from 0.8.0
+        bots.update(b for b in (got_bots if isinstance(got_bots, list) else []) if isinstance(b, str))
         got = v.get("threads") if isinstance(v.get("threads"), list) else []
         threads += got
         if not got or not isinstance(v.get("cursor"), str):
             counts = v.get("counts") or {}
-            return str(v.get("you") or ""), names, threads[::-1], int(counts.get("waiting") or 0), handled
+            return str(v.get("you") or ""), names, bots, threads[::-1], int(counts.get("waiting") or 0), handled
         before = v["cursor"]
     raise RuntimeError(f"more than {MAX_PAGES} pages of waiting threads")
 
@@ -610,7 +618,7 @@ def waiting_list(keys: list, settings: Optional[client.Settings] = None) -> dict
     api = client.Api(settings)
     now = int(time.time())
     try:
-        you, names, threads, total, handled = _all_waiting(api, start_of_day(now))
+        you, names, bots, threads, total, handled = _all_waiting(api, start_of_day(now))
         reached()
     except Exception as exc:
         reached(exc)
@@ -620,7 +628,7 @@ def waiting_list(keys: list, settings: Optional[client.Settings] = None) -> dict
             return {"state": "error", "message": "This Relevo server has no timeline, which /relevo reads: it is "
                                                  "older than 0.4.0. Ask its owner to update it."}
         return {"state": "error", "message": failure(api, exc)}
-    shown = rows(you, names, threads, now)
+    shown = rows(you, names, threads, now, bots)
     keep(keys, Listed(you=you, names=names, rows=shown))
     total = max(total, len(threads))
     if shown:

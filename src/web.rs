@@ -560,6 +560,8 @@ mod tests {
             ("--need", "--bg"),
             ("--need", "--soft"),
             ("--mention", "--bg"),
+            ("--bot", "--bg"),
+            ("--bot", "--soft"),
             ("--pill-text", "--pill"),
         ] {
             let (fg, bg) = (colours(text), colours(background));
@@ -678,8 +680,10 @@ mod tests {
         assert!(rule("\n.who span {").contains("flex: 0 10 auto"));
         assert!(rule("\n.who b {").contains("flex: 0 1 auto"));
         assert!(rule(".who time {").contains("flex-shrink: 0"));
+        // Nor does a bot's `bot`.
+        assert!(rule(".who .bot {").contains("flex: none"));
         // Every note's header is made by one function, with the whole name and label on hover.
-        assert_eq!(SCRIPT.matches("el('div', 'who')").count(), 1);
+        assert_eq!(SCRIPT.matches("'who'").count(), 1);
         assert!(SCRIPT.contains("via.title = via.textContent"));
     }
 

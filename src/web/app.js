@@ -226,6 +226,29 @@ function renderNote(text, doc) {
   return div;
 }
 
+/// A note's header: the author's name (or You), `bot` for a person marked as one, `via <label>`
+/// and the time (`time`, an element), on one line. A long name or label is cut with an ellipsis
+/// (the label first), the whole of it on hover; `bot` and the time keep their place.
+function noteHeader(doc, name, bot, label, time) {
+  const el = (tag, cls, text) => {
+    const e = doc.createElement(tag);
+    if (cls) e.className = cls;
+    e.textContent = text;
+    return e;
+  };
+  const who = doc.createElement('div');
+  who.className = 'who';
+  const b = el('b', '', name);
+  b.title = name;
+  who.appendChild(b);
+  if (bot) who.appendChild(el('span', 'bot', 'bot'));
+  const via = el('span', '', 'via ' + label);
+  via.title = via.textContent;
+  who.appendChild(via);
+  who.appendChild(time);
+  return who;
+}
+
 /// The first line that is not blank, as the server makes the title of it (docs/protocol.md:
 /// trimmed, without leading `#`).
 function titleLine(text) {
@@ -419,6 +442,7 @@ if (typeof module === 'object' && module.exports) {
     parseInline,
     toDom,
     renderNote,
+    noteHeader,
     preview,
     rowText,
     leadingMentions,
@@ -477,6 +501,8 @@ if (typeof document !== 'undefined') {
     threads: [],
     cursor: null,
     names: {},
+    // The handles of the people marked as bots, of every answer (the timeline's `bots`).
+    bots: new Set(),
     // Conversations open, loaded, being loaded and failed; the one the person just opened.
     open: new Set(),
     convos: new Map(),
@@ -540,6 +566,12 @@ if (typeof document !== 'undefined') {
   }
 
   const you = () => (state.data ? state.data.you : '');
+  // Takes an answer's `bots` as the truth for every person it names, so a mark taken off goes
+  // away on the next refresh. A server before 0.8.0 sends no `bots`.
+  const knowBots = (v) => {
+    Object.keys(v.names || {}).forEach((h) => state.bots.delete(h));
+    (v.bots || []).forEach((h) => state.bots.add(h));
+  };
   // One name for the person, everywhere: the row, the answer and the notes of a conversation all
   // say `You`. Who wrote it is the `via …` beside it.
   const nameOf = (handle) => (handle === you() ? 'You' : state.names[handle] || handle);
@@ -669,6 +701,8 @@ if (typeof document !== 'undefined') {
       if (state.loading) state.open.clear();
       state.data = got.first;
       state.names = Object.assign({}, state.names, needs ? needs.first.names : {}, got.first.names);
+      if (needs) knowBots(needs.first);
+      knowBots(got.first);
       state.needs = needs ? needs.threads : [];
       state.threads = got.threads;
       state.cursor = got.cursor;
@@ -707,6 +741,7 @@ if (typeof document !== 'undefined') {
       state.threads = state.threads.concat(added);
       state.cursor = v.cursor;
       state.names = Object.assign({}, state.names, v.names);
+      knowBots(v);
       fine();
       render();
     } catch (err) {
@@ -728,6 +763,7 @@ if (typeof document !== 'undefined') {
     try {
       const t = await api('/api/timeline/threads/' + encodeURIComponent(id));
       state.names = Object.assign({}, state.names, t.names);
+      knowBots(t);
       t.loaded = Date.now();
       state.convos.set(id, t);
       state.convoFailed.delete(id);
@@ -794,17 +830,9 @@ if (typeof document !== 'undefined') {
     return msg;
   }
 
-  /// A note's header: the author's name (or You), `via <label>` and the time, on one line. A long
-  /// name or label is cut with an ellipsis (the label first), the whole of it on hover; the time
-  /// keeps its place.
+  /// A note's header (`noteHeader`), by its author's handle.
   function header(author, label, iso, format) {
-    const who = el('div', 'who');
-    const name = el('b', '', nameOf(author));
-    name.title = name.textContent;
-    const via = el('span', '', 'via ' + label);
-    via.title = via.textContent;
-    who.append(name, via, timeEl(iso, format));
-    return who;
+    return noteHeader(document, nameOf(author), author !== you() && state.bots.has(author), label, timeEl(iso, format));
   }
 
   /// A closed-up row's latest reply: avatar, name, time and two lines; the thread line runs on
@@ -911,7 +939,13 @@ if (typeof document !== 'undefined') {
     const base = 'row-' + t.id;
     who.firstChild.id = base + '-from';
     textEl.id = base + '-text';
-    const names = [who.firstChild.id, textEl.id];
+    const names = [who.firstChild.id];
+    const botTag = who.querySelector('.bot');
+    if (botTag) {
+      botTag.id = base + '-bot';
+      names.push(botTag.id);
+    }
+    names.push(textEl.id);
     if (t.pending) {
       const sr = el('span', 'sr', ' Waiting on you' + (t.kind === 'global' ? ', mentioned you' : '') + '.');
       sr.id = base + '-status';
@@ -993,7 +1027,7 @@ if (typeof document !== 'undefined') {
     const open = state.open.has(t.id);
     const full = open && state.convos.get(t.id);
     const convoState = !open ? '' : full ? full.loaded : state.convoFailed.has(t.id) && !state.convoLoading.has(t.id) ? 'failed' : 'loading';
-    return JSON.stringify([t, convoState, you(), handles.map((h) => state.names[h])]);
+    return JSON.stringify([t, convoState, you(), handles.map((h) => [state.names[h], state.bots.has(h)])]);
   }
 
   /// Puts `nodes` in `parent`, in order, moving only what must move (a node moved loses focus and

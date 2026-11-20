@@ -279,6 +279,19 @@ class Base(unittest.IsolatedAsyncioTestCase):
 
 
 class Inbound(Base):
+    async def test_a_bots_note_says_so_in_its_sender(self):
+        SERVER.admin("bot", "ana", "on")
+        try:
+            a = self.make_adapter()
+            self.assertTrue(await a.connect())
+            await asyncio.sleep(0.3)  # the waiting request is open
+            self.ana.send(to=["oscar"], text="# Review\nTwo nits on the refunds PR.")
+            await self.until(lambda: len(self.events) == 1)
+            self.assertEqual(self.events[0].user_name, "Ana (@ana, bot)")
+            self.assertEqual(self.events[0].source.user_name, "Ana (@ana, bot)")
+        finally:
+            SERVER.admin("bot", "ana", "off")
+
     async def test_a_note_reaches_handle_message_once(self):
         a = self.make_adapter()
         self.assertTrue(await a.connect())
@@ -1359,6 +1372,10 @@ class Tools(Base):
         self.assertNotIn("Teams", client.render_inbox({"team": [], "session": {}, "threads": []}, "oscar"))
         nobody = client.render_teams([{"name": "ops", "title": "", "members": []}])
         self.assertEqual(nobody, "Teams (mention one with @name: it reaches its members):\n- @ops: nobody active")
+        # A person marked as a bot says so, as relevo mcp and pi say it.
+        bot = client.render_team([{"handle": "reviewer", "name": "Reviewer", "about": "reviews diffs and PRs",
+                                   "contexts": [], "teams": [], "bot": True}], "oscar")
+        self.assertEqual(bot, "People (mention one with @handle):\n- @reviewer (Reviewer, bot): reviews diffs and PRs")
 
     def test_the_inbox_says_who_else_holds_each_thread(self):
         """`held_by`: one line per teammate who holds it, as a state, as relevo mcp's inbox says it."""
@@ -3477,6 +3494,31 @@ class Command(Base):
                                     waiting_module.style_for("slack"))
         self.assertNotIn("\\", out)
         self.assertIn("\n    *all* of `it` _now_\n    └ **done**\n", out)
+
+    def test_a_bot_says_so_in_the_list(self):
+        names = {"ana": "Ana", "reviewer": "Reviewer"}
+        at = "2026-11-08T10:59:00Z"
+        threads = [{"id": "r_1", "kind": "direct", "from": "reviewer", "notes": 1, "teams": [],
+                    "first_note": {"id": "n_1", "author": "reviewer", "created_at": at, "text": "@oscar Two nits."},
+                    "last_note": None},
+                   {"id": "r_2", "kind": "direct", "from": "ana", "notes": 2, "teams": [],
+                    "first_note": {"id": "n_2", "author": "ana", "created_at": at, "text": "@oscar CSV ready?"},
+                    "last_note": {"id": "n_3", "author": "reviewer", "created_at": at, "text": "Approve once fixed."}}]
+        now = waiting_module.unix("2026-11-08T11:00:00Z")
+        rs = waiting_module.rows("oscar", names, threads, now, {"reviewer", "oscar"})
+        self.assertEqual([(r.who, r.bot, r.reply_by) for r in rs],
+                         [("Reviewer", True, None), ("Ana", False, "Reviewer (bot)")])
+        shown = {"state": "list", "rows": rs, "total": 2, "handled": None}
+        md = waiting_module.render(shown, waiting_module.Markdown())
+        self.assertIn("**1**  **Reviewer** *(bot)* · *direct · 1m*", md)
+        self.assertIn("*└ Reviewer (bot): Approve once fixed.*", md)
+        ansi = waiting_module.render(shown, waiting_module.Ansi())
+        self.assertIn("\x1b[1mReviewer\x1b[0m \x1b[38;5;245m(bot)\x1b[0m", ansi)
+        # The person is "You", never "You (bot)"; without `bots` (a server before 0.8.0) nothing changes.
+        mine = [dict(threads[0], first_note=dict(threads[0]["first_note"], author="oscar"), **{"from": "oscar"})]
+        self.assertFalse(waiting_module.rows("oscar", names, mine, now, {"oscar"})[0].bot)
+        self.assertNotIn("(bot)", waiting_module.render({**shown, "rows": waiting_module.rows("oscar", names, threads, now)},
+                                                        waiting_module.Markdown()))
 
     def test_teammates_text_loses_format_characters_and_separators(self):
         first_line = waiting_module.first_line

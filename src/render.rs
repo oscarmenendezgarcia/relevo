@@ -66,8 +66,8 @@ fn handles(v: &Value) -> String {
         .unwrap_or_default()
 }
 
-/// The people on the server (the protocol's `team` list): handle, name, about, the teams they
-/// are in, and where their agents work now.
+/// The people on the server (the protocol's `team` list): handle, name (and `bot`, for one
+/// marked as a bot), about, the teams they are in, and where their agents work now.
 pub fn team(team: &Value, me: Option<&str>) -> String {
     let mut out = String::from(
         "People (mention one with @handle; their agents' live contexts in brackets):\n",
@@ -75,7 +75,8 @@ pub fn team(team: &Value, me: Option<&str>) -> String {
     for m in team.as_array().into_iter().flatten() {
         let handle = s(&m["handle"]);
         let you = if Some(handle) == me { ", you" } else { "" };
-        let _ = write!(out, "- @{handle} ({}{you})", s(&m["name"]));
+        let bot = if m["bot"] == true { ", bot" } else { "" };
+        let _ = write!(out, "- @{handle} ({}{bot}{you})", s(&m["name"]));
         if !s(&m["about"]).is_empty() {
             let _ = write!(out, ": {}", s(&m["about"]));
         }
@@ -1245,7 +1246,8 @@ mod tests {
         let v = json!({
             "team": [
                 { "handle": "ana", "name": "Ana", "about": "payments backend", "contexts": [], "teams": ["backend", "ops"] },
-                { "handle": "oscar", "name": "Oscar", "about": "", "contexts": ["web"], "teams": ["backend"] }
+                { "handle": "oscar", "name": "Oscar", "about": "", "contexts": ["web"], "teams": ["backend"] },
+                { "handle": "reviewer", "name": "Reviewer", "about": "reviews diffs and PRs", "contexts": [], "teams": [], "bot": true }
             ],
             "teams": [
                 { "name": "backend", "title": "Backend", "members": ["ana", "oscar"] },
@@ -1265,6 +1267,7 @@ mod tests {
         for line in [
             "- @ana (Ana): payments backend; in @backend, @ops\n",
             "- @oscar (Oscar, you); in @backend [web]\n",
+            "- @reviewer (Reviewer, bot): reviews diffs and PRs\n",
             "- @backend (Backend): @ana, @oscar (you)\n",
             "- @empty: nobody active\n",
             "- @ops (Operations): @ana\n",

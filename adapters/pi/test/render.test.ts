@@ -407,6 +407,7 @@ test("the inbox lists the people with their teams, then the teams with their mem
     team: [
       { handle: "ana", name: "Ana", about: "payments backend", contexts: [], teams: ["backend", "ops"] },
       { handle: "oscar", name: "Oscar", about: "", contexts: ["web"], teams: ["backend"] },
+      { handle: "reviewer", name: "Reviewer", about: "reviews diffs and PRs", contexts: [], teams: [], bot: true },
     ],
     teams: [
       { name: "backend", title: "Backend", members: ["ana", "oscar"] },
@@ -419,7 +420,8 @@ test("the inbox lists the people with their teams, then the teams with their mem
   });
   assert.ok(
     out.includes(
-      "People (mention one with @handle):\n- @ana (Ana): payments backend; in @backend, @ops\n- @oscar (Oscar, you); in @backend (live in web)\n\n" +
+      "People (mention one with @handle):\n- @ana (Ana): payments backend; in @backend, @ops\n- @oscar (Oscar, you); in @backend (live in web)\n" +
+        "- @reviewer (Reviewer, bot): reviews diffs and PRs\n\n" +
         "Teams (mention one with @name: it reaches its members):\n- @backend (Backend): @ana, @oscar (you)\n- @empty: nobody active\n- @ops (Operations): @ana\n\n",
     ),
     out,

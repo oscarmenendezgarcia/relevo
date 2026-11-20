@@ -4,7 +4,7 @@
 'use strict';
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { parseNote, parseInline, toDom, preview, rowText, leadingMentions, pickKey, askShown, focusAfter, togglesRow, rowKeydown, addedThreads, convoUpdates, short, noteTime, ago, absolute } = require(
+const { parseNote, parseInline, toDom, noteHeader, preview, rowText, leadingMentions, pickKey, askShown, focusAfter, togglesRow, rowKeydown, addedThreads, convoUpdates, short, noteTime, ago, absolute } = require(
   path.join(__dirname, '..', '..', 'src', 'web', 'app.js')
 );
 
@@ -385,6 +385,19 @@ check("the row's keydown handler: a retry's Enter reaches the retry, not the row
   assert.equal(toggled, 2);
   assert.equal(press('a', row).prevented, false);
   assert.equal(toggled, 2);
+});
+
+check('a note by a bot says bot after the name, as text a screen reader reads', () => {
+  const doc = fakeDocument();
+  const time = doc.createElement('time');
+  time.textContent = '3m';
+  const bot = noteHeader(doc, 'Reviewer', true, 'Hermes', time);
+  assert.equal(show(bot), '<div.who><b>Reviewer</b><span.bot>bot</span><span>via Hermes</span><time>3m</time></div>');
+  assert.equal(bot.children[0].title, 'Reviewer');
+  assert.equal(bot.children[2].title, 'via Hermes');
+  // Anyone else: the header as before, with no tag.
+  const other = noteHeader(fakeDocument(), 'Ana <b>', false, 'Claude Code', time);
+  assert.equal(show(other), '<div.who><b>Ana &lt;b></b><span>via Claude Code</span><time>3m</time></div>');
 });
 
 Promise.all(pending).then(

@@ -385,6 +385,19 @@ async fn the_page_shows_the_invitation_without_using_it() {
 }
 
 #[tokio::test]
+async fn the_page_says_a_bot_joins_as_one() {
+    let f = fixture();
+    let code = f.invite("reviewer");
+    db::set_bot(&f.app.db(), "reviewer", true).unwrap();
+    let (status, _, page) = f.page(&code, "Mozilla/5.0 (X11; Linux x86_64)").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        page.contains("You'll join as <b>@reviewer</b> (a bot). "),
+        "{page}"
+    );
+}
+
+#[tokio::test]
 async fn names_are_text_on_the_page() {
     let f = fixture();
     let code = db::invite_link(

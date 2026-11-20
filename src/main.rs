@@ -93,6 +93,10 @@ enum Command {
         /// The server's address for the link [default: the one `relevo serve` recorded].
         #[arg(long, value_name = "URL", conflicts_with = "token")]
         url: Option<String>,
+        /// Mark them as a bot: an agent that runs on its own, with a token of its own (without
+        /// it, an existing person keeps the mark they have).
+        #[arg(long)]
+        bot: bool,
     },
     /// Manage agent tokens.
     Token {
@@ -113,6 +117,12 @@ enum Command {
     },
     /// Set the one line on what a person (or their agent) knows or looks after.
     About { handle: String, about: String },
+    /// Mark a person as a bot (on) or not (off).
+    Bot {
+        handle: String,
+        #[arg(value_parser = ["on", "off"])]
+        mark: String,
+    },
     /// Stop a person from using Relevo (every token of theirs is revoked).
     Deactivate { handle: String },
     /// Manage teams: named groups of people, whom a note reaches with @<name>.
@@ -853,6 +863,7 @@ async fn main() -> Result<()> {
             token,
             label,
             url,
+            bot,
         } => {
             let name = match name {
                 Some(name) => name,
@@ -861,6 +872,9 @@ async fn main() -> Result<()> {
             if token {
                 let label = label.as_deref().unwrap_or("agent");
                 let token = db::invite(&conn, &handle, &name, about.as_deref(), label, now)?;
+                if bot {
+                    db::set_bot(&conn, &handle, true)?;
+                }
                 print_token(&handle, label, &token);
             } else {
                 let url = match url {
@@ -875,6 +889,9 @@ async fn main() -> Result<()> {
                 let address = link_address(&db_file, &db::public(&conn)?, url)?;
                 let invitation =
                     db::invite_link(&conn, &handle, &name, about.as_deref(), &address, now)?;
+                if bot {
+                    db::set_bot(&conn, &handle, true)?;
+                }
                 println!(
                     "Invited @{handle} ({name}). Send them this link — it works once, for 24 \
                      hours:\n\n  {}/join/{}\n\nThey can open it, or just give it to their \
@@ -911,7 +928,8 @@ async fn main() -> Result<()> {
         Command::People => {
             for p in db::list_people(&conn)? {
                 let state = if p.active { "active" } else { "inactive" };
-                println!("{}\t{}\t{state}\t{}", p.handle, p.name, p.about);
+                let bot = if p.bot { ", bot" } else { "" };
+                println!("{}\t{}\t{state}{bot}\t{}", p.handle, p.name, p.about);
             }
         }
         Command::Sessions { handle } => {
@@ -943,6 +961,11 @@ async fn main() -> Result<()> {
         Command::About { handle, about } => {
             db::set_about(&conn, &handle, &about)?;
             println!("{handle}: {about}");
+        }
+        Command::Bot { handle, mark } => {
+            let bot = mark == "on";
+            db::set_bot(&conn, &handle, bot)?;
+            println!("{handle}: {}", if bot { "bot" } else { "not a bot" });
         }
         Command::Deactivate { handle } => {
             let revoked = db::deactivate(&conn, &handle, now)?;

@@ -653,6 +653,25 @@ async fn one_thread_in_full_only_for_its_participants() {
 }
 
 #[tokio::test]
+async fn the_bots_among_the_names_are_listed() {
+    let s = server(&["ana", "bob", "dan", "reviewer"], &[]);
+    db::set_bot(&s.app.db(), "reviewer", true).unwrap();
+    let id = s.open("ana", "@reviewer @bob look at this diff").await;
+    s.reply("reviewer", &id, "Two nits").await;
+    let v = s.timeline("ana", "tab=threads").await;
+    assert_eq!(v["bots"], json!(["reviewer"]));
+    assert_eq!(v["names"]["reviewer"], "REVIEWER");
+    let (_, t) = s.get("ana", &format!("/api/timeline/threads/{id}")).await;
+    assert_eq!(t["bots"], json!(["reviewer"]));
+    // No bot among the names: an empty list.
+    let v = s.timeline("dan", "tab=threads").await;
+    assert_eq!(v["bots"], json!([]));
+    let mine = s.open("bob", "@dan hi").await;
+    let (_, t) = s.get("dan", &format!("/api/timeline/threads/{mine}")).await;
+    assert_eq!(t["bots"], json!([]));
+}
+
+#[tokio::test]
 async fn first_and_last_notes_are_cut_to_1000_characters() {
     let s = server(&["ana", "bob"], &[]);
     let long = format!("@bob {}", "é".repeat(1500));
