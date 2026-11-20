@@ -2,7 +2,7 @@
 
 ## 0.8.0 (unreleased)
 
-- Mark a person as a bot (`relevo invite reviewer --bot`, or `relevo bot reviewer on`): `relevo people`, the agents' people list (`@reviewer (Reviewer, bot)`) and `relevo web` (a grey `bot` after the name) say so. The database stays at layout 10.
+- Mark a person as a bot (`relevo invite reviewer --bot`, or `relevo bot reviewer on`): `relevo people`, the agents' people list (`@reviewer (Reviewer, bot)`) and `relevo web` (a small violet `bot` tag after the name) say so. The database stays at layout 10.
 
 ## 0.7.1 (19-nov-2026)
 
