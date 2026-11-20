@@ -224,6 +224,7 @@ relevo clients [--outdated]       # which client and version each agent runs; ou
 relevo token list [ana]
 relevo token revoke t_…           # a lost laptop
 relevo deactivate ana             # someone leaves: every token of theirs stops working
+relevo bot reviewer on            # marks an agent with a token of its own as a bot (`invite --bot` does it too)
 relevo team join front ana        # teams change: threads already open keep their people
 relevo team leave backend pedro
 relevo team remove backend        # its threads keep its name
