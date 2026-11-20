@@ -680,3 +680,32 @@ test("a number refused for a newer note leaves its thread waiting its turn: it i
     await ext.emit("session_shutdown", {}, ext.ctx(home, "interactive"));
   }
 });
+
+test("the list: a bot says so after its name, never the person", () => {
+  const now = Date.parse("2026-11-08T15:00:00Z") / 1000;
+  const at = (s: number) => new Date((now - s) * 1000).toISOString();
+  const threads: TimelineThread[] = [
+    { id: "r_1", kind: "direct", title: "", from: "reviewer", notes: 1, last_note: null,
+      first_note: { id: "n_1", author: "reviewer", created_at: at(60), text: "@oscar Two nits on PR #45." } },
+    { id: "r_2", kind: "direct", title: "", from: "ana", notes: 2,
+      first_note: { id: "n_2", author: "ana", created_at: at(120), text: "@oscar @reviewer Is the CSV ready?" },
+      last_note: { id: "n_3", author: "reviewer", created_at: at(60), text: "Approve once fixed." } },
+    { id: "r_3", kind: "direct", title: "", from: "oscar", notes: 1, last_note: null,
+      first_note: { id: "n_4", author: "oscar", created_at: at(60), text: "@ana Ship it?" } },
+    { id: "r_4", kind: "direct", title: "", from: "ana", notes: 2,
+      first_note: { id: "n_5", author: "ana", created_at: at(120), text: "@oscar Demo?" },
+      last_note: { id: "n_6", author: "oscar", created_at: at(60), text: "Friday." } },
+  ];
+  const rs = rows("oscar", { ana: "Ana", reviewer: "Reviewer" }, threads, now, ["reviewer", "oscar"]);
+  const text = plain({ state: "list", rows: rs, total: 4 });
+  assert.ok(text.includes(" 1  Reviewer (bot) · direct · 1m\n"), text);
+  assert.ok(text.includes("    └ Reviewer (bot): Approve once fixed.\n"), text);
+  assert.ok(text.includes(" 3  You · direct · 1m\n"), text);
+  assert.ok(text.includes("    └ You: Friday.\n"), text);
+  // Fenced for the model, the tag stays outside the teammate's text.
+  assert.ok(plain({ state: "list", rows: rs, total: 2 }, true).includes("</untrusted> (bot) · direct"));
+  const drawn = draw({ state: "list", rows: rs, total: 2 }, tagTheme);
+  assert.ok(drawn.includes("<b>Reviewer</b> <muted>(bot)</muted><dim> · </dim>"), drawn);
+  // Without `bots` (a server before 0.8.0), nothing changes.
+  assert.ok(!plain({ state: "list", rows: rows("oscar", { reviewer: "Reviewer" }, threads, now), total: 2 }).includes("(bot)"));
+});

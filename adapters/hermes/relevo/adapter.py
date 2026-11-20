@@ -565,7 +565,8 @@ class RelevoAdapter(BasePlatformAdapter):
         latest = others[-1]
         author = str(latest.get("author") or "")
         person = team.get(author) or {}
-        name = f"{person.get('name')} (@{author})" if person.get("name") else f"@{author}"
+        bot = ", bot" if person.get("bot") is True else ""  # servers from 0.8.0
+        name = f"{person.get('name')} (@{author}{bot})" if person.get("name") else f"@{author}{' (bot)' if bot else ''}"
         source = self.build_source(chat_id=thread_id, chat_name=self._titles[thread_id], chat_type="dm",
                                    user_id=author, user_name=name)
         resumed = self._first_batch and self._resumable(source)

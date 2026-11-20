@@ -35,6 +35,8 @@ export interface TimelineThread {
 export interface Timeline {
   you: string;
   names?: Record<string, string>;
+  /** Who of them are bots (servers from 0.8.0). */
+  bots?: string[];
   counts: { waiting?: number; handled?: number };
   threads: TimelineThread[];
   cursor?: string | null;
@@ -49,6 +51,8 @@ export interface Row {
   /** Their handle, and whether it is the person's own thread (its text is not fenced for the model). */
   opener?: string;
   own?: boolean;
+  /** The opener is a bot: `Reviewer (bot)`. */
+  bot?: boolean;
   /** `direct`, `team @backend`, `board`. */
   kind: string;
   /** How long since its latest note: `now`, `5m`, `2h`, `3d`. */
@@ -60,7 +64,7 @@ export interface Row {
   /** The first line of its first note, without the `@` names it starts with. */
   first: string;
   /** Its latest note, with its author's name when not the opener's (and their handle). */
-  reply: { by: string | null; text: string; author?: string; own?: boolean } | null;
+  reply: { by: string | null; text: string; author?: string; own?: boolean; bot?: boolean } | null;
   /** Its first line, short: names it in an action's answer. */
   subject: string;
   /** The latest note the list showed: an action refuses when a newer one came since. */
@@ -183,7 +187,8 @@ function kindOf(t: TimelineThread): string {
  * The rows of the list: `threads` are the timeline's, oldest first; at most MAX_SHOWN of them.
  * `now` in unix seconds.
  */
-export function rows(you: string, names: Record<string, string>, threads: TimelineThread[], now: number): Row[] {
+export function rows(you: string, names: Record<string, string>, threads: TimelineThread[], now: number, bots: string[] = []): Row[] {
+  const isBot = (handle: string) => handle !== you && bots.includes(handle);
   return threads.slice(0, MAX_SHOWN).map((t, i) => {
     const first = t.first_note ?? null;
     const last = t.last_note ?? null;
@@ -198,6 +203,7 @@ export function rows(you: string, names: Record<string, string>, threads: Timeli
       who: nameOf(names, you, opener),
       opener,
       own: opener === you,
+      bot: isBot(opener),
       kind: kindOf(t),
       age: age(now - at),
       replies: replies > 1 ? replies : 0,
@@ -209,6 +215,7 @@ export function rows(you: string, names: Record<string, string>, threads: Timeli
             text: firstLine(last.text, false, LINE_CHARS),
             author: last.author,
             own: last.author === you,
+            bot: last.author !== opener && isBot(last.author),
           }
         : null,
       subject: firstLine(text, true, SUBJECT_CHARS),
@@ -250,9 +257,9 @@ export function plain(shown: Shown, fence = false): string {
       const by = (handle: string | undefined, own: boolean | undefined, text: string) =>
         fence && !own ? untrusted(handle || "unknown", text, true) : text;
       for (const r of shown.rows) {
-        out.push(`${String(r.n).padStart(2)}  ${by(r.opener, r.own, r.who)} · ${meta(r)}`, `    ${by(r.opener, r.own, r.first)}`);
+        out.push(`${String(r.n).padStart(2)}  ${by(r.opener, r.own, r.who)}${r.bot ? " (bot)" : ""} · ${meta(r)}`, `    ${by(r.opener, r.own, r.first)}`);
         if (r.reply) {
-          const name = r.reply.by ? `${by(r.reply.author, r.reply.own, r.reply.by)}: ` : "";
+          const name = r.reply.by ? `${by(r.reply.author, r.reply.own, r.reply.by)}${r.reply.bot ? " (bot)" : ""}: ` : "";
           out.push(`    └ ${name}${by(r.reply.author ?? r.opener, r.reply.own ?? r.own, r.reply.text)}`);
         }
       }
@@ -323,10 +330,10 @@ export function draw(shown: Shown, theme: Theme): string {
           .split(" · ")
           .map((part) => theme.fg("muted", part))
           .join(dot);
-        out += `\n${r.n < 10 ? " " : ""}${theme.fg("warning", theme.bold(String(r.n)))}  ${theme.bold(r.who)}${dot}${head}\n`;
+        out += `\n${r.n < 10 ? " " : ""}${theme.fg("warning", theme.bold(String(r.n)))}  ${theme.bold(r.who)}${r.bot ? ` ${theme.fg("muted", "(bot)")}` : ""}${dot}${head}\n`;
         out += `    ${mentions(theme, r.first)}\n`;
         if (r.reply) {
-          const text = `${r.reply.by ? `${r.reply.by}: ` : ""}${r.reply.text}`;
+          const text = `${r.reply.by ? `${r.reply.by}${r.reply.bot ? " (bot)" : ""}: ` : ""}${r.reply.text}`;
           out += `    ${theme.fg("dim", "└ ")}${mentions(theme, text, "muted")}\n`;
         }
       }
