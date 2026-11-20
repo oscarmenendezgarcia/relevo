@@ -72,6 +72,9 @@ struct Member {
     contexts: Vec<String>,
     /// The teams they are in, by name.
     teams: Vec<String>,
+    /// Marked as a bot (`relevo invite --bot`): left out otherwise.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    bot: bool,
 }
 
 /// A team, with its active members.
@@ -503,8 +506,10 @@ fn team(conn: &Connection, now: i64) -> Result<Vec<Member>, ApiError> {
         contexts.entry(person).or_default().push(context);
     }
     let mut teams = teams_of(conn)?;
-    let mut stmt = conn
-        .prepare("SELECT id, handle, name, about FROM people WHERE active = 1 ORDER BY handle")?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, handle, name, about, {} FROM people WHERE active = 1 ORDER BY handle",
+        crate::db::IS_BOT_SQL
+    ))?;
     let rows = stmt.query_map([], |r| {
         let id: i64 = r.get(0)?;
         Ok(Member {
@@ -513,6 +518,7 @@ fn team(conn: &Connection, now: i64) -> Result<Vec<Member>, ApiError> {
             handle: r.get(1)?,
             name: r.get(2)?,
             about: r.get(3)?,
+            bot: r.get(4)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)

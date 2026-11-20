@@ -187,6 +187,9 @@ pub struct ThreadOut {
     /// In one thread: the name of everyone it names.
     #[serde(skip_serializing_if = "Option::is_none")]
     names: Option<BTreeMap<String, String>>,
+    /// In one thread: who of them is marked as a bot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bots: Option<Vec<String>>,
 }
 
 /// One thread of the person, as the queries read it.
@@ -448,23 +451,33 @@ fn thread_out(r: Row) -> ThreadOut {
         handled_by_you: r.handled,
         cursor: r.last_seq.to_string(),
         names: None,
+        bots: None,
     }
 }
 
-/// The name of each of these people.
+/// The name of each of these people, and those of them marked as bots, sorted.
 fn names(
     conn: &Connection,
     handles: BTreeSet<String>,
-) -> Result<BTreeMap<String, String>, ApiError> {
+) -> Result<(BTreeMap<String, String>, Vec<String>), ApiError> {
     let handles: Vec<SqlValue> = texts(&handles);
-    Ok(rows_in(
+    let rows: Vec<(String, String, bool)> = rows_in(
         conn,
-        "SELECT handle, name FROM people WHERE handle IN (…)",
+        &format!(
+            "SELECT handle, name, {} FROM people WHERE handle IN (…)",
+            crate::db::IS_BOT_SQL
+        ),
         &handles,
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?
-    .into_iter()
-    .collect())
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    let mut bots: Vec<String> = rows
+        .iter()
+        .filter(|(_, _, bot)| *bot)
+        .map(|(handle, _, _)| handle.clone())
+        .collect();
+    bots.sort();
+    let names = rows.into_iter().map(|(h, n, _)| (h, n)).collect();
+    Ok((names, bots))
 }
 
 /// Every handle a thread names: its opener, its participants and the authors of its notes.
@@ -567,7 +580,7 @@ pub async fn list(
     for t in &threads {
         handles_of(t, &mut named);
     }
-    let names = names(&conn, named)?;
+    let (names, bots) = names(&conn, named)?;
     tracing::info!(
         person = %reader.handle,
         tab = ?params.tab,
@@ -580,6 +593,7 @@ pub async fn list(
         "counts": counts,
         "people": people,
         "names": names,
+        "bots": bots,
         "threads": threads,
         "cursor": cursor.flatten(),
     })))
@@ -614,7 +628,9 @@ pub async fn thread(
     out.last_other_note = None;
     let mut named = BTreeSet::from([reader.handle.clone()]);
     handles_of(&out, &mut named);
-    out.names = Some(names(&conn, named)?);
+    let (names, bots) = names(&conn, named)?;
+    out.names = Some(names);
+    out.bots = Some(bots);
     tracing::info!(person = %reader.handle, thread = %out.id, "timeline thread");
     Ok(Json(out))
 }

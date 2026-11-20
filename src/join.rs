@@ -473,13 +473,14 @@ async fn page(
     headers: HeaderMap,
 ) -> Response {
     let found = check(&app, &peer, &code);
-    let (handle, address, expires_at) = match found {
+    let (handle, bot, address, expires_at) = match found {
         Ok(Invite::Valid {
             handle,
+            bot,
             address,
             expires_at,
             ..
-        }) => (handle, address, expires_at),
+        }) => (handle, bot, address, expires_at),
         Ok(_) => unreachable!("check answers only a valid invitation"),
         Err(refusal) => {
             let main = format!(
@@ -490,6 +491,7 @@ async fn page(
             return html(refusal.status(), refusal.title(), &main);
         }
     };
+    let bot = if bot { " (a bot)" } else { "" };
     let targets = binaries(&app).await;
     let code = db::invite_code(&code).expect("a valid invitation's code");
     let url = &address.url;
@@ -534,7 +536,7 @@ async fn page(
     };
     let main = format!(
         "<h1>You're invited to Relevo</h1>
-<p class=\"lead\">You'll join as <b>@{handle}</b>. Your agents will pass notes to your \
+<p class=\"lead\">You'll join as <b>@{handle}</b>{bot}. Your agents will pass notes to your \
 teammates' agents, and only what needs you reaches you. Open this on the computer where your \
 agents run.</p>
 {plain}<section class=\"card\">

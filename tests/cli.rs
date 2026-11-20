@@ -484,6 +484,7 @@ fn relevo_is_the_servers_own_name_and_in_no_list() {
         &["invite", "relevo", "--name", "Mine", "--token"][..],
         &["team", "add", "relevo"][..],
         &["token", "add", "relevo", "--label", "x"][..],
+        &["bot", "relevo", "on"][..],
     ] {
         let out = Command::new(env!("CARGO_BIN_EXE_relevo"))
             .arg("--db")
@@ -588,4 +589,58 @@ fn serve_records_or_posts_the_release_notes_once_it_listens() {
         }
         std::fs::remove_dir_all(&dir).unwrap();
     }
+}
+
+#[test]
+fn invite_bot_marks_a_bot_and_people_says_so() {
+    let dir = std::env::temp_dir().join(db::random_id("relevo-cli-"));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("relevo.db");
+    let path = path.to_str().unwrap();
+    db::open(path).unwrap();
+    relevo(path, &["invite", "ana", "--name", "Ana", "--token"]);
+    let out = relevo(
+        path,
+        &[
+            "invite",
+            "reviewer",
+            "--name",
+            "Reviewer",
+            "--about",
+            "reviews diffs and PRs",
+            "--bot",
+            "--url",
+            "https://relevo.example.com",
+        ],
+    );
+    assert!(out.contains("Invited @reviewer (Reviewer)"), "{out}");
+    relevo(
+        path,
+        &["invite", "lint", "--name", "Lint", "--token", "--bot"],
+    );
+    let people = relevo(path, &["people"]);
+    assert_eq!(
+        people,
+        "ana\tAna\tactive\t\n\
+         lint\tLint\tactive, bot\t\n\
+         reviewer\tReviewer\tactive, bot\treviews diffs and PRs\n"
+    );
+    // Invited again without --bot, a bot stays one; `relevo bot` changes it.
+    relevo(path, &["invite", "lint", "--token"]);
+    assert!(relevo(path, &["people"]).contains("lint\tLint\tactive, bot"));
+    assert_eq!(relevo(path, &["bot", "lint", "off"]), "lint: not a bot\n");
+    assert!(relevo(path, &["people"]).contains("lint\tLint\tactive\t"));
+    assert_eq!(relevo(path, &["bot", "ana", "on"]), "ana: bot\n");
+    relevo(path, &["deactivate", "ana"]);
+    assert!(relevo(path, &["people"]).contains("ana\tAna\tinactive, bot\t"));
+    for args in [&["bot", "nobody", "on"][..], &["bot", "ana", "yes"][..]] {
+        let out = Command::new(env!("CARGO_BIN_EXE_relevo"))
+            .arg("--db")
+            .arg(path)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{args:?}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
 }
