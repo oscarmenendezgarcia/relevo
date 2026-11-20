@@ -566,8 +566,12 @@ if (typeof document !== 'undefined') {
   }
 
   const you = () => (state.data ? state.data.you : '');
-  // A server before 0.8.0 sends no `bots`.
-  const knowBots = (bots) => (bots || []).forEach((h) => state.bots.add(h));
+  // Takes an answer's `bots` as the truth for every person it names, so a mark taken off goes
+  // away on the next refresh. A server before 0.8.0 sends no `bots`.
+  const knowBots = (v) => {
+    Object.keys(v.names || {}).forEach((h) => state.bots.delete(h));
+    (v.bots || []).forEach((h) => state.bots.add(h));
+  };
   // One name for the person, everywhere: the row, the answer and the notes of a conversation all
   // say `You`. Who wrote it is the `via …` beside it.
   const nameOf = (handle) => (handle === you() ? 'You' : state.names[handle] || handle);
@@ -697,8 +701,8 @@ if (typeof document !== 'undefined') {
       if (state.loading) state.open.clear();
       state.data = got.first;
       state.names = Object.assign({}, state.names, needs ? needs.first.names : {}, got.first.names);
-      knowBots(needs ? needs.first.bots : null);
-      knowBots(got.first.bots);
+      if (needs) knowBots(needs.first);
+      knowBots(got.first);
       state.needs = needs ? needs.threads : [];
       state.threads = got.threads;
       state.cursor = got.cursor;
@@ -737,7 +741,7 @@ if (typeof document !== 'undefined') {
       state.threads = state.threads.concat(added);
       state.cursor = v.cursor;
       state.names = Object.assign({}, state.names, v.names);
-      knowBots(v.bots);
+      knowBots(v);
       fine();
       render();
     } catch (err) {
@@ -759,7 +763,7 @@ if (typeof document !== 'undefined') {
     try {
       const t = await api('/api/timeline/threads/' + encodeURIComponent(id));
       state.names = Object.assign({}, state.names, t.names);
-      knowBots(t.bots);
+      knowBots(t);
       t.loaded = Date.now();
       state.convos.set(id, t);
       state.convoFailed.delete(id);
