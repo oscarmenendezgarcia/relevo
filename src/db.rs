@@ -256,10 +256,8 @@ CREATE TABLE IF NOT EXISTS invites (
     used_at    INTEGER
 );
 CREATE INDEX IF NOT EXISTS invites_by_person ON invites(person_id);
--- The people marked as bots (`relevo invite --bot`, `relevo bot`): agents that run on their own
--- with a token of their own (a reviewer, say), not someone's assistant. A table of its own, not a
--- column, as `invites`: added in 0.8.0 without a new layout, every database gets it when opened,
--- and nothing before 0.8.0 reads it.
+-- The people marked as bots (`relevo invite --bot`, `relevo bot`). A table, not a column, as
+-- `invites`: added in 0.8.0 without a new layout, and nothing before 0.8.0 reads it.
 CREATE TABLE IF NOT EXISTS bots (
     person_id INTEGER PRIMARY KEY REFERENCES people(id)
 );

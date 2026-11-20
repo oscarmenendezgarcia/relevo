@@ -18,8 +18,8 @@ use serde_json::{Value, json};
 
 use crate::auth::Caller;
 use crate::db::{
-    CONTEXT_FORMAT, RESERVED_HANDLES, SYSTEM_PERSON_SQL, context_repo, random_id, rfc3339,
-    valid_context,
+    CONTEXT_FORMAT, IS_BOT_SQL, RESERVED_HANDLES, SYSTEM_PERSON_SQL, context_repo, random_id,
+    rfc3339, valid_context,
 };
 use crate::error::ApiError;
 use crate::mention::{Mention, mentions, mentions_only};
@@ -507,8 +507,7 @@ fn team(conn: &Connection, now: i64) -> Result<Vec<Member>, ApiError> {
     }
     let mut teams = teams_of(conn)?;
     let mut stmt = conn.prepare(&format!(
-        "SELECT id, handle, name, about, {} FROM people WHERE active = 1 ORDER BY handle",
-        crate::db::IS_BOT_SQL
+        "SELECT id, handle, name, about, {IS_BOT_SQL} FROM people WHERE active = 1 ORDER BY handle"
     ))?;
     let rows = stmt.query_map([], |r| {
         let id: i64 = r.get(0)?;

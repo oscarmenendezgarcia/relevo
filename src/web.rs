@@ -681,8 +681,7 @@ mod tests {
         // Nor does a bot's `bot`.
         assert!(rule(".who .bot {").contains("flex: none"));
         // Every note's header is made by one function, with the whole name and label on hover.
-        assert_eq!(SCRIPT.matches("el('div', 'who')").count(), 0);
-        assert_eq!(SCRIPT.matches("who.className = 'who'").count(), 1);
+        assert_eq!(SCRIPT.matches("'who'").count(), 1);
         assert!(SCRIPT.contains("via.title = via.textContent"));
     }
 

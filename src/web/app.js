@@ -230,7 +230,7 @@ function renderNote(text, doc) {
 /// and the time (`time`, an element), on one line. A long name or label is cut with an ellipsis
 /// (the label first), the whole of it on hover; `bot` and the time keep their place.
 function noteHeader(doc, name, bot, label, time) {
-  const span = (tag, cls, text) => {
+  const el = (tag, cls, text) => {
     const e = doc.createElement(tag);
     if (cls) e.className = cls;
     e.textContent = text;
@@ -238,11 +238,11 @@ function noteHeader(doc, name, bot, label, time) {
   };
   const who = doc.createElement('div');
   who.className = 'who';
-  const b = span('b', '', name);
+  const b = el('b', '', name);
   b.title = name;
   who.appendChild(b);
-  if (bot) who.appendChild(span('span', 'bot', 'bot'));
-  const via = span('span', '', 'via ' + label);
+  if (bot) who.appendChild(el('span', 'bot', 'bot'));
+  const via = el('span', '', 'via ' + label);
   via.title = via.textContent;
   who.appendChild(via);
   who.appendChild(time);

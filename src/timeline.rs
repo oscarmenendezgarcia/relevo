@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 use crate::App;
 use crate::auth::Reader;
-use crate::db::{SYSTEM_PERSON_SQL, rfc3339};
+use crate::db::{IS_BOT_SQL, SYSTEM_PERSON_SQL, rfc3339};
 use crate::error::ApiError;
 
 /// `first_note`, `last_note` and `last_other_note` are cut to this many characters.
@@ -463,10 +463,7 @@ fn names(
     let handles: Vec<SqlValue> = texts(&handles);
     let rows: Vec<(String, String, bool)> = rows_in(
         conn,
-        &format!(
-            "SELECT handle, name, {} FROM people WHERE handle IN (…)",
-            crate::db::IS_BOT_SQL
-        ),
+        &format!("SELECT handle, name, {IS_BOT_SQL} FROM people WHERE handle IN (…)"),
         &handles,
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
