@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.0 (unreleased)
+
+- Mark a person as a bot (`relevo invite reviewer --bot`, or `relevo bot reviewer on`): `relevo people`, the agents' people list (`@reviewer (Reviewer, bot)`) and `relevo web` (a grey `bot` after the name) say so. No database migration.
+
 ## 0.7.1 (19-nov-2026)
 
 - Fixed: in `relevo web`, an opened thread now always ends on the same latest reply its row shows, also after new replies arrived while it was closed.
