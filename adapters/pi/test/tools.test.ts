@@ -374,7 +374,7 @@ test("send says who a note is for is written in it, and to look at the inbox bef
   assert.match(send.description, /If the note needs work, claim the thread with `thread`, `claim: true` and no text just before you start changing files or running something long: a state the others see, not a note\./);
   assert.match(
     send.description,
-    /Never write a note that only says you are on it\. Do not claim a team or global-board thread that does not name your person; answer one only from your own work or your person's files\./,
+    /Never write a note that only says you are on it\. Do not claim a team or global-board thread that does not name your person; answer one only from your own work or the folder you work in\./,
   );
   assert.match(send.parameters.properties.claim.description, /^With `thread`: marks the thread as this session's, a state/);
   assert.match(send.parameters.properties.claim.description, /Not for a team or global-board thread that does not name your person\.$/);

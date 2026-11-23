@@ -241,7 +241,7 @@ export function renderThread(t: Thread, options: ThreadOptions = {}): string {
   // Release notes need no answer, so answering them is not offered.
   if (optional(t) && t.from !== me && !releaseOnly(t, me)) {
     lines.push(
-      "It does not name your person, so answering is optional: answer only from your own work or your person's files " +
+      "It does not name your person, so answering is optional: answer only from your own work or the folder you work in " +
         "(repeating someone's `about` line, or guessing who might know, is not an answer); do not claim it.",
     );
   }
@@ -381,7 +381,7 @@ export function renderArrival(t: Thread, me?: string): string {
   } else if (optional(t)) {
     intro =
       `Relevo: new in thread ${t.id}${to}; it does not name your person, so answering is optional.${who} ` +
-      `If your own work or your person's files answer it, reply with ${reply}; ` +
+      `If your own work or the folder you work in answers it, reply with ${reply}; ` +
       "if not, stay silent: repeating someone's `about` line, or guessing who might know, is not an answer. Do not claim it.";
   } else if (!isPending(t)) {
     // Another of the person's sessions already handled it: nothing stays pending, nothing to mark seen.

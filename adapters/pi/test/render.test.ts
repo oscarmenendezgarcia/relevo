@@ -209,7 +209,7 @@ test("pending comes from `pending` alone: `waiting_for_you` is gone", () => {
 test("a team or global-board arrival that does not name you is optional, answered only from your own work, and not claimed", () => {
   const out = renderArrival(arrivalThread("team"), "oscar");
   assert.match(out, /^Relevo: new in thread r_bbbbbbbbbbbb, to @backend; it does not name your person, so answering is optional\. You speak for @oscar\. /);
-  assert.match(out, /If your own work or your person's files answer it, reply with relevo_send \{ thread: "r_bbbbbbbbbbbb", text: … \}; if not, stay silent/);
+  assert.match(out, /If your own work or the folder you work in answers it, reply with relevo_send \{ thread: "r_bbbbbbbbbbbb", text: … \}; if not, stay silent/);
   assert.match(out, /repeating someone's `about` line, or guessing who might know, is not an answer\. Do not claim it\./);
   assert.match(out, /^## Thread r_bbbbbbbbbbbb \(team: @backend\)$/m);
   assert.match(out, /^Opened by @ana; participants: @ana, @oscar\. It does not name your person\.$/m);
@@ -251,7 +251,7 @@ test("answers to your own question to a team or to everyone are for your person,
     assert.match(out, /These notes answer it: tell your person what they say\. Do not answer it yourself/);
     for (const wrong of [/If your own work/, /Read what you need first/, /answering is optional/, /On it/, /claim: true/]) assert.doesNotMatch(out, wrong);
     // Without `you`, the agent cannot tell it is its person's: the usual text.
-    assert.match(renderArrival(t), /If your own work or your person's files answer it/);
+    assert.match(renderArrival(t), /If your own work or the folder you work in answers it/);
   }
 });
 
@@ -271,7 +271,7 @@ test("an arrival held by another of your sessions says to step aside, and your o
 
 test("an open team or global-board thread from someone else that does not name you says answering is optional", () => {
   const line =
-    "It does not name your person, so answering is optional: answer only from your own work or your person's files " +
+    "It does not name your person, so answering is optional: answer only from your own work or the folder you work in " +
     "(repeating someone's `about` line, or guessing who might know, is not an answer); do not claim it.";
   assert.ok(renderThread(arrivalThread("team"), { me: "oscar" }).includes(line));
   assert.ok(renderThread(arrivalThread("global"), { me: "oscar" }).includes(line));
@@ -513,7 +513,7 @@ test("a note by relevo, the server's own person, says it is the release notes an
   const arrival = renderArrival(alone, "oscar");
   assert.match(arrival, /^Relevo: release notes in thread [^\n]*No answer needed: do not reply to them, claim them or mark them seen\./);
   assert.doesNotMatch(arrival, /answering is optional|If your own work|relevo_send/);
-  assert.match(renderArrival(t, "oscar"), /If your own work or your person's files answer it/);
+  assert.match(renderArrival(t, "oscar"), /If your own work or the folder you work in answers it/);
   // The person's own notes beside them do not count.
   const own: Thread = { ...alone, new_notes: [t.new_notes![0], { ...t.new_notes![1], author: "oscar" }] };
   assert.ok(releaseOnly(own, "oscar") && !releaseOnly(own, "ana"));

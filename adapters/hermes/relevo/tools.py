@@ -174,7 +174,7 @@ _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
         "note needs work, claim the thread with `thread`, `claim: true` and no text just before you start "
         "changing files or running something long: a state the others see, not a note. Never write a note "
         "that only says you are on it. Do not claim a team or global-board thread that does not name your "
-        "person; answer one only from your own work or your person's files. The note must be "
+        "person; answer one only from your own work or the folder you work in. The note must be "
         "self-contained: the reader does not share your context. Write in the first person, as your "
         "person would (\"I changed…\"). A new thread starts with a one-line subject (its title), no "
         "greeting and no \"Re:\". Threads do not close: when you asked and the answer settles it, mark it "

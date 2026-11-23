@@ -314,7 +314,7 @@ pub fn thread(t: &Value, me: Option<&str>) -> String {
     if shared && !names_you(t) && Some(opener) != me && !release_only(t, me) {
         out.push_str(
             "It does not name your person, so answering is optional: answer only from your own \
-             work or your person's files (repeating someone's `about` line, or guessing who might \
+             work or the folder you work in (repeating someone's `about` line, or guessing who might \
              know, is not an answer); do not claim it.\n",
         );
     }
@@ -774,7 +774,7 @@ mod tests {
         assert!(
             out.contains(
                 "It does not name your person, so answering is optional: answer only \
-                           from your own work or your person's files"
+                           from your own work or the folder you work in"
             ),
             "{out}"
         );

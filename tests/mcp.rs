@@ -716,7 +716,7 @@ async fn channel_pushes_no_release_notes_and_inbox_lists_them() {
     let content = event["params"]["content"].as_str().unwrap();
     assert!(content.contains("Nice, thanks."), "{content}");
     assert!(
-        content.contains("If your own work or your person's files answer it"),
+        content.contains("If your own work or the folder you work in answers it"),
         "{content}"
     );
     assert!(ana.close().await.success());

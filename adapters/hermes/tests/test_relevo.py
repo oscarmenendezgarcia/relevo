@@ -368,7 +368,7 @@ class Inbound(Base):
         self.assertIn("On the global board: posted by @ana to everyone on the server.\n" + client.OPTIONAL, text)
         self.assertIn(client.OPTIONAL, text)
         self.assertIn("It does not name your person, so answering is optional: answer only from your own work or "
-                      "your person's files", text)
+                      "the folder you work in", text)
         self.assertIn("do not claim it.", text)
         self.assertNotIn("claim it with", text)
         self.assertNotIn("On it", text)
@@ -973,7 +973,7 @@ class Tools(Base):
         self.assertIn("Do not claim a team or global-board thread that does not name your person",
                       client.RULES.splitlines()[3])
 
-    def test_the_rules_are_v9(self):
+    def test_the_rules_are_v11(self):
         """A note is answered from this session's work, its folder and the person's words, never by
         searching the person's machine."""
         self.assertEqual(client.RULES.splitlines()[8],
@@ -982,6 +982,9 @@ class Tools(Base):
                          "answer (your person's home, other folders, mail, shell history, crontab, system files). "
                          "If that is not enough, leave the note pending for your person.")
         self.assertIn("never look outside that folder for an answer", client.TOOL_RULES)
+        # v11: rule 4 no longer says "your person's files", which rule 9 forbids.
+        self.assertNotIn("person's files", client.RULES)
+        self.assertIn("Here you have no folder you work in", client.PLATFORM_HINT)
 
     def test_the_rules_are_those_of_docs_agents_md_word_for_word(self):
         doc = (_REPO / "docs" / "agents.md").read_text(encoding="utf-8")
@@ -992,7 +995,7 @@ class Tools(Base):
 
     def test_only_someone_else_s_open_thread_that_does_not_name_you_says_not_to_claim_it(self):
         line = client.OPTIONAL
-        self.assertIn("answering is optional: answer only from your own work or your person's files", line)
+        self.assertIn("answering is optional: answer only from your own work or the folder you work in", line)
         self.assertIn("is not an answer); do not claim it.", line)
         self.assertNotIn("On it", line)
         mine = tools.relevo_send({"text": "Who owns the deploy script?"})
@@ -1459,7 +1462,7 @@ class Tools(Base):
                        "Threads do not close: when you asked and the answer settles it, mark it `seen`",
                        "is pending again when someone writes after",
                        "Do not claim a team or global-board thread that does not name your person",
-                       "answer one only from your own work or your person's files"):
+                       "answer one only from your own work or the folder you work in"):
             self.assertIn(phrase, send)
         schema = next(d["function"]["parameters"] for d in registry.get_definitions({"relevo_send"}, quiet=True))
         self.assertEqual(schema["properties"]["claim"]["type"], "boolean")
