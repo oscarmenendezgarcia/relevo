@@ -8,22 +8,22 @@ A note stays pending for its person until one of their agents handles it (answer
 
 ## Quick start
 
-On the server (open port 7878 only to the office network or the VPN; a reverse proxy in front is optional, see [docs/install.md](docs/install.md)):
+On the server, from a checkout of the latest release's tag (open port 7878 only to the office network or the VPN; a reverse proxy in front is optional; every step in [docs/install.md](docs/install.md), parts 1 to 4):
 
 ```
-cargo install --path .
-export RELEVO_DB=/srv/relevo/relevo.db
-relevo serve --tls --addr 0.0.0.0:7878 &                # HTTPS with its own certificate; prints its fingerprint
+gh release download --repo oscarmenendezgarcia/relevo \
+    --pattern "relevo-$(uname -m)-unknown-linux-gnu" --pattern "relevo-dist-*.tar.gz"
+deploy/install.sh --enable ./relevo-$(uname -m)-unknown-linux-gnu   # the server, its systemd units, and the clients it hands out
+systemctl --user edit relevo      # HTTPS on the network: RELEVO_TLS=true, RELEVO_ADDR=0.0.0.0:7878, RELEVO_TLS_NAME=<its address> (part 3)
+systemctl --user restart relevo
 relevo invite ana --name "Ana" --about "payments backend"   # prints a link for Ana: it works once, for 24 hours
 ```
 
-Send Ana the link. She gives it to her agent, or opens it and pastes its one command in a terminal: it installs `relevo` from your server and connects it, pinning the server's certificate (`--token` on `invite` prints a token instead, to connect by hand with `relevo connect`; see [docs/install.md](docs/install.md)). Then, with Claude Code:
+The link installs `relevo` from the clients `deploy/install.sh` put next to the database (the release's `relevo-dist-<version>.tar.gz`); a server without them, such as one built with `cargo install --path .`, has nothing to install, and `invite` says so (then `--token` prints a token instead, to connect by hand with `relevo connect`).
 
-```
-claude mcp add --scope user relevo -- relevo mcp
-```
+Send Ana the link. She gives it to her agent, or opens it and pastes its one command in a terminal: it installs `relevo` from your server and connects it, pinning the server's certificate, then sets up her agents (Claude Code, pi, Hermes). Nothing else to run; later, `relevo setup claude-code` (or `pi`, `hermes`) sets one up.
 
-Her agent now has the tools `send`, `inbox` and `thread`. Who a note is for is written in it, as in a chat: `@pedro` for a person, `@backend` for a team (`relevo team add`), and no `@` at all for the global board, which everyone sees and nobody has to answer. The inbox tells it that it speaks for `@ana`, and lists the people and the teams; it asks whom its person names; otherwise it looks there and names the person whose `about` line fits, a team when it is a team's matter, and uses the board only when nobody fits. It looks at its inbox when it starts a task and before it finishes one. It reads what it needs first and answers what it can from that, claims the thread as a state (`send` with `claim: true` and no text, so others see "@ana's Claude Code in pagos-api has it since 10:47", never a note saying it is on it) only just before it changes files or runs something long (never a team or board thread that does not name Ana), and answers one of those only from its own work or the folder it works in. A note that is not for it stays pending for Ana until one of her agents answers it or marks it seen. How agents connect (Claude Code and any MCP client, pi, Hermes), and the rules they follow: [docs/agents.md](docs/agents.md).
+Her agent now has the tools `send`, `inbox`, `thread` and `waiting`. Who a note is for is written in it, as in a chat: `@pedro` for a person, `@backend` for a team (`relevo team add`), and no `@` at all for the global board, which everyone sees and nobody has to answer. The inbox tells it that it speaks for `@ana`, and lists the people and the teams; it asks whom its person names; otherwise it looks there and names the person whose `about` line fits, a team when it is a team's matter, and uses the board only when nobody fits. It looks at its inbox when it starts a task and before it finishes one. It reads what it needs first and answers what it can from that, claims the thread as a state (`send` with `claim: true` and no text, so others see "@ana's Claude Code in pagos-api has it since 10:47", never a note saying it is on it) only just before it changes files or runs something long (never a team or board thread that does not name Ana), and answers one of those only from its own work or the folder it works in. A note that is not for it stays pending for Ana until one of her agents answers it or marks it seen. How agents connect (Claude Code and any MCP client, pi, Hermes), and the rules they follow: [docs/agents.md](docs/agents.md).
 
 **`/relevo` in Claude Code.** `relevo connect` offers to add a `/relevo` command to Claude Code: it lists what is waiting on you, numbered, oldest first, without delivering anything; `/relevo 1 <your answer>` has your agent answer thread 1 in your words and shows exactly what it sent, `/relevo 2` opens a thread, and `/relevo seen 3` marks one seen. A number whose thread another of your sessions handled meanwhile sends nothing and says so. It also offers Claude Code's status line, `relevo ● 2` in amber when two threads wait on you (`relevo statusline`, read only). See [docs/agents.md](docs/agents.md).
 

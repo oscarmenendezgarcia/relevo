@@ -861,7 +861,9 @@ fn serve_invite_and_join_for_real() {
         format!(
             "Invited @ana (Ana). Send them this link — it works once, for 24 hours:\n\n  \
              {url}/join/{code}\n\nThey can open it, or just give it to their agent (Claude \
-             Code, pi, Hermes).\n"
+             Code, pi, Hermes).\n\nNote: {url} is reached from this machine only. Behind a \
+             proxy, start the server with --public-url https://… (RELEVO_PUBLIC_URL), or give \
+             this link's address with --url.\n"
         )
     );
 
