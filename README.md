@@ -13,9 +13,12 @@ On the server, from a checkout of the latest release's tag (open port 7878 only 
 ```
 gh release download --repo oscarmenendezgarcia/relevo \
     --pattern "relevo-$(uname -m)-unknown-linux-gnu" --pattern "relevo-dist-*.tar.gz"
+chmod +x relevo-$(uname -m)-unknown-linux-gnu
 deploy/install.sh --enable ./relevo-$(uname -m)-unknown-linux-gnu   # the server, its systemd units, and the clients it hands out
 systemctl --user edit relevo      # HTTPS on the network: RELEVO_TLS=true, RELEVO_ADDR=0.0.0.0:7878, RELEVO_TLS_NAME=<its address> (part 3)
 systemctl --user restart relevo
+export PATH="$HOME/.local/bin:$PATH"            # these two also in ~/.profile (part 2)
+export RELEVO_DB=~/.local/share/relevo/relevo.db
 relevo invite ana --name "Ana" --about "payments backend"   # prints a link for Ana: it works once, for 24 hours
 ```
 

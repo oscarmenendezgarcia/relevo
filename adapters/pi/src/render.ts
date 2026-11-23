@@ -8,17 +8,44 @@ import type { Delivery, Inbox, Note, Person, SessionRef, Team, Thread } from "./
 const MAX_CHARS = 60_000;
 
 // Whitespace, and the invisible characters a model may read through ("<\u200b/untrusted>").
-const GAP = "[\\s\\u00ad\\u180e\\u200b-\\u200f\\u202a-\\u202e\\u2060-\\u2064\\ufeff]*";
-const TAG = new RegExp(`[<\\uff1c\\ufe64](?=${GAP}(?:\\/${GAP})?(?:untrusted|channel))`, "gi");
+const GAP =
+  /^[\t-\r \x1c-\x1f\x85\xa0\xad\u034f\u061c\u115f\u1160\u1680\u180e\u2000-\u200f\u2028-\u202f\u205f-\u2064\u2066-\u2069\u3000\u3164\ufe00-\ufe0f\ufeff\uffa0\u{e0000}-\u{e007f}]$/u;
+const OPENS = new Set(["<", "\uff1c", "\ufe64"]);
+const SLASHES = new Set(["/", "\u2215", "\u2044"]);
+const TAGS = ["untrusted", "channel"];
+
+/** A character as it reads: full-width ASCII as ASCII, the long s as s, in lower case. */
+function fold(c: string): string {
+  const code = c.codePointAt(0)!;
+  if (code >= 0xff01 && code <= 0xff5e) c = String.fromCodePoint(code - 0xfee0);
+  else if (c === "\u017f") c = "s";
+  return c.length === 1 && c < "\x80" ? c.toLowerCase() : c;
+}
+
+/** Whether `chars` from `from` on (just after a `<`) read as one of TAGS, opened or closed. */
+function namesATag(chars: string[], from: number): boolean {
+  const seen: string[] = [];
+  for (let j = from; j < chars.length && seen.length < 10; j++) {
+    if (!GAP.test(chars[j])) seen.push(fold(chars[j]));
+  }
+  const start = seen.length && SLASHES.has(seen[0]) ? 1 : 0;
+  return TAGS.some((tag) => seen.slice(start, start + tag.length).join("") === tag);
+}
 
 /**
  * Keeps a note from closing or opening a wrapper: every `<untrusted`, `</untrusted`,
- * `<channel` and `</channel` (any case, spaces and invisible characters allowed after `<`
- * and `/`, a full-width `＜` or small `﹤` read as `<`) becomes `&lt;…`, as in relevo mcp
- * (src/render.rs) and the Hermes plugin.
+ * `<channel` and `</channel` becomes `&lt;…`, read as a model may read it: `<` may be
+ * full-width `＜` or small `﹤`, `/` may be `／`, `∕` or `⁄`, the name in any case or in
+ * full-width letters, with whitespace or invisible characters anywhere after the `<`. As in
+ * relevo mcp (src/render.rs) and the Hermes plugin, character for character.
  */
 export function neutralize(text: string): string {
-  return text.replace(TAG, "&lt;");
+  const chars = Array.from(text);
+  let out = "";
+  for (let i = 0; i < chars.length; i++) {
+    out += OPENS.has(chars[i]) && namesATag(chars, i + 1) ? "&lt;" : chars[i];
+  }
+  return out;
 }
 
 export function untrusted(from: string, text: string, inline = false): string {

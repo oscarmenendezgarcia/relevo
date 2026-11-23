@@ -30,10 +30,13 @@ use crate::{App, dist, lock};
 /// addresses together; beyond the first, every invitation route refuses that address until the
 /// oldest of them is that old. Beyond the second, it refuses every address that made one in the
 /// window, so that many addresses guessing cannot shut out someone with a good code: an address
-/// with no failure still gets its try. A used or expired code does not count: someone was given
-/// it, and is told to ask for a new one.
+/// with no failure still gets its try, while fewer than `MAX_ADDRESSES` addresses have tried in
+/// the window (which bounds both the memory and the pace of guessing); past that, everyone is
+/// refused until the window passes. A used or expired code does not count: someone was given it,
+/// and is told to ask for a new one.
 pub const MAX_FAILURES: usize = 10;
 pub const MAX_ALL_FAILURES: usize = 200;
+pub const MAX_ADDRESSES: usize = 10_000;
 pub const FAILURE_WINDOW_SECS: i64 = 3600;
 
 const STYLE: &str = include_str!("join/page.css");
@@ -82,8 +85,9 @@ pub(crate) struct Tries {
     by_address: HashMap<IpAddr, Vec<i64>>,
     /// When the old ones were last dropped.
     pruned_at: i64,
-    /// When the server last logged that it refuses everyone.
-    warned_at: Option<i64>,
+    /// When the server last logged that it refuses addresses past the ceiling, and whether it
+    /// then refused every address.
+    warned_at: Option<(i64, bool)>,
 }
 
 /// A try at a code under way. It counts as one at a code that does not exist from the moment it
@@ -109,13 +113,19 @@ fn start(app: &App, addr: IpAddr, now: i64) -> Result<Try<'_>, Refusal> {
     }
     let all: usize = tries.by_address.values().map(count).sum();
     let mine = tries.by_address.get(&addr).map_or(0, count);
-    if all >= MAX_ALL_FAILURES && mine > 0 {
-        if !tries.warned_at.is_some_and(|at| fresh(&at)) {
+    let full = tries.by_address.len() >= MAX_ADDRESSES;
+    if all >= MAX_ALL_FAILURES && (mine > 0 || full) {
+        if !tries
+            .warned_at
+            .is_some_and(|(at, all)| fresh(&at) && (all || !full))
+        {
             tracing::warn!(
-                "{all} tries at invitation codes that do not exist in an hour: addresses that \
-                 made one are refused for a while"
+                "{all} tries at invitation codes that do not exist in an hour, from {} \
+                 addresses: those that made one{} are refused for a while",
+                tries.by_address.len(),
+                if full { ", and now every address," } else { "" }
             );
-            tries.warned_at = Some(now);
+            tries.warned_at = Some((now, full));
         }
         return Err(Refusal::Limited);
     }

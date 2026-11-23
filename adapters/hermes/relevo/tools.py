@@ -22,7 +22,8 @@ _me: dict[str, str] = {}
 def _api() -> client.Api:
     settings = client.resolve_settings()
     if not settings.configured:
-        raise client.RelevoError(0, "NOT_CONFIGURED", "set RELEVO_URL and RELEVO_TOKEN (or run `relevo connect`)")
+        raise client.RelevoError(0, "NOT_CONFIGURED", "ask your admin for an invitation link, or run `relevo connect "
+                                 "<url>` and paste your token when it asks (or set RELEVO_URL and RELEVO_TOKEN)")
     return client.Api(settings)
 
 

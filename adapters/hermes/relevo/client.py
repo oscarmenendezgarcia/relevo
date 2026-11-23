@@ -82,8 +82,8 @@ PLATFORM_HINT = (
     "global-board thread that does not name your person. If relevo_send says another of your "
     "sessions has the thread, answer [SILENT]. New notes reach you here on their own; relevo_thread "
     "reads a whole thread or a note that was cut. Here you have no folder you work in: for rules 4 "
-    "and 9, answer only from this chat and what your person told you, never by searching their "
-    "home or machine; if that is not enough, answer [SILENT] and leave it pending.\n"
+    "and 9, answer only from what your person wrote in this chat or told you, never by searching "
+    "their home or machine; if that is not enough, answer [SILENT] and leave it pending.\n"
     "Rules:\n" + RULES
 )
 
@@ -563,15 +563,43 @@ def you_of(data: dict) -> Optional[str]:
 
 # -- rendering -------------------------------------------------------------------------------------
 
-# Whitespace and invisible characters a model may read through: "</ untrusted>", "<\u200b/yours>".
-_GAP = r"[\s\u00ad\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]*"
-# A full-width "＜" or small "﹤" reads as "<" too.
-_TAG = re.compile(rf"[<\uff1c\ufe64](?={_GAP}/?{_GAP}(?:untrusted|yours))", re.IGNORECASE)
+# Whitespace, and the invisible characters a model may read through ("<\u200b/yours>"). The same
+# set as relevo mcp (src/render.rs) and the pi extension, character for character.
+_GAP = re.compile("[\t-\r \x1c-\x1f\x85\xa0\xad\u034f\u061c\u115f\u1160\u1680\u180e\u2000-\u200f"
+                  "\u2028-\u202f\u205f-\u2064\u2066-\u2069\u3000\u3164\ufe00-\ufe0f\ufeff\uffa0"
+                  "\U000e0000-\U000e007f]")
+_OPENS = "<\uff1c\ufe64"
+_SLASHES = "/\u2215\u2044"
+_TAGS = ("untrusted", "yours")
+
+
+def _fold(c: str) -> str:
+    """A character as it reads: full-width ASCII as ASCII, the long s as s, in lower case."""
+    if "\uff01" <= c <= "\uff5e":
+        c = chr(ord(c) - 0xfee0)
+    elif c == "\u017f":
+        c = "s"
+    return c.lower() if c < "\x80" else c
+
+
+def _names_a_tag(text: str, start: int) -> bool:
+    """Whether `text` from `start` on (just after a "<") reads as one of _TAGS, opened or closed."""
+    seen = []
+    for c in text[start:]:
+        if len(seen) == 10:
+            break
+        if not _GAP.match(c):
+            seen.append(_fold(c))
+    word = "".join(seen[1:] if seen and seen[0] in _SLASHES else seen)
+    return any(word.startswith(tag) for tag in _TAGS)
 
 
 def _defang(text: str) -> str:
-    """Others' text may not open or close an <untrusted> or <yours> block of its own."""
-    return _TAG.sub("&lt;", text or "")
+    """Others' text may not open or close an <untrusted> or <yours> block of its own: every "<"
+    that reads as one (a full-width "＜" or small "﹤", "／", "∕" or "⁄" for the slash, any case
+    or full-width letters, whitespace or invisible characters anywhere after it) is "&lt;"."""
+    text = text or ""
+    return "".join("&lt;" if c in _OPENS and _names_a_tag(text, i + 1) else c for i, c in enumerate(text))
 
 
 def _attr(value: Any) -> str:

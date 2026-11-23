@@ -585,8 +585,18 @@ pub async fn install_from_server(
     match empty {
         Ok(true) => {}
         Ok(false) => {
-            kind.version_in(dir)
+            let have = kind
+                .version_in(dir)
                 .map_err(|e| anyhow!("{e:#}: left as it is"))?;
+            // As `relevo update`: an old release, signed as it was, never replaces a newer one.
+            if Version::parse(&manifest.version)? < Version::parse(&have)? {
+                bail!(
+                    "{} has {have}, newer than the {} {} hands out: left as it is (no downgrades)",
+                    dir.display(),
+                    manifest.version,
+                    config.url
+                );
+            }
         }
         Err(_) => fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?,
     }

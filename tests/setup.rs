@@ -207,20 +207,14 @@ fn output(out: &Output) -> String {
     )
 }
 
-/// Whether the binary trusts `RELEVO_TEST_RELEASE_KEY`: only a debug build does, so a release
-/// build (the release workflow tests one) installs no adapter from these dists.
-fn trusts_the_test_key() -> bool {
-    if !cfg!(debug_assertions) {
-        eprintln!("skipped: a release build trusts only the release key");
-    }
-    cfg!(debug_assertions)
-}
-
 #[tokio::test(flavor = "multi_thread")]
+// Only a debug build trusts `RELEVO_TEST_RELEASE_KEY`, so a release build (the release workflow
+// tests one) installs no adapter from these dists.
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "a release build trusts only the release key"
+)]
 async fn named_agents_are_set_up_without_asking() {
-    if !trusts_the_test_key() {
-        return;
-    }
     let m = Machine::new().await;
     let out = tokio::task::block_in_place(|| m.relevo(&["setup", "claude-code", "pi", "hermes"]));
     let said = output(&out);
@@ -308,10 +302,13 @@ async fn without_a_terminal_nothing_changes_and_it_says_what_to_run() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+// Only a debug build trusts `RELEVO_TEST_RELEASE_KEY`, so a release build (the release workflow
+// tests one) installs no adapter from these dists.
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "a release build trusts only the release key"
+)]
 async fn one_agent_that_fails_leaves_the_others_set_up() {
-    if !trusts_the_test_key() {
-        return;
-    }
     let m = Machine::new().await;
     std::fs::write(m.bin().join("hermes.fail"), "").unwrap();
     // A folder there that is not the plugin is never replaced.
@@ -357,6 +354,7 @@ async fn an_adapter_is_installed_only_from_a_signed_manifest() {
         said.contains("are not signed by the release key: nothing was installed"),
         "{said}"
     );
+    assert_eq!(out.status.code(), Some(1), "{said}");
     assert!(!pi.join("package.json").exists(), "{said}");
     assert!(m.ran().is_empty(), "{said}");
 
@@ -387,4 +385,29 @@ async fn an_adapter_is_installed_only_from_a_signed_manifest() {
     );
     assert!(!pi.join("package.json").exists());
     assert!(m.ran().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "a release build trusts only the release key"
+)]
+async fn setup_never_replaces_an_adapter_with_an_older_one() {
+    let m = Machine::new().await;
+    // pi's extension of a newer release is there; the server hands out 0.7.0, signed.
+    let pi = m.home().join(".local/share/relevo/pi");
+    std::fs::create_dir_all(&pi).unwrap();
+    let newer = json!({ "name": "relevo-pi", "version": "9.0.0" }).to_string();
+    std::fs::write(pi.join("package.json"), &newer).unwrap();
+    let out = tokio::task::block_in_place(|| m.relevo(&["setup", "pi"]));
+    let said = output(&out);
+    assert!(
+        said.contains("has 9.0.0, newer than the 0.7.0") && said.contains("(no downgrades)"),
+        "{said}"
+    );
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert_eq!(
+        std::fs::read_to_string(pi.join("package.json")).unwrap(),
+        newer
+    );
 }

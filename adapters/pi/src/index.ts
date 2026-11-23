@@ -716,7 +716,7 @@ export function relevoExtension(options: Options = {}) {
         properties: {
           all: {
             type: "boolean",
-            description: "Also the threads held by your person's other sessions or addressed to their other contexts. Only needed to see those.",
+            description: "Also the threads held by your person's other sessions or addressed to their other contexts. Only needed to see those: without it the inbox already shows everything new or waiting for this session.",
           },
         },
         additionalProperties: false,
@@ -756,7 +756,8 @@ export function relevoExtension(options: Options = {}) {
         if (ns) {
           if (ns.length !== 1) throw new Error("Open one thread at a time: one list number.");
           const found = resolveNumbers(listed, ns);
-          if (typeof found === "string") throw new Error(found);
+          // relevo_thread only reads: no "Nothing was sent" here.
+          if (typeof found === "string") throw new Error(found.replace(" Nothing was sent.", ""));
           // Who opened it and its title are in the thread below, fenced as rule 5 says.
           head = `Thread ${found[0].n} of your list:\n`;
           id = found[0].id;

@@ -287,16 +287,16 @@ fn db_path(db: Option<String>, command: &Command) -> Result<String> {
 /// What may keep an invitation link from working, to say after it: no dist next to the
 /// database (or in `RELEVO_DIST`), so the link has no `relevo` to install; or an address only
 /// this machine reaches.
-fn invite_notes(db_file: &str, url: &str) -> Vec<String> {
+fn invite_notes(env: &impl Fn(&str) -> Option<String>, db_file: &str, url: &str) -> Vec<String> {
     let mut notes = vec![];
-    let dist = config::env("RELEVO_DIST")
+    let dist = env("RELEVO_DIST")
         .map(PathBuf::from)
         .unwrap_or_else(|| relevo::dist::dir_for(db_file));
     if !dist.join("manifest.json").is_file() {
         notes.push(format!(
-            "this server hands out no clients (no dist in {}), so the link cannot install \
-             relevo. Put the release's relevo-dist-<version>.tar.gz there with deploy/install.sh \
-             (docs/install.md, part 2), or invite with --token.",
+            "no dist in {} (unless the server is started with --dist elsewhere), so the link \
+             cannot install relevo. Put the release's relevo-dist-<version>.tar.gz there with \
+             deploy/install.sh (docs/install.md, part 2), or invite with --token.",
             dist.display()
         ));
     }
@@ -937,7 +937,7 @@ async fn main() -> Result<()> {
                      agent (Claude Code, pi, Hermes).",
                     address.url, invitation.code
                 );
-                for note in invite_notes(&db_file, &address.url) {
+                for note in invite_notes(&config::env, &db_file, &address.url) {
                     println!("\nNote: {note}");
                 }
             }
@@ -1083,18 +1083,19 @@ mod tests {
         let dir = std::env::temp_dir().join(db::random_id("relevo-invite-"));
         std::fs::create_dir_all(dir.join("dist")).unwrap();
         let db_file = dir.join("relevo.db").to_string_lossy().to_string();
+        let none = |_: &str| None;
         // No dist, and an address only this machine reaches.
-        let notes = invite_notes(&db_file, "http://127.0.0.1:7878");
+        let notes = invite_notes(&none, &db_file, "http://127.0.0.1:7878");
         assert_eq!(notes.len(), 2, "{notes:?}");
-        assert!(notes[0].contains("hands out no clients"), "{notes:?}");
+        assert!(notes[0].contains("cannot install relevo"), "{notes:?}");
         assert!(notes[1].contains("--public-url"), "{notes:?}");
-        assert_eq!(invite_notes(&db_file, "https://[::1]:7878").len(), 2);
-        assert_eq!(invite_notes(&db_file, "https://localhost").len(), 2);
+        assert_eq!(invite_notes(&none, &db_file, "https://[::1]:7878").len(), 2);
+        assert_eq!(invite_notes(&none, &db_file, "https://localhost").len(), 2);
         // A dist, and an address teammates reach: nothing to say.
         std::fs::write(dir.join("dist/manifest.json"), "{}").unwrap();
-        assert!(invite_notes(&db_file, "https://192.168.1.50:7878").is_empty());
-        assert!(invite_notes(&db_file, "https://[2001:db8::1]:7878").is_empty());
-        assert!(invite_notes(&db_file, "https://relevo.example.com").is_empty());
+        assert!(invite_notes(&none, &db_file, "https://192.168.1.50:7878").is_empty());
+        assert!(invite_notes(&none, &db_file, "https://[2001:db8::1]:7878").is_empty());
+        assert!(invite_notes(&none, &db_file, "https://relevo.example.com").is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

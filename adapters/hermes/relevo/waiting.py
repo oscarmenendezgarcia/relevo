@@ -772,7 +772,8 @@ def thread_head(keys: list, ns: list, bound: Any = None):
         return "Error: Open one thread at a time: one list number."
     found = bind(listed_for(keys), ns, bound)
     if isinstance(found, str):
-        return "Error: " + found
+        # relevo_thread only reads: no "Nothing was sent" here.
+        return "Error: " + found.replace(" Nothing was sent.", "")
     # Who opened it and its title are teammates' text: the thread below shows them fenced (rule 5).
     row = found[0]
     return row.id, f"Thread {row.n} of your list:\n"

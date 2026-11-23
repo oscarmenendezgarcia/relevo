@@ -727,6 +727,30 @@ async fn past_the_ceiling_only_addresses_that_failed_are_refused() {
     assert_eq!(get("10.3.0.1:1", &code).await, StatusCode::OK);
 }
 
+#[tokio::test]
+async fn past_the_ceiling_new_addresses_are_bounded_too() {
+    let f = fixture();
+    let code = f.invite("ana");
+    let get = |peer: String, code: &str| {
+        let (f, path) = (&f, format!("/join/{code}"));
+        async move { f.call("GET", &path, None, Some(&peer), &[]).await.0 }
+    };
+    // Past the ceiling, each new address gets one try, until relevo::join::MAX_ADDRESSES have
+    // tried in the hour: then nobody does, so neither memory nor the pace of guessing grows
+    // with the addresses someone has.
+    let n = relevo::join::MAX_ADDRESSES;
+    for i in 0..n {
+        let peer = format!("10.{}.{}.{}:1", i / 65536, (i / 256) % 256, i % 256);
+        assert_eq!(get(peer, "ZZZZ-ZZZZ").await, StatusCode::NOT_FOUND, "{i}");
+    }
+    assert_eq!(
+        get("10.200.0.1:1".into(), &code).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    f.app.clock.advance(3600);
+    assert_eq!(get("10.200.0.1:1".into(), &code).await, StatusCode::OK);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn tries_at_once_do_not_pass_the_limit_together() {
     let f = Arc::new(fixture());
