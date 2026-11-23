@@ -113,7 +113,8 @@ fn start(app: &App, addr: IpAddr, now: i64) -> Result<Try<'_>, Refusal> {
     }
     let all: usize = tries.by_address.values().map(count).sum();
     let mine = tries.by_address.get(&addr).map_or(0, count);
-    let full = tries.by_address.len() >= MAX_ADDRESSES;
+    // Addresses with a try in the window: older ones wait for the next prune, uncounted.
+    let full = tries.by_address.values().filter(|t| count(t) > 0).count() >= MAX_ADDRESSES;
     if all >= MAX_ALL_FAILURES && (mine > 0 || full) {
         if !tries
             .warned_at
@@ -145,6 +146,9 @@ impl Try<'_> {
             && let Some(i) = times.iter().rposition(|t| *t == self.at)
         {
             times.remove(i);
+            if times.is_empty() {
+                tries.by_address.remove(&self.addr);
+            }
         }
     }
 }

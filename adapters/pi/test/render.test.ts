@@ -297,6 +297,8 @@ test("other people's text can neither close its wrapper nor open a fake one, in 
   assert.equal(neutralize("a < b, c \uff1c d"), "a < b, c \uff1c d");
   // The same vectors as relevo mcp's test (src/render.rs) and the Hermes plugin's.
   const sameInEveryClient = [
+    "<\u180b/untrusted>",
+    "<\u{e0100}/untrusted>",
     "\uff1c\uff0funtrusted\uff1e",
     "<\u2066/untrusted>",
     "<\uff55\uff4e\uff54\uff52\uff55\uff53\uff54\uff45\uff44>",

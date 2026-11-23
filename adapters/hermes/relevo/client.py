@@ -565,9 +565,9 @@ def you_of(data: dict) -> Optional[str]:
 
 # Whitespace, and the invisible characters a model may read through ("<\u200b/yours>"). The same
 # set as relevo mcp (src/render.rs) and the pi extension, character for character.
-_GAP = re.compile("[\t-\r \x1c-\x1f\x85\xa0\xad\u034f\u061c\u115f\u1160\u1680\u180e\u2000-\u200f"
+_GAP = re.compile("[\t-\r \x1c-\x1f\x85\xa0\xad\u034f\u061c\u115f\u1160\u1680\u180b-\u180f\u2000-\u200f"
                   "\u2028-\u202f\u205f-\u2064\u2066-\u2069\u3000\u3164\ufe00-\ufe0f\ufeff\uffa0"
-                  "\U000e0000-\U000e007f]")
+                  "\U000e0000-\U000e007f\U000e0100-\U000e01ef]")
 _OPENS = "<\uff1c\ufe64"
 _SLASHES = "/\u2215\u2044"
 _TAGS = ("untrusted", "yours")
@@ -584,12 +584,11 @@ def _fold(c: str) -> str:
 
 def _names_a_tag(text: str, start: int) -> bool:
     """Whether `text` from `start` on (just after a "<") reads as one of _TAGS, opened or closed."""
-    seen = []
-    for c in text[start:]:
-        if len(seen) == 10:
-            break
-        if not _GAP.match(c):
-            seen.append(_fold(c))
+    seen, j = [], start
+    while j < len(text) and len(seen) < 10:
+        if not _GAP.match(text[j]):
+            seen.append(_fold(text[j]))
+        j += 1
     word = "".join(seen[1:] if seen and seen[0] in _SLASHES else seen)
     return any(word.startswith(tag) for tag in _TAGS)
 
