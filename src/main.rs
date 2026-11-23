@@ -690,17 +690,23 @@ async fn main() -> Result<()> {
                 (_, true) => Some(false),
                 _ => None,
             };
-            relevo::setup::run(
+            let ok = relevo::setup::run(
                 &setup,
                 choice(command, no_command),
                 choice(statusline, no_statusline),
             )
             .await;
+            // An agent that could not be set up: exit 1, so a script (the invitation's) says so.
+            if !ok {
+                std::process::exit(1);
+            }
             return Ok(());
         }
         Command::Setup { agents } => {
             config::load(config::env)?;
-            relevo::setup::run(&agents, None, None).await;
+            if !relevo::setup::run(&agents, None, None).await {
+                std::process::exit(1);
+            }
             return Ok(());
         }
         Command::Statusline => {

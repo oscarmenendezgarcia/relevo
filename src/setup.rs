@@ -105,8 +105,9 @@ pub fn found() -> Vec<Agent> {
 /// on a terminal, else only told how. `command` and `statusline` are Claude Code's /relevo
 /// command and status line: `Some(true)` without asking, `Some(false)` never, `None` as the
 /// rest. When Claude Code is not set up here, nor declined, they are offered on their own, as
-/// before 0.7.0 (on a terminal, when Claude Code's folder is there).
-pub async fn run(named: &[Agent], command: Option<bool>, statusline: Option<bool>) {
+/// before 0.7.0 (on a terminal, when Claude Code's folder is there). Returns whether every agent
+/// chosen was set up.
+pub async fn run(named: &[Agent], command: Option<bool>, statusline: Option<bool>) -> bool {
     let found = found();
     let mut chosen: Vec<Agent> = vec![];
     // Whether the person said no to Claude Code.
@@ -150,10 +151,14 @@ pub async fn run(named: &[Agent], command: Option<bool>, statusline: Option<bool
         }
     }
     let mut done = vec![];
+    let mut failed = false;
     for agent in chosen {
         match set_up(agent, command, statusline).await {
             Ok(()) => done.push(agent),
-            Err(e) => eprintln!("Could not add Relevo to {}: {e:#}", agent.label()),
+            Err(e) => {
+                eprintln!("Could not add Relevo to {}: {e:#}", agent.label());
+                failed = true;
+            }
         }
     }
     if !done.is_empty() {
@@ -162,6 +167,7 @@ pub async fn run(named: &[Agent], command: Option<bool>, statusline: Option<bool
         println!("Added Relevo to {}.", and(&labels));
         println!("\nDone. Restart {} to load Relevo.", and(&restart));
     }
+    !failed
 }
 
 /// "a", "a and b", "a, b and c".
@@ -330,7 +336,7 @@ pub fn offer_command(force: bool, quiet: bool) {
             } else if !terminal {
                 println!(
                     "skipped the /relevo command for Claude Code (no terminal to ask): run \
-                     relevo connect again with --command to install it"
+                     relevo setup claude-code to install it"
                 );
             }
         }
@@ -418,8 +424,8 @@ pub fn offer_statusline(force: bool, quiet: bool) {
                 }
             } else if !terminal {
                 println!(
-                    "skipped Claude Code's status line (no terminal to ask): run relevo connect \
-                     again with --statusline to set it"
+                    "skipped Claude Code's status line (no terminal to ask): run relevo setup \
+                     claude-code to set it"
                 );
             }
         }

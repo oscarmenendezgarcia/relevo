@@ -320,7 +320,8 @@ async fn one_agent_that_fails_leaves_the_others_set_up() {
     std::fs::write(pi.join("mine.txt"), "mine").unwrap();
     let out = tokio::task::block_in_place(|| m.relevo(&["setup", "pi", "hermes", "claude-code"]));
     let said = output(&out);
-    assert!(out.status.success(), "{said}");
+    // Claude Code was set up, but not every agent named: a script is told with exit 1.
+    assert_eq!(out.status.code(), Some(1), "{said}");
     assert!(said.contains("Could not add Relevo to pi:"), "{said}");
     assert!(said.contains("left as it is"), "{said}");
     assert_eq!(

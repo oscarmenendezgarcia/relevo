@@ -2683,7 +2683,7 @@ async fn connect_installs_the_relevo_command_for_claude_code() {
     // No terminal to ask: skipped, saying how.
     let out = connect(&[]).await;
     assert!(
-        out.contains("skipped the /relevo command") && out.contains("--command"),
+        out.contains("skipped the /relevo command") && out.contains("relevo setup claude-code"),
         "{out}"
     );
     assert!(!path.exists());
@@ -2702,7 +2702,7 @@ async fn connect_installs_the_relevo_command_for_claude_code() {
     let out = connect(&[]).await;
     let line = out.lines().find(|l| l.contains("skipped")).unwrap();
     assert!(
-        line.ends_with("run relevo connect again with --command to install it"),
+        line.ends_with("run relevo setup claude-code to install it"),
         "{line}"
     );
     // A newer one of Relevo's is never downgraded.

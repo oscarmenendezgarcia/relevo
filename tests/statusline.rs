@@ -492,7 +492,7 @@ async fn connect_sets_claude_codes_status_line_only_when_there_is_none() {
     // No terminal to ask: skipped, saying how.
     let out = connect(&[], None).await;
     assert!(
-        out.contains("skipped Claude Code's status line (no terminal to ask): run relevo connect again with --statusline to set it"),
+        out.contains("skipped Claude Code's status line (no terminal to ask): run relevo setup claude-code to set it"),
         "{out}"
     );
     assert_eq!(std::fs::read_to_string(&settings).unwrap(), original);
