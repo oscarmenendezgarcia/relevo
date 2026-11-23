@@ -304,7 +304,9 @@ fn invite_notes(db_file: &str, url: &str) -> Vec<String> {
         .ok()
         .and_then(|u| u.host_str().map(|h| h.trim_matches(['[', ']']).to_string()));
     let loopback = host.is_some_and(|h| {
-        h == "localhost" || h.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+        h == "localhost"
+            || h.parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
     });
     if loopback {
         notes.push(format!(

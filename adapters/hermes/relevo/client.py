@@ -565,7 +565,8 @@ def you_of(data: dict) -> Optional[str]:
 
 # Whitespace and invisible characters a model may read through: "</ untrusted>", "<\u200b/yours>".
 _GAP = r"[\s\u00ad\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]*"
-_TAG = re.compile(rf"<(?={_GAP}/?{_GAP}(?:untrusted|yours))", re.IGNORECASE)
+# A full-width "＜" or small "﹤" reads as "<" too.
+_TAG = re.compile(rf"[<\uff1c\ufe64](?={_GAP}/?{_GAP}(?:untrusted|yours))", re.IGNORECASE)
 
 
 def _defang(text: str) -> str:

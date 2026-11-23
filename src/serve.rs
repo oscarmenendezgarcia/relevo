@@ -123,7 +123,8 @@ struct AddressSlot {
 
 impl AddressSlot {
     fn take(all: &Arc<Mutex<HashMap<IpAddr, usize>>>, ip: IpAddr, max: usize) -> Option<Self> {
-        // An IPv4 client of a listener on `[::]` comes as `::ffff:a.b.c.d`: the same address.
+        // An IPv4 client of a listener on `[::]` comes as `::ffff:a.b.c.d`: the same address. An
+        // IPv6 host may have a whole /64: it counts as one, as for invitations.
         let ip = ip.to_canonical();
         if ip.is_loopback() {
             return Some(AddressSlot {
@@ -131,6 +132,7 @@ impl AddressSlot {
                 ip: None,
             });
         }
+        let ip = crate::join::one_host(ip);
         let mut map = all.lock().unwrap_or_else(|e| e.into_inner());
         let held = map.entry(ip).or_default();
         if *held >= max {
@@ -428,7 +430,12 @@ mod tests {
             .map(|a| take(a).unwrap())
             .collect();
         assert_eq!(all.lock().unwrap().len(), 1);
-        drop((second, third, local));
+        // An IPv6 /64 is one host: its addresses share a count.
+        let v6 = take("2001:db8::1").unwrap();
+        let v6b = take("2001:db8::ffff:2").unwrap();
+        assert!(take("2001:db8::3").is_none());
+        assert!(take("2001:db8:0:1::1").is_some(), "another /64 has its own");
+        drop((second, third, local, v6, v6b));
         assert!(all.lock().unwrap().is_empty());
     }
 }

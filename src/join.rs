@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::rejection::{BytesRejection, QueryRejection};
-use axum::extract::{ConnectInfo, Path, Query, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -43,7 +43,8 @@ const MARK: &str = include_str!("../assets/brand/relevo-mark.svg");
 
 pub fn routes() -> Router<Arc<App>> {
     Router::new()
-        .route("/api/join", post(join))
+        // Its body is `{ "code": … }`: a small limit, as it is read before any other check.
+        .route("/api/join", post(join).layer(DefaultBodyLimit::max(1024)))
         .route("/join/{code}", get(page))
         .route("/join/{code}/install", get(install))
         .route("/join/{code}/relevo", get(binary))
@@ -55,17 +56,21 @@ type Peer = Option<Extension<ConnectInfo<SocketAddr>>>;
 /// What failures count against: the client's IP address, or its /64 for IPv6 (one host may have
 /// a whole one). Requests that came with no address count as one.
 fn address(peer: &Peer) -> IpAddr {
-    match peer
-        .as_ref()
-        .map(|Extension(ConnectInfo(a))| a.ip().to_canonical())
-    {
-        Some(IpAddr::V6(ip)) => {
+    match peer.as_ref() {
+        Some(Extension(ConnectInfo(a))) => one_host(a.ip()),
+        None => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+    }
+}
+
+/// `ip` as one host counts: an IPv4 address (also as `::ffff:a.b.c.d`), or an IPv6 /64.
+pub(crate) fn one_host(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V6(ip) => {
             let mut octets = ip.octets();
             octets[8..].fill(0);
             IpAddr::from(octets)
         }
-        Some(ip) => ip,
-        None => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        ip => ip,
     }
 }
 

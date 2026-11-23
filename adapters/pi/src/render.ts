@@ -7,13 +7,18 @@ import type { Delivery, Inbox, Note, Person, SessionRef, Team, Thread } from "./
 
 const MAX_CHARS = 60_000;
 
+// Whitespace, and the invisible characters a model may read through ("<\u200b/untrusted>").
+const GAP = "[\\s\\u00ad\\u180e\\u200b-\\u200f\\u202a-\\u202e\\u2060-\\u2064\\ufeff]*";
+const TAG = new RegExp(`[<\\uff1c\\ufe64](?=${GAP}(?:\\/${GAP})?(?:untrusted|channel))`, "gi");
+
 /**
  * Keeps a note from closing or opening a wrapper: every `<untrusted`, `</untrusted`,
- * `<channel` and `</channel` (any case, spaces allowed after `<` and `/`) becomes
- * `&lt;…`, as in relevo mcp (src/render.rs).
+ * `<channel` and `</channel` (any case, spaces and invisible characters allowed after `<`
+ * and `/`, a full-width `＜` or small `﹤` read as `<`) becomes `&lt;…`, as in relevo mcp
+ * (src/render.rs) and the Hermes plugin.
  */
 export function neutralize(text: string): string {
-  return text.replace(/<(?=[ \t\n\f\r]*(?:\/[ \t\n\f\r]*)?(?:untrusted|channel))/gi, "&lt;");
+  return text.replace(TAG, "&lt;");
 }
 
 export function untrusted(from: string, text: string, inline = false): string {

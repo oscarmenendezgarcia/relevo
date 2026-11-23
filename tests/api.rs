@@ -1383,6 +1383,27 @@ async fn unknown_route_or_wrong_method_is_json_not_found() {
 }
 
 #[tokio::test]
+async fn head_on_the_api_is_not_found_and_delivers_nothing() {
+    let t = team(&["ana", "bob"]);
+    t.ok("bob", json!({ "text": "@ana is the deploy green?" }))
+        .await;
+    let token = Some(t.tokens["ana"].as_str());
+    for uri in ["/api/inbox", "/api/people", "/api/timeline"] {
+        let (status, _) = t.raw("HEAD", uri, token, Body::empty()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+    }
+    // The HEAD delivered nothing: the note is still new for that session.
+    let inbox = t.inbox("ana").await;
+    assert!(
+        inbox.to_string().contains("is the deploy green?"),
+        "{inbox}"
+    );
+    // Outside the API, HEAD is as GET.
+    let (status, _) = t.raw("HEAD", "/health", None, Body::empty()).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn undecodable_thread_id_is_json_not_found() {
     let t = team(&["ana"]);
     let (status, v) = t.get("ana", "/api/threads/%FF").await;

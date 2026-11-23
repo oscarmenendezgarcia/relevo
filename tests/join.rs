@@ -647,6 +647,19 @@ async fn an_address_that_tries_too_many_codes_is_refused_for_an_hour() {
 }
 
 #[tokio::test]
+async fn a_join_body_is_small() {
+    let f = fixture();
+    let code = f.invite("ana");
+    let big = json!({ "code": code, "pad": "x".repeat(4096) });
+    let (status, ..) = f
+        .call("POST", "/api/join", Some(big), Some("10.0.0.1:1"), &[])
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // Refused before it was read: it counts as no try, and the code still works.
+    assert_eq!(f.join(&code).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn used_and_expired_codes_do_not_count_and_loopback_is_one_address() {
     let f = fixture();
     let used = f.invite("ana");
