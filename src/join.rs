@@ -27,8 +27,10 @@ use crate::error::ApiError;
 use crate::{App, dist, lock};
 
 /// Tries at codes that do not exist one address may make in `FAILURE_WINDOW_SECS`, and all
-/// addresses together; beyond either, every invitation route refuses that address (or everyone)
-/// until the oldest of them is that old. A used or expired code does not count: someone was given
+/// addresses together; beyond the first, every invitation route refuses that address until the
+/// oldest of them is that old. Beyond the second, it refuses every address that made one in the
+/// window, so that many addresses guessing cannot shut out someone with a good code: an address
+/// with no failure still gets its try. A used or expired code does not count: someone was given
 /// it, and is told to ask for a new one.
 pub const MAX_FAILURES: usize = 10;
 pub const MAX_ALL_FAILURES: usize = 200;
@@ -101,20 +103,21 @@ fn start(app: &App, addr: IpAddr, now: i64) -> Result<Try<'_>, Refusal> {
         tries.pruned_at = now;
     }
     let all: usize = tries.by_address.values().map(count).sum();
-    if all >= MAX_ALL_FAILURES {
+    let mine = tries.by_address.get(&addr).map_or(0, count);
+    if all >= MAX_ALL_FAILURES && mine > 0 {
         if !tries.warned_at.is_some_and(|at| fresh(&at)) {
             tracing::warn!(
-                "{all} tries at invitation codes that do not exist in an hour: every invitation \
-                 route is refused for a while"
+                "{all} tries at invitation codes that do not exist in an hour: addresses that \
+                 made one are refused for a while"
             );
             tries.warned_at = Some(now);
         }
         return Err(Refusal::Limited);
     }
-    let times = tries.by_address.entry(addr).or_default();
-    if count(times) >= MAX_FAILURES {
+    if mine >= MAX_FAILURES {
         return Err(Refusal::Limited);
     }
+    let times = tries.by_address.entry(addr).or_default();
     times.push(now);
     Ok(Try { app, addr, at: now })
 }

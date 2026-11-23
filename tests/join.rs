@@ -685,40 +685,33 @@ async fn used_and_expired_codes_do_not_count_and_loopback_is_one_address() {
 }
 
 #[tokio::test]
-async fn everyone_is_refused_past_the_ceiling() {
+async fn past_the_ceiling_only_addresses_that_failed_are_refused() {
     let f = fixture();
     let code = f.invite("ana");
+    let get = |peer: &'static str, code: &str| {
+        let (f, path) = (&f, format!("/join/{code}"));
+        async move { f.call("GET", &path, None, Some(peer), &[]).await.0 }
+    };
     // 200 codes that do not exist, from 20 addresses (10 each).
     for a in 0..20 {
         for _ in 0..10 {
-            let peer = format!("10.1.{a}.1:1");
-            let (status, ..) = f
-                .call("GET", "/join/ZZZZ-ZZZZ", None, Some(&peer), &[])
-                .await;
-            assert_eq!(status, StatusCode::NOT_FOUND);
+            let peer: &'static str = Box::leak(format!("10.1.{a}.1:1").into_boxed_str());
+            assert_eq!(get(peer, "ZZZZ-ZZZZ").await, StatusCode::NOT_FOUND);
         }
     }
-    let (status, ..) = f
-        .call(
-            "GET",
-            &format!("/join/{code}"),
-            None,
-            Some("10.2.0.1:1"),
-            &[],
-        )
-        .await;
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    // Someone with a good code, from an address that never failed, still gets in: many
+    // addresses guessing cannot shut the team's invitations.
+    assert_eq!(get("10.2.0.1:1", &code).await, StatusCode::OK);
+    // A new address gets one try at a code that does not exist, then nothing for the hour,
+    // not even with a good code.
+    assert_eq!(get("10.3.0.1:1", "ZZZZ-ZZZZ").await, StatusCode::NOT_FOUND);
+    assert_eq!(
+        get("10.3.0.1:1", &code).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    // An hour later the tries are old: it may try again.
     f.app.clock.advance(3600);
-    let (status, ..) = f
-        .call(
-            "GET",
-            &format!("/join/{code}"),
-            None,
-            Some("10.2.0.1:1"),
-            &[],
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(get("10.3.0.1:1", &code).await, StatusCode::OK);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
