@@ -8,6 +8,7 @@ use std::process::{Command, Output};
 
 use relevo::config::Config;
 use relevo::{App, Clock, api, db, serve};
+use ring::signature::{Ed25519KeyPair, KeyPair};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -40,9 +41,27 @@ fn tar_gz(src: &Path, out: &Path) {
     assert!(ok);
 }
 
-/// A dist of 0.7.0 with both adapters (no binary, no signature: setting up checks the
-/// manifest's SHA-256, as the install script does).
-fn make_dist(root: &Path) -> PathBuf {
+fn key() -> Ed25519KeyPair {
+    let rng = ring::rand::SystemRandom::new();
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+    Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap()
+}
+
+/// `key`'s public half as a PEM, for `RELEVO_TEST_RELEASE_KEY` (a debug build only).
+fn pem(key: &Ed25519KeyPair) -> String {
+    use base64::Engine;
+    let mut der = vec![
+        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+    ];
+    der.extend_from_slice(key.public_key().as_ref());
+    format!(
+        "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n",
+        base64::engine::general_purpose::STANDARD.encode(der)
+    )
+}
+
+/// A dist of 0.7.0 with both adapters (no binary), its manifest signed by `key`.
+fn make_dist(root: &Path, key: &Ed25519KeyPair) -> PathBuf {
     let dist = root.join("dist");
     let work = root.join("work");
     std::fs::create_dir_all(work.join("pi/src")).unwrap();
@@ -69,6 +88,8 @@ fn make_dist(root: &Path) -> PathBuf {
     }
     let manifest = json!({ "version": "0.7.0", "files": files });
     std::fs::write(dist.join("manifest.json"), manifest.to_string()).unwrap();
+    let sig = key.sign(manifest.to_string().as_bytes());
+    std::fs::write(dist.join("manifest.sig"), sig.as_ref()).unwrap();
     dist
 }
 
@@ -90,6 +111,8 @@ fn fake(bin: &Path, program: &str, log: &Path) {
 struct Machine {
     temp: Temp,
     url: String,
+    /// The PEM of the key the dist is signed with, which the binary is told to trust.
+    key: String,
 }
 
 impl Machine {
@@ -99,7 +122,8 @@ impl Machine {
         let temp = Temp(std::env::temp_dir().join(db::random_id("relevo-setup-")));
         std::fs::create_dir_all(temp.0.join("home")).unwrap();
         std::fs::create_dir_all(temp.0.join("bin")).unwrap();
-        let dist = make_dist(&temp.0);
+        let key = key();
+        let dist = make_dist(&temp.0, &key);
         let app = App::with_dist(
             db::open(":memory:").unwrap(),
             Clock::system(),
@@ -117,7 +141,11 @@ impl Machine {
             None,
             serve::Limits::default(),
         ));
-        let m = Machine { temp, url };
+        let m = Machine {
+            temp,
+            url,
+            key: pem(&key),
+        };
         let config = Config {
             url: m.url.clone(),
             token,
@@ -164,6 +192,7 @@ impl Machine {
             .env("PATH", format!("{}:/usr/bin:/bin", self.bin().display()))
             .env("HERMES_HOME", self.home().join("hermes-home"))
             .env("RELEVO_AUTO_UPDATE", "0")
+            .env("RELEVO_TEST_RELEASE_KEY", &self.key)
             .stdin(std::process::Stdio::null())
             .output()
             .unwrap()
@@ -178,8 +207,20 @@ fn output(out: &Output) -> String {
     )
 }
 
+/// Whether the binary trusts `RELEVO_TEST_RELEASE_KEY`: only a debug build does, so a release
+/// build (the release workflow tests one) installs no adapter from these dists.
+fn trusts_the_test_key() -> bool {
+    if !cfg!(debug_assertions) {
+        eprintln!("skipped: a release build trusts only the release key");
+    }
+    cfg!(debug_assertions)
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn named_agents_are_set_up_without_asking() {
+    if !trusts_the_test_key() {
+        return;
+    }
     let m = Machine::new().await;
     let out = tokio::task::block_in_place(|| m.relevo(&["setup", "claude-code", "pi", "hermes"]));
     let said = output(&out);
@@ -268,6 +309,9 @@ async fn without_a_terminal_nothing_changes_and_it_says_what_to_run() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn one_agent_that_fails_leaves_the_others_set_up() {
+    if !trusts_the_test_key() {
+        return;
+    }
     let m = Machine::new().await;
     std::fs::write(m.bin().join("hermes.fail"), "").unwrap();
     // A folder there that is not the plugin is never replaced.
@@ -294,4 +338,52 @@ async fn one_agent_that_fails_leaves_the_others_set_up() {
         "{said}"
     );
     assert!(!said.contains("Restart pi"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_adapter_is_installed_only_from_a_signed_manifest() {
+    let m = Machine::new().await;
+    let dist = m.temp.0.join("dist");
+    let pi = m.home().join(".local/share/relevo/pi");
+
+    // Signed by another key: the server may have been changed. Nothing is installed.
+    let other = key().sign(&std::fs::read(dist.join("manifest.json")).unwrap());
+    let good = std::fs::read(dist.join("manifest.sig")).unwrap();
+    std::fs::write(dist.join("manifest.sig"), other.as_ref()).unwrap();
+    let out = tokio::task::block_in_place(|| m.relevo(&["setup", "pi"]));
+    let said = output(&out);
+    assert!(
+        said.contains("are not signed by the release key: nothing was installed"),
+        "{said}"
+    );
+    assert!(!pi.join("package.json").exists(), "{said}");
+    assert!(m.ran().is_empty(), "{said}");
+
+    // A file changed with its manifest, the old signature kept: refused too.
+    std::fs::write(dist.join("manifest.sig"), &good).unwrap();
+    let manifest = std::fs::read_to_string(dist.join("manifest.json")).unwrap();
+    std::fs::write(
+        dist.join("manifest.json"),
+        manifest.replace("0.7.0", "9.9.9"),
+    )
+    .unwrap();
+    let out = tokio::task::block_in_place(|| m.relevo(&["setup", "pi"]));
+    assert!(
+        output(&out).contains("not signed by the release key"),
+        "{}",
+        output(&out)
+    );
+    assert!(!pi.join("package.json").exists());
+
+    // No signature at all.
+    std::fs::write(dist.join("manifest.json"), manifest).unwrap();
+    std::fs::remove_file(dist.join("manifest.sig")).unwrap();
+    let out = tokio::task::block_in_place(|| m.relevo(&["setup", "pi"]));
+    assert!(
+        output(&out).contains("are not signed (no manifest.sig): nothing was installed"),
+        "{}",
+        output(&out)
+    );
+    assert!(!pi.join("package.json").exists());
+    assert!(m.ran().is_empty());
 }

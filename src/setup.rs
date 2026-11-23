@@ -272,7 +272,8 @@ async fn set_up(agent: Agent, command: Option<bool>, statusline: Option<bool>) -
 /// Installs the adapter `kind` in `dir` from the server Relevo is connected to.
 async fn install(kind: Kind, dir: &Path) -> Result<String> {
     let config = config::load(config::env)?;
-    update::install_from_server(&config, &config::env, kind, dir).await
+    let key = update::PublicKey::for_setup(&config::env)?;
+    update::install_from_server(&config, &config::env, &key, kind, dir).await
 }
 
 /// After `connect`: installs the /relevo command for Claude Code when Claude Code's folder is

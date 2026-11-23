@@ -64,7 +64,7 @@ claude --dangerously-load-development-channels server:relevo
 - **pi**: the extension from the server's dist (`relevo-pi-<version>.tar.gz`), unpacked into `$XDG_DATA_HOME/relevo/pi` (`~/.local/share/relevo/pi`), then `pi install` of that folder, and registered for updates. Restart pi.
 - **Hermes**: the plugin from the server's dist (`relevo-hermes-<version>.tar.gz`), into `plugins/relevo` of `$HERMES_HOME` (`~/.hermes`), then, with Hermes's own commands: `hermes plugins enable relevo`, `hermes config set plugins.entries.relevo.allow_gateway_injection true` (so `/relevo` in chats hands answers to Hermes), `hermes config set platforms.relevo.enabled true` (its gateway platform, with the server and token `relevo connect` saved), `hermes config set RELEVO_ALLOW_ALL_USERS true` (it answers any teammate: the server is the trust boundary), and `hermes tools enable relevo` for the `relevo` and `cli` platforms; registered for updates. Restart the Hermes gateway (`hermes gateway restart`) when it suits you.
 
-A folder there that is not that adapter, or one in a git checkout, is left as it is. The adapters are checked against the size and SHA-256 the server's manifest lists (the server the person joined); `relevo update` checks the release's signature from then on.
+A folder there that is not that adapter, or one in a git checkout, is left as it is. The adapters are checked as `relevo update` checks them: the manifest's signature by the release key compiled into `relevo`, then the size and SHA-256 it lists; a server whose dist is not signed gets nothing installed.
 
 ## The `/relevo` command (Claude Code)
 
