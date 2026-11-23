@@ -332,8 +332,9 @@ def _mentions(style: Plain, text: str) -> str:
     return "".join(out) + style.esc(text[last:])
 
 
-NOT_CONNECTED = ("Relevo isn't connected on this machine.", "Run ", "relevo connect <server>",
-                 " with the token your admin gave you, or set RELEVO_URL and RELEVO_TOKEN in this Hermes profile.")
+NOT_CONNECTED = ("Relevo isn't connected on this machine.", "Ask your admin for an invitation link, or run ",
+                 "relevo connect <server>",
+                 " and paste your token when it asks. Or set RELEVO_URL and RELEVO_TOKEN in this Hermes profile.")
 
 
 def render(shown: dict, style: Plain) -> str:

@@ -457,8 +457,9 @@ fn error(e: Error) -> String {
 }
 
 /// What `waiting` says when this machine has no server or token (markdown, as the list).
-const NOT_CONNECTED: &str = "**Relevo isn't connected on this machine.** Run `relevo connect \
-                             <server>` with the token your admin gave you.";
+const NOT_CONNECTED: &str = "**Relevo isn't connected on this machine.** Ask your admin for an \
+                             invitation link, or run `relevo connect <server>` and paste your token \
+                             when it asks.";
 
 /// What `waiting` says when the server has no timeline.
 const NO_TIMELINE: &str = "This Relevo server has no timeline, which /relevo reads: it is older \

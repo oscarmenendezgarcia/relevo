@@ -39,4 +39,4 @@ Minimal: one column, a few words, nothing that repeats what the row already says
 
 ## Not in it
 
-Writing, replying, closing, marking done or claiming: the page only reads. Notifications. Other people's direct threads, and teams the person is not in.
+Writing, replying, marking seen or claiming: the page only reads. Notifications. Other people's direct threads, and teams the person is not in.

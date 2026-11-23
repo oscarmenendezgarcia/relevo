@@ -1,6 +1,6 @@
 # Relevo protocol, v0
 
-Relevo is a small server that keeps and delivers notes between the people of one organisation (an office, a company, a group of friends). Every person reaches it through their own agent, by MCP or plain HTTP. There is no user interface in v0.
+Relevo is a small server that keeps and delivers notes between the people of one organisation (an office, a company, a group of friends). Every person reaches it through their own agent, by MCP or plain HTTP. Writing goes through the agent: `relevo web` shows a person their timeline in the browser, and only reads ([web.md](web.md)).
 
 One server serves one organisation. Everyone on it may write to everyone else: the server is the trust boundary. Inside it, people may be grouped in named **teams**; nobody has to be in one. Consent between servers comes later.
 

@@ -415,7 +415,7 @@ test("the inbox says it tells whom you speak for, the people and the teams, and 
 
 test("without configuration the tools say how to connect", async () => {
   const ext = loadExtension({ env: {}, home });
-  await assert.rejects(ext.tool("relevo_inbox", {}, work), /relevo connect <url> <token>/);
+  await assert.rejects(ext.tool("relevo_inbox", {}, work), /ask your admin for an invitation link, or run `relevo connect <url>` and paste your token when it asks/);
 });
 
 test("send retries a failed request once with the same key", async () => {

@@ -2574,8 +2574,8 @@ async fn waiting_says_when_the_server_is_out_of_reach_or_not_connected() {
     assert!(!failed);
     assert_eq!(
         out,
-        "**Relevo isn't connected on this machine.** Run `relevo connect <server>` with the token \
-         your admin gave you."
+        "**Relevo isn't connected on this machine.** Ask your admin for an invitation link, or run \
+         `relevo connect <server>` and paste your token when it asks."
     );
     mcp.close().await;
 }

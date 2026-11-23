@@ -234,7 +234,7 @@ export function help(len: number): string {
   return `/relevo 1 <your answer> · /relevo ${Math.min(2, len)} to open it · /relevo seen ${Math.min(3, len)}`;
 }
 
-export const NOT_CONNECTED = "Relevo isn't connected on this machine. Run relevo connect <server> with the token your admin gave you.";
+export const NOT_CONNECTED = "Relevo isn't connected on this machine. Ask your admin for an invitation link, or run relevo connect <server> and paste your token when it asks.";
 
 /**
  * What /relevo shows, as plain text: what the model reads (the person sees it drawn by `draw`).
@@ -315,9 +315,9 @@ export function draw(shown: Shown, theme: Theme): string {
     case "not-connected":
       return (
         theme.bold("Relevo isn't connected on this machine.") +
-        " Run " +
+        " Ask your admin for an invitation link, or run " +
         theme.fg("accent", "relevo connect <server>") +
-        " with the token your admin gave you."
+        " and paste your token when it asks."
       );
     case "error":
       return theme.fg("error", shown.message);

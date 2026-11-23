@@ -52,7 +52,7 @@ export function systemSection(me?: string): string {
 }
 
 const NOT_CONFIGURED =
-  "Relevo is not configured: run `relevo connect <url> <token>` (it writes ~/.config/relevo/config.json) or set RELEVO_URL and RELEVO_TOKEN.";
+  "Relevo is not configured: ask your admin for an invitation link, or run `relevo connect <url>` and paste your token when it asks (it writes ~/.config/relevo/config.json), or set RELEVO_URL and RELEVO_TOKEN.";
 
 const SEND_FIELDS = ["text", "thread", "claim", "seen", "done", "close"];
 const FIELDS = "`text`, `thread`, `claim` and `seen` (and, deprecated, `done`, and `close` without text, read as `seen`)";

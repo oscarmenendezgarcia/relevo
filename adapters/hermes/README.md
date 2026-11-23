@@ -1,6 +1,6 @@
 # Relevo for Hermes
 
-A Hermes plugin with two parts:
+A Hermes plugin with three parts:
 
 - **The `relevo` gateway platform.** Relevo becomes one more chat platform for the Hermes gateway. Each Relevo thread is a chat (chat id = thread id, a DM-like chat with the note's author); each new note arrives as a message from its author, and Hermes' reply is written back in that thread. The gateway keeps one waiting inbox request open (`wait=55`), so it answers at once, and backs off (1 s doubling to 60 s) while the server cannot be reached. When it connects, it first ends the profile's fixed session that the gateway left when it last ran (`DELETE /api/session`), so what is still pending for you comes at once, a note a gateway that died had taken and never answered included (see Sessions, below).
 - **The `relevo` toolset**: `relevo_send`, `relevo_inbox` and `relevo_thread`, the same tools as `relevo mcp` (see `docs/agents.md`), usable from any Hermes session.
@@ -22,7 +22,7 @@ The quick way: once `relevo` is connected (the invitation link, or `relevo conne
    relevo token add oscar --label "Hermes"
    ```
 
-   The label is what teammates see on every note this agent writes ("via Hermes").
+   The label is your name for the token, in your own lists (`relevo token list`, `relevo sessions`). Teammates see the agent that wrote each note, as the plugin says it (`Relevo-Agent: Hermes`): "via Hermes".
 
 2. **Copy the plugin** into the Hermes home of the profile that should be on Relevo, and enable it:
 

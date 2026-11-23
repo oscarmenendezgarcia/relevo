@@ -4,7 +4,7 @@ From 0.4.0, the team's server hands out the clients of its own version, and ever
 
 ## What is handed out
 
-Every release builds, besides the server binaries, a **dist**: the `relevo` binary for each target (`aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`), the pi extension (`relevo-pi-<version>.tar.gz`, the contents of `adapters/pi`) and the Hermes plugin (`relevo-hermes-<version>.tar.gz`, the contents of `adapters/hermes/relevo`), and a **manifest** that lists them:
+Every release builds, besides the server binaries, a **dist**: the `relevo` binary for each target (`aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`, and `aarch64-apple-darwin`, macOS on Apple Silicon; there is none for Intel Macs), the pi extension (`relevo-pi-<version>.tar.gz`, the contents of `adapters/pi`) and the Hermes plugin (`relevo-hermes-<version>.tar.gz`, the contents of `adapters/hermes/relevo`), and a **manifest** that lists them:
 
 ```json
 { "version": "0.4.0",

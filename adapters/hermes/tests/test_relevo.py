@@ -3294,8 +3294,9 @@ class Command(Base):
         try:
             os.environ["RELEVO_CONFIG"] = str(_TMP / "nowhere.json")
             self.assertEqual(self.run_command(platform="tui"),
-                             "Relevo isn't connected on this machine. Run relevo connect <server> with the token "
-                             "your admin gave you, or set RELEVO_URL and RELEVO_TOKEN in this Hermes profile.")
+                             "Relevo isn't connected on this machine. Ask your admin for an invitation link, or "
+                             "run relevo connect <server> and paste your token when it asks. Or set RELEVO_URL "
+                             "and RELEVO_TOKEN in this Hermes profile.")
             self.assertIn("`relevo connect <server>`", self.run_command(platform="discord"))
             del os.environ["RELEVO_CONFIG"]
             with socket.socket() as sock:

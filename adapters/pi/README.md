@@ -28,11 +28,11 @@ A thread to a team or on the board that does not name you is optional: the agent
 
 ## Install
 
-You need pi, Node 22.18 or later (pi's own Node is fine), and a token from your Relevo admin (`relevo invite` or `relevo token add`). Use it with a Relevo server 0.4.0 or later, which reads who a note is for from its `@` mentions: the extension never sends the old `to`, so a 0.3.x server refuses every new thread (writing in an existing one still works there, and the rest is shown without teams or whom a note reached). A server before 0.3.0 does not say what is pending (`pending`; the extension no longer reads 0.2.x's `waiting_for_you`), so nothing shows as pending there.
+You need pi, Node 22.18 or later (pi's own Node is fine), and an invitation link from your Relevo admin (`relevo invite`), or a token (`relevo token add`). Use it with a Relevo server 0.4.0 or later, which reads who a note is for from its `@` mentions: the extension never sends the old `to`, so a 0.3.x server refuses every new thread (writing in an existing one still works there, and the rest is shown without teams or whom a note reached). A server before 0.3.0 does not say what is pending (`pending`; the extension no longer reads 0.2.x's `waiting_for_you`), so nothing shows as pending there.
 
 1. Tell the adapter where the server is, in one of two ways:
 
-   - `~/.config/relevo/config.json` (mode 0600), which `relevo connect <url> <token>` writes:
+   - `~/.config/relevo/config.json` (mode 0600), which `relevo connect` writes (the invitation link runs it; with a token, run `relevo connect <url>` and paste the token when it asks):
 
      ```json
      { "url": "https://relevo.example.com", "token": "rlv_…" }

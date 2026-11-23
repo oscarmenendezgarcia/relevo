@@ -226,8 +226,8 @@ enum Command {
 
 #[derive(Subcommand)]
 enum TeamCommand {
-    /// Create a team, with nobody in it. Its name cannot be a person's handle, `team` or
-    /// `equipo`.
+    /// Create a team, with nobody in it. Its name cannot be a person's handle, `team`, `equipo`
+    /// or `relevo` (the server's own person).
     Add {
         name: String,
         /// What the team is, in a few words ("Backend").
