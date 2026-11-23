@@ -829,7 +829,10 @@ impl Relevo {
         let mut head = String::new();
         let id = match waiting::numbers(&p.id) {
             Some(numbers) if numbers.len() == 1 => {
-                let (_, entries) = self.resolve(&numbers)?;
+                // `thread` only reads: no "Nothing was sent" here.
+                let (_, entries) = self
+                    .resolve(&numbers)
+                    .map_err(|e| e.replace(" Nothing was sent.", ""))?;
                 // Who opened it and its title are in the thread below, fenced as rule 5 says.
                 let (n, e) = &entries[0];
                 head = format!("Thread {n} of your list:\n");

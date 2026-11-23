@@ -239,7 +239,9 @@ _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
         "contexts) and the teams (name, title, members), to mention with @. Look here before opening a "
         "thread: an answer may already be waiting.\n\n" + client.TOOL_RULES,
         {"all": {"type": "boolean",
-                 "description": "Every thread of your person, whichever session it is for."}},
+                 "description": "Also the threads held by your person's other sessions or addressed to "
+                                "their other contexts. Only needed to see those: without it the inbox "
+                                "already shows everything new or waiting for this session."}},
         [],
     ),
     "relevo_thread": (

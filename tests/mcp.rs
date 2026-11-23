@@ -2191,6 +2191,8 @@ async fn list_numbers_reply_open_and_refuse_what_was_handled_since() {
     assert!(failed && err.contains("run /relevo first"), "{err}");
     let (failed, err) = oscar.call("thread", json!({ "id": "1" })).await;
     assert!(failed && err.contains("run /relevo first"), "{err}");
+    // `thread` only reads: it does not say nothing was sent.
+    assert!(!err.contains("Nothing was sent"), "{err}");
 
     oscar.ok("waiting", json!({})).await;
     let (failed, err) = oscar
@@ -2198,6 +2200,11 @@ async fn list_numbers_reply_open_and_refuse_what_was_handled_since() {
         .await;
     assert!(
         failed && err.contains("There is no thread 4 in your last list (1 to 3)"),
+        "{err}"
+    );
+    let (failed, err) = oscar.call("thread", json!({ "id": "4" })).await;
+    assert!(
+        failed && err.ends_with("(1 to 3): run /relevo to see it again."),
         "{err}"
     );
     let (failed, err) = oscar
