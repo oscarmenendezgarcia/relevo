@@ -183,6 +183,20 @@ enum Command {
         #[arg(long)]
         no_open: bool,
     },
+    /// Write a note from a script, a cron job or CI, without an agent: open a thread for whom its
+    /// @mentions name (none: the global board), or answer one with --reply. Prints the thread's
+    /// id on stdout.
+    Send {
+        /// The note, or - to read it from stdin.
+        text: String,
+        /// Answer in this thread (its id) instead of opening one.
+        #[arg(long, value_name = "THREAD")]
+        reply: Option<String>,
+        /// The name teammates see the note came "via": 1 to 40 letters, digits, spaces or
+        /// .-_+()/
+        #[arg(long, value_name = "NAME", default_value = "CLI", value_parser = via_name)]
+        via: String,
+    },
     /// Print one line for Claude Code's status line: how many threads wait on you, or that the
     /// server is offline; nothing when Relevo is not configured. Reads only, at most once every
     /// 15 seconds (a cache in ~/.cache/relevo).
@@ -491,6 +505,61 @@ async fn update_command(req: &update::Request) -> Result<()> {
     Ok(())
 }
 
+/// `--via`: what the server takes as `Relevo-Agent` (docs/protocol.md); it ignores anything else.
+fn via_name(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    match relevo::auth::valid_agent(name) {
+        true => Ok(name.to_string()),
+        false => Err("1 to 40 letters, digits, spaces or .-_+()/".into()),
+    }
+}
+
+/// `relevo send`: one note, in a session that ends with it. A token keeps at most 20 sessions,
+/// so one left behind by each run would push out its person's agents; and a reply holds its
+/// thread for the session that wrote it, away from their agents.
+async fn send(text: String, reply: Option<String>, via: String) -> Result<()> {
+    let c = config::load(config::env)?;
+    if let Some(warning) = config::plain_http_warning(&c.url) {
+        eprintln!("{warning}");
+    }
+    let dir = std::env::current_dir().unwrap_or_else(|_| "/".into());
+    let client = client::Client::new(&c, std::env::var("RELEVO_CONTEXT").ok(), dir)?;
+    let _ = client.agent.set(via);
+    let sent = async {
+        let mut body = serde_json::Map::new();
+        if let Some(thread) = &reply {
+            // Read first: a reply handles only the notes that have reached its session.
+            client.thread(thread).await?;
+            body.insert("thread".into(), thread.as_str().into());
+        }
+        body.insert("text".into(), text.into());
+        client.send(body).await
+    }
+    .await;
+    if let Err(e) = client.end(std::time::Duration::from_secs(2)).await {
+        eprintln!("ending the session: {e}");
+    }
+    let v = sent.map_err(|e| {
+        let mut out = e.to_string();
+        if let client::Error::Api { code, body, .. } = &e
+            && code == "UNKNOWN_PERSON"
+        {
+            out.push_str("\nNothing was sent.\n\n");
+            out.push_str(&relevo::render::team(&body["error"]["valid"], None));
+            out.push_str(&relevo::render::teams(&body["error"]["teams"], None));
+        }
+        anyhow::anyhow!(out.trim_end().to_string())
+    })?;
+    let id = v["thread"].as_str().unwrap_or_default();
+    println!("{id}");
+    let whom = relevo::render::whom(&v, reply.is_none());
+    match reply {
+        None => eprintln!("{}", whom.trim_end()),
+        Some(_) => eprintln!("{}", format!("Replied in thread {id}. {whom}").trim_end()),
+    }
+    Ok(())
+}
+
 /// `--tls` (a certificate of its own) and `--tls-cert` (one you have) exclude each other, and
 /// `--tls-name` is for the first only. Checked here rather than by clap, which takes
 /// `RELEVO_TLS=false` from the environment as `--tls` given.
@@ -755,6 +824,19 @@ async fn main() -> Result<()> {
             std::process::exit(0);
         }
         Command::Mcp { channel } => return mcp::run(channel).await,
+        Command::Send { text, reply, via } => {
+            let text = match text.as_str() {
+                "-" => std::io::read_to_string(std::io::stdin())?,
+                _ => text,
+            };
+            if text.trim().is_empty() {
+                use clap::CommandFactory;
+                Cli::command()
+                    .error(clap::error::ErrorKind::InvalidValue, "the note is empty")
+                    .exit();
+            }
+            return send(text, reply, via).await;
+        }
         Command::Web { port, no_open } => return relevo::web::run(port, no_open).await,
         Command::Update {
             check,
@@ -1063,6 +1145,7 @@ async fn main() -> Result<()> {
         | Command::Setup { .. }
         | Command::Statusline
         | Command::Mcp { .. }
+        | Command::Send { .. }
         | Command::Web { .. }
         | Command::Update { .. }
         | Command::Backup { .. }
@@ -1124,6 +1207,31 @@ mod tests {
             } => (tls_cert.clone(), tls_key.clone()),
             _ => panic!("not serve"),
         }
+    }
+
+    #[test]
+    fn send_takes_the_text_a_thread_and_a_via() {
+        let send = |args: &[&str]| match Cli::try_parse_from([&["relevo", "send"], args].concat()) {
+            Ok(Cli {
+                command: Command::Send { text, reply, via },
+                ..
+            }) => Ok((text, reply, via)),
+            Ok(_) => panic!("not send"),
+            Err(e) => Err(e.exit_code()),
+        };
+        assert_eq!(
+            send(&["@ana hi"]),
+            Ok(("@ana hi".into(), None, "CLI".into()))
+        );
+        assert_eq!(
+            send(&["--reply", "r_1", "--via", " GitHub Actions ", "-"]),
+            Ok(("-".into(), Some("r_1".into()), "GitHub Actions".into()))
+        );
+        // A name the server would ignore, and a missing note, are misuse.
+        assert_eq!(send(&["--via", "a@b", "hi"]), Err(2));
+        assert_eq!(send(&["--via", " ", "hi"]), Err(2));
+        assert_eq!(send(&["--via", &"x".repeat(41), "hi"]), Err(2));
+        assert_eq!(send(&[]), Err(2));
     }
 
     /// One test, because it changes the process environment.

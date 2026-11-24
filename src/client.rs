@@ -10,8 +10,8 @@ use serde_json::Value;
 use crate::config::Config;
 
 /// What every request says of its client (`Relevo-Client`, docs/protocol.md): `relevo mcp`, and
-/// the binary's other commands that talk to the server (`connect`, `update`, `web`), all one
-/// binary of this version.
+/// the binary's other commands that talk to the server (`connect`, `send`, `update`, `web`), all
+/// one binary of this version.
 pub const CLIENT: &str = concat!("mcp/", env!("CARGO_PKG_VERSION"));
 
 /// How long an ordinary request may take.
@@ -30,7 +30,7 @@ pub struct Client {
     /// The handle of the person the token acts for (`you`), once an answer has said it.
     you: Mutex<Option<String>>,
     /// `Relevo-Agent`, the agent this session runs for (`relevo mcp`: its MCP client, once it
-    /// has said which); never set by `connect`, `update` or `web`.
+    /// has said which; `send`: its `--via`); never set by `connect`, `update` or `web`.
     pub agent: OnceLock<String>,
 }
 

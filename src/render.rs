@@ -653,7 +653,7 @@ pub fn seen(v: &Value, received: bool) -> String {
 /// Whom a `send` reached, from `kind`, `to`, `added` and `reached`, as a sentence to go before
 /// what it wrote; empty from a server that does not say (before 0.4.0). `opened`: the `send`
 /// opened the thread.
-fn whom(v: &Value, opened: bool) -> String {
+pub fn whom(v: &Value, opened: bool) -> String {
     let Some(reached) = v["reached"].as_i64() else {
         return String::new();
     };
