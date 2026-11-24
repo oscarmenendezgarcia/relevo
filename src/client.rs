@@ -10,8 +10,8 @@ use serde_json::Value;
 use crate::config::Config;
 
 /// What every request says of its client (`Relevo-Client`, docs/protocol.md): `relevo mcp`, and
-/// the binary's other commands that talk to the server (`connect`, `update`, `web`), all one
-/// binary of this version.
+/// the binary's other commands that talk to the server (`connect`, `send`, `update`, `web`), all
+/// one binary of this version.
 pub const CLIENT: &str = concat!("mcp/", env!("CARGO_PKG_VERSION"));
 
 /// How long an ordinary request may take.
@@ -30,7 +30,7 @@ pub struct Client {
     /// The handle of the person the token acts for (`you`), once an answer has said it.
     you: Mutex<Option<String>>,
     /// `Relevo-Agent`, the agent this session runs for (`relevo mcp`: its MCP client, once it
-    /// has said which); never set by `connect`, `update` or `web`.
+    /// has said which; `send`: its `--via`); never set by `connect`, `update` or `web`.
     pub agent: OnceLock<String>,
 }
 
@@ -296,8 +296,14 @@ impl Client {
 
     /// `POST /api/send` with a fresh idempotency key, sent again once with the same key when the
     /// first try got no answer from Relevo itself (no answer at all, or a gateway error from a
-    /// proxy in front of it): the server may have written the note, and a replay is safe.
-    pub async fn send(&self, mut body: serde_json::Map<String, Value>) -> Result<Value, Error> {
+    /// proxy in front of it): the server may have written the note, and a replay is safe. If the
+    /// replay gets no answer either, the error says to check `with` (where the caller can look,
+    /// e.g. "thread or inbox") before sending it again.
+    pub async fn send(
+        &self,
+        mut body: serde_json::Map<String, Value>,
+        with: &str,
+    ) -> Result<Value, Error> {
         body.insert("key".into(), crate::db::random_id("k_").into());
         let body = Value::Object(body);
         let post = || self.http.post(format!("{}/api/send", self.url)).json(&body);
@@ -305,8 +311,8 @@ impl Client {
         if unanswered(&v) {
             v = self.call(post(), TIMEOUT).await;
         }
-        let maybe = "; the note may have been written: check with thread or inbox before sending \
-                     it again";
+        let maybe =
+            format!("; the note may have been written: check with {with} before sending it again");
         match v {
             Err(Error::Network(e)) => Err(Error::Network(format!("{e}{maybe}"))),
             Err(Error::Api {
@@ -473,7 +479,7 @@ mod tests {
         let mut body = serde_json::Map::new();
         body.insert("thread".into(), "r_x".into());
         body.insert("text".into(), "hi".into());
-        let out = client.send(body).await.unwrap();
+        let out = client.send(body, "thread or inbox").await.unwrap();
         assert_eq!(out["note"], "n_x");
         let (first, second) = server.await.unwrap();
         let first: Value = serde_json::from_str(&first).unwrap();
@@ -527,7 +533,7 @@ mod tests {
         ])
         .await;
         let client = Client::new(&config, Some(String::new()), std::env::temp_dir()).unwrap();
-        let out = client.send(body()).await.unwrap();
+        let out = client.send(body(), "thread or inbox").await.unwrap();
         assert_eq!(out["note"], "n_x");
         let bodies = server.await.unwrap();
         assert_eq!(bodies[0], bodies[1]);
@@ -535,16 +541,30 @@ mod tests {
         let gateway = ("504 Gateway Timeout", "<html>timeout</html>");
         let (config, server) = answering(vec![gateway, gateway]).await;
         let client = Client::new(&config, Some(String::new()), std::env::temp_dir()).unwrap();
-        let err = client.send(body()).await.unwrap_err().to_string();
+        let err = client
+            .send(body(), "thread or inbox")
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("504"), "{err}");
-        assert!(err.contains("the note may have been written"), "{err}");
+        assert!(
+            err.ends_with(
+                "; the note may have been written: check with thread or inbox before sending it \
+                 again"
+            ),
+            "{err}"
+        );
         server.await.unwrap();
 
         // Relevo's own errors are final, and say nothing of the kind.
         let busy = r#"{"error":{"code":"THREAD_BUSY","message":"busy"}}"#;
         let (config, server) = answering(vec![("429 Too Many Requests", busy)]).await;
         let client = Client::new(&config, Some(String::new()), std::env::temp_dir()).unwrap();
-        let err = client.send(body()).await.unwrap_err().to_string();
+        let err = client
+            .send(body(), "thread or inbox")
+            .await
+            .unwrap_err()
+            .to_string();
         assert_eq!(err, "THREAD_BUSY: busy");
         assert_eq!(server.await.unwrap().len(), 1);
     }

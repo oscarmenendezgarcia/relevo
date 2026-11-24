@@ -655,7 +655,7 @@ impl Relevo {
             }
             forget(&self.pushed, &e.id);
             body.insert("thread".into(), e.id.clone().into());
-            let r = client.send(body.clone()).await;
+            let r = client.send(body.clone(), "thread or inbox").await;
             self.reached(&r);
             let v = match r {
                 Ok(v) => v,
@@ -777,7 +777,7 @@ impl Relevo {
         let seen =
             [p.seen, p.done].contains(&Some(true)) || (p.text.is_none() && p.close == Some(true));
         let body = send_body(p);
-        let v = client.send(body).await.map_err(error)?;
+        let v = client.send(body, "thread or inbox").await.map_err(error)?;
         if let Some(id) = v["thread"].as_str() {
             forget(&self.pushed, id);
         }
