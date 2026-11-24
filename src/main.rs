@@ -544,7 +544,8 @@ async fn send(text: String, reply: Option<String>, via: String) -> Result<()> {
                 eprintln!("ending the session: {e}");
             }
         }
-        // Unreached or refused: no session was recorded, so there is none to end.
+        // Refused: no session was recorded. Unreached: ending would most likely fail too, after
+        // a wait (a request that timed out may have left its session, which lapses by itself).
         Err(e) if e.unreachable() => {}
         Err(client::Error::Api { code, .. }) if code == "UNAUTHORIZED" => {}
         Err(_) => {

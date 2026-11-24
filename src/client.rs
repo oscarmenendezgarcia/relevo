@@ -547,7 +547,13 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("504"), "{err}");
-        assert!(err.contains("the note may have been written"), "{err}");
+        assert!(
+            err.ends_with(
+                "; the note may have been written: check with thread or inbox before sending it \
+                 again"
+            ),
+            "{err}"
+        );
         server.await.unwrap();
 
         // Relevo's own errors are final, and say nothing of the kind.
