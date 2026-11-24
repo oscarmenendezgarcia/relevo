@@ -572,22 +572,23 @@ impl Relevo {
         )
     }
 
-    /// The threads of the last list that `numbers` name, with the list.
+    /// The threads of the last list that `numbers` name, with the list; or why not, for the
+    /// caller to say whether anything was sent.
     fn resolve(&self, numbers: &[usize]) -> Result<(Listed, Vec<(usize, waiting::Entry)>), String> {
         let listed = lock(&self.listed).clone().ok_or(
             "There is no list in this session yet: run /relevo first (the `waiting` tool), then \
-             use its numbers. Nothing was sent.",
+             use its numbers.",
         )?;
         let mut out: Vec<(usize, waiting::Entry)> = vec![];
         for &n in numbers {
             let Some(e) = n.checked_sub(1).and_then(|i| listed.entries.get(i)) else {
                 return Err(match listed.entries.len() {
-                    0 => "Your last list had nothing waiting on you: run /relevo again. Nothing \
-                          was sent."
-                        .to_string(),
+                    0 => {
+                        "Your last list had nothing waiting on you: run /relevo again.".to_string()
+                    }
                     len => format!(
                         "There is no thread {n} in your last list (1 to {len}): run /relevo to \
-                         see it again. Nothing was sent."
+                         see it again."
                     ),
                 });
             };
@@ -617,7 +618,9 @@ impl Relevo {
                     .into(),
             );
         }
-        let (listed, entries) = self.resolve(&numbers)?;
+        let (listed, entries) = self
+            .resolve(&numbers)
+            .map_err(|e| format!("{e} Nothing was sent."))?;
         let mut body = send_body(SendParams { thread: None, ..p });
         let now = crate::db::now_unix();
         let (mut done, mut notes) = (vec![], vec![]);
@@ -830,10 +833,7 @@ impl Relevo {
         let mut head = String::new();
         let id = match waiting::numbers(&p.id) {
             Some(numbers) if numbers.len() == 1 => {
-                // `thread` only reads: no "Nothing was sent" here.
-                let (_, entries) = self
-                    .resolve(&numbers)
-                    .map_err(|e| e.replace(" Nothing was sent.", ""))?;
+                let (_, entries) = self.resolve(&numbers)?;
                 // Who opened it and its title are in the thread below, fenced as rule 5 says.
                 let (n, e) = &entries[0];
                 head = format!("Thread {n} of your list:\n");

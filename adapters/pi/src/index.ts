@@ -217,7 +217,7 @@ export function request(args: string, listed: Listed | null): { ask: string } | 
   let bound = "";
   const check = (ns: number[]): { refuse: string } | null => {
     const r = resolveNumbers(listed, ns);
-    if (typeof r === "string") return { refuse: r };
+    if (typeof r === "string") return { refuse: `${r} Nothing was sent.` };
     bound = r.map(bind).join(" ");
     return null;
   };
@@ -491,7 +491,7 @@ export function relevoExtension(options: Options = {}) {
         throw new Error("Several list numbers go only with `seen: true` and no text (/relevo seen 1 3). Nothing was sent.");
       }
       const found = resolveNumbers(listed, ns);
-      if (typeof found === "string") throw new Error(found);
+      if (typeof found === "string") throw new Error(`${found} Nothing was sent.`);
       const list = listed as Listed;
       const c = client(cwd ?? sessionCwd);
       const now = nowSecs();
@@ -756,8 +756,7 @@ export function relevoExtension(options: Options = {}) {
         if (ns) {
           if (ns.length !== 1) throw new Error("Open one thread at a time: one list number.");
           const found = resolveNumbers(listed, ns);
-          // relevo_thread only reads: no "Nothing was sent" here.
-          if (typeof found === "string") throw new Error(found.replace(" Nothing was sent.", ""));
+          if (typeof found === "string") throw new Error(found);
           // Who opened it and its title are in the thread below, fenced as rule 5 says.
           head = `Thread ${found[0].n} of your list:\n`;
           id = found[0].id;
