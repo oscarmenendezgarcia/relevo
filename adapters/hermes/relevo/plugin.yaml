@@ -10,6 +10,7 @@ description: >
   Hermes session open threads, read the inbox and read whole threads, and the /relevo
   command lists what waits on you and hands your answers to Hermes.
 author: Relevo
+license: Apache-2.0
 # Asks discovery to import tools.py in every process (CLI and TUI included).
 provides_tools:
   - relevo_send
