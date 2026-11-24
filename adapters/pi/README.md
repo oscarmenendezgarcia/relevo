@@ -24,7 +24,7 @@ As in a chat, it is written in the note (`relevo_send` has no `to`; one given is
 
 Every `@` outside code counts: the agent writes a name without `@` when it only talks about someone, and puts code, decorators, npm scopes and emails in backticks. In a reply, `@bob` names Bob (the thread becomes pending for him) and adds him if he was not in it; a team cannot be mentioned in a reply. The answer says whom the note reached, so the agent can check it went where you meant: `Sent to @ana and @backend (7 people).`, `Posted on the global board (12 people): …`, `Added @bob to the thread: …`. A name the server does not know is refused, never sent to the board, with the people (their `about` lines and teams) and the teams (their members) to choose from.
 
-A thread to a team or on the board that does not name you is optional: the agent answers only from its own work or your files, and does not claim it; one that names you is pending for you like a direct one.
+A thread to a team or on the board that does not name you is optional: the agent answers only from its own work or the folder it works in, and does not claim it; one that names you is pending for you like a direct one.
 
 ## Install
 
