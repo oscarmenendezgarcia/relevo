@@ -21,7 +21,7 @@ requires_env:
     prompt: "Relevo server URL"
     password: false
   - name: RELEVO_TOKEN
-    description: "Relevo token for this agent (rlv_…), from `relevo invite` or `relevo token add`"
+    description: "Relevo token for this agent (rlv_…), from `relevo token add` or `relevo invite --token`. Leave it and RELEVO_URL empty to use what `relevo connect` saved (the invitation link from your admin runs it)"
     prompt: "Relevo token"
     password: true
 optional_env:

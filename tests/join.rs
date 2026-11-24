@@ -647,6 +647,19 @@ async fn an_address_that_tries_too_many_codes_is_refused_for_an_hour() {
 }
 
 #[tokio::test]
+async fn a_join_body_is_small() {
+    let f = fixture();
+    let code = f.invite("ana");
+    let big = json!({ "code": code, "pad": "x".repeat(4096) });
+    let (status, ..) = f
+        .call("POST", "/api/join", Some(big), Some("10.0.0.1:1"), &[])
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // Refused before it was read: it counts as no try, and the code still works.
+    assert_eq!(f.join(&code).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn used_and_expired_codes_do_not_count_and_loopback_is_one_address() {
     let f = fixture();
     let used = f.invite("ana");
@@ -685,40 +698,62 @@ async fn used_and_expired_codes_do_not_count_and_loopback_is_one_address() {
 }
 
 #[tokio::test]
-async fn everyone_is_refused_past_the_ceiling() {
+async fn past_the_ceiling_only_addresses_that_failed_are_refused() {
     let f = fixture();
     let code = f.invite("ana");
+    let get = |peer: String, code: &str| {
+        let (f, path) = (&f, format!("/join/{code}"));
+        async move { f.call("GET", &path, None, Some(&peer), &[]).await.0 }
+    };
     // 200 codes that do not exist, from 20 addresses (10 each).
     for a in 0..20 {
         for _ in 0..10 {
-            let peer = format!("10.1.{a}.1:1");
-            let (status, ..) = f
-                .call("GET", "/join/ZZZZ-ZZZZ", None, Some(&peer), &[])
-                .await;
-            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(
+                get(format!("10.1.{a}.1:1"), "ZZZZ-ZZZZ").await,
+                StatusCode::NOT_FOUND
+            );
         }
     }
-    let (status, ..) = f
-        .call(
-            "GET",
-            &format!("/join/{code}"),
-            None,
-            Some("10.2.0.1:1"),
-            &[],
-        )
-        .await;
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    // Someone with a good code, from an address that never failed, still gets in: many
+    // addresses guessing cannot shut the team's invitations.
+    assert_eq!(get("10.2.0.1:1".into(), &code).await, StatusCode::OK);
+    // A new address gets one try at a code that does not exist, then nothing for the hour,
+    // not even with a good code.
+    assert_eq!(
+        get("10.3.0.1:1".into(), "ZZZZ-ZZZZ").await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get("10.3.0.1:1".into(), &code).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    // An hour later the tries are old: it may try again.
     f.app.clock.advance(3600);
-    let (status, ..) = f
-        .call(
-            "GET",
-            &format!("/join/{code}"),
-            None,
-            Some("10.2.0.1:1"),
-            &[],
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(get("10.3.0.1:1".into(), &code).await, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn past_the_ceiling_new_addresses_are_bounded_too() {
+    let f = fixture();
+    let code = f.invite("ana");
+    let get = |peer: String, code: &str| {
+        let (f, path) = (&f, format!("/join/{code}"));
+        async move { f.call("GET", &path, None, Some(&peer), &[]).await.0 }
+    };
+    // Past the ceiling, each new address gets one try, until relevo::join::MAX_ADDRESSES have
+    // tried in the hour: then nobody does, so neither memory nor the pace of guessing grows
+    // with the addresses someone has.
+    let n = relevo::join::MAX_ADDRESSES;
+    for i in 0..n {
+        let peer = format!("10.{}.{}.{}:1", i / 65536, (i / 256) % 256, i % 256);
+        assert_eq!(get(peer, "ZZZZ-ZZZZ").await, StatusCode::NOT_FOUND, "{i}");
+    }
+    assert_eq!(
+        get("10.200.0.1:1".into(), &code).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    f.app.clock.advance(3600);
+    assert_eq!(get("10.200.0.1:1".into(), &code).await, StatusCode::OK);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
@@ -868,7 +903,9 @@ fn serve_invite_and_join_for_real() {
         format!(
             "Invited @ana (Ana). Send them this link — it works once, for 24 hours:\n\n  \
              {url}/join/{code}\n\nThey can open it, or just give it to their agent (Claude \
-             Code, pi, Hermes).\n"
+             Code, pi, Hermes).\n\nNote: {url} is reached from this machine only. Behind a \
+             proxy, start the server with --public-url https://… (RELEVO_PUBLIC_URL), or give \
+             this link's address with --url.\n"
         )
     );
 

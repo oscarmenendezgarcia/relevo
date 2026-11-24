@@ -1466,7 +1466,8 @@ fn existing_team(conn: &Connection, name: &str) -> Result<i64> {
 }
 
 /// Creates a team, with nobody in it. Its name follows the rule of handles, and is never the
-/// handle of a person (active or not), nor `team` or `equipo`, so that a mention means one thing.
+/// handle of a person (active or not), nor `team`, `equipo` or the server's own `relevo`, so that
+/// a mention means one thing.
 pub fn add_team(conn: &Connection, name: &str, title: Option<&str>, now: i64) -> Result<()> {
     if !valid_handle(name) {
         bail!("a team name must match ^[a-z0-9][a-z0-9_-]{{1,31}}$");

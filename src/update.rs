@@ -69,6 +69,15 @@ impl PublicKey {
         PublicKey::from_pem(RELEASE_KEY).expect("keys/release-signing-pub.pem is an Ed25519 key")
     }
 
+    /// The key `relevo setup` checks adapters with: the release key. Only a debug build (the
+    /// tests) takes another, a PEM in `RELEVO_TEST_RELEASE_KEY`; a release build never does.
+    pub fn for_setup(env: &impl Fn(&str) -> Option<String>) -> Result<PublicKey> {
+        match env("RELEVO_TEST_RELEASE_KEY") {
+            Some(pem) if cfg!(debug_assertions) => PublicKey::from_pem(&pem),
+            _ => Ok(PublicKey::release()),
+        }
+    }
+
     pub fn verify(&self, message: &[u8], signature: &[u8]) -> bool {
         ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &self.0)
             .verify(message, signature)
@@ -346,26 +355,7 @@ pub async fn run(config: &Config, setup: &Setup, check: bool) -> Result<Vec<Step
         }
         Err(e) => return Err(from("the manifest", e)),
     };
-    let signature = client
-        .fetch(
-            &format!("/api/dist/{SIGNATURE}"),
-            SIGNATURE_LEN,
-            SMALL_TIMEOUT,
-        )
-        .await
-        .map_err(|e| match e {
-            client::Error::Api { status: 404, .. } => anyhow!(
-                "the clients {} hands out are not signed (no {SIGNATURE}): nothing was installed",
-                config.url
-            ),
-            e => from("the signature", e),
-        })?;
-    if !setup.key.verify(&manifest_bytes, &signature) {
-        bail!(
-            "the clients {} hands out are not signed by the release key: nothing was installed",
-            config.url
-        );
-    }
+    check_signature(&client, config, &setup.key, &manifest_bytes).await?;
     let manifest = Manifest::parse(&manifest_bytes)?;
     let offered = Version::parse(&manifest.version)?;
     let to = manifest.version.clone();
@@ -517,15 +507,46 @@ pub async fn run(config: &Config, setup: &Setup, check: bool) -> Result<Vec<Step
     Ok(steps)
 }
 
+/// Fetches the manifest's signature and checks it against `key`. `Err` means nothing may be
+/// installed from this manifest.
+async fn check_signature(
+    client: &Client,
+    config: &Config,
+    key: &PublicKey,
+    manifest: &[u8],
+) -> Result<()> {
+    let signature = client
+        .fetch(
+            &format!("/api/dist/{SIGNATURE}"),
+            SIGNATURE_LEN,
+            SMALL_TIMEOUT,
+        )
+        .await
+        .map_err(|e| match e {
+            client::Error::Api { status: 404, .. } => anyhow!(
+                "the clients {} hands out are not signed (no {SIGNATURE}): nothing was installed",
+                config.url
+            ),
+            e => anyhow!("fetching the signature from {}: {e}", config.url),
+        })?;
+    if !key.verify(manifest, &signature) {
+        bail!(
+            "the clients {} hands out are not signed by the release key: nothing was installed",
+            config.url
+        );
+    }
+    Ok(())
+}
+
 /// Installs adapter `kind` in `dir` (a new or empty folder, or one of that adapter, replaced in
-/// one step) from the dist of the server `config` names, and registers `dir` for updates. The
-/// archive is checked against the size and SHA-256 the server's manifest lists, as the
-/// invitation's install script checks the binary: it comes from the server the person joined,
-/// trusted as that script trusted it (its pinned key, or an authority). Updates check the
-/// release's signature from then on. Returns the version installed.
+/// one step) from the dist of the server `config` names, and registers `dir` for updates. As
+/// `relevo update`, it installs nothing whose manifest `key` did not sign, nor an archive that
+/// does not match the manifest's size and SHA-256, nor a release older than the adapter already
+/// in `dir`, which it leaves as it is. Returns the version in `dir` now.
 pub async fn install_from_server(
     config: &Config,
     env: &impl Fn(&str) -> Option<String>,
+    key: &PublicKey,
     kind: Kind,
     dir: &Path,
 ) -> Result<String> {
@@ -544,6 +565,7 @@ pub async fn install_from_server(
             }
             e => from("the manifest", e),
         })?;
+    check_signature(&client, config, key, &manifest).await?;
     let manifest = Manifest::parse(&manifest)?;
     let file = manifest
         .files
@@ -564,8 +586,21 @@ pub async fn install_from_server(
     match empty {
         Ok(true) => {}
         Ok(false) => {
-            kind.version_in(dir)
+            let have = kind
+                .version_in(dir)
                 .map_err(|e| anyhow!("{e:#}: left as it is"))?;
+            // As `relevo update`: an old release, signed as it was, never replaces a newer one;
+            // the newer one stays and is set up as it is.
+            if Version::parse(&manifest.version)? < Version::parse(&have)? {
+                println!(
+                    "{} has {have}, newer than the {} {} hands out: left as it is (no downgrades)",
+                    dir.display(),
+                    manifest.version,
+                    config.url
+                );
+                register(env, kind, dir)?;
+                return Ok(have);
+            }
         }
         Err(_) => fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?,
     }

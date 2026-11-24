@@ -6,13 +6,13 @@
 //! that do not work is refused for a while, so that codes cannot be guessed. Codes and tokens are
 //! never logged.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::rejection::{BytesRejection, QueryRejection};
-use axum::extract::{ConnectInfo, Path, Query, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -27,11 +27,16 @@ use crate::error::ApiError;
 use crate::{App, dist, lock};
 
 /// Tries at codes that do not exist one address may make in `FAILURE_WINDOW_SECS`, and all
-/// addresses together; beyond either, every invitation route refuses that address (or everyone)
-/// until the oldest of them is that old. A used or expired code does not count: someone was given
-/// it, and is told to ask for a new one.
+/// addresses together; beyond the first, every invitation route refuses that address until the
+/// oldest of them is that old. Beyond the second, it refuses every address that made one in the
+/// window, so that many addresses guessing cannot shut out someone with a good code: an address
+/// with no failure still gets its try, while fewer than `MAX_ADDRESSES` addresses have tried in
+/// the window (which bounds both the memory and the pace of guessing); past that, everyone is
+/// refused until the window passes. A used or expired code does not count: someone was given it,
+/// and is told to ask for a new one.
 pub const MAX_FAILURES: usize = 10;
 pub const MAX_ALL_FAILURES: usize = 200;
+pub const MAX_ADDRESSES: usize = 10_000;
 pub const FAILURE_WINDOW_SECS: i64 = 3600;
 
 const STYLE: &str = include_str!("join/page.css");
@@ -41,7 +46,8 @@ const MARK: &str = include_str!("../assets/brand/relevo-mark.svg");
 
 pub fn routes() -> Router<Arc<App>> {
     Router::new()
-        .route("/api/join", post(join))
+        // Its body is `{ "code": … }`: a small limit, as it is read before any other check.
+        .route("/api/join", post(join).layer(DefaultBodyLimit::max(1024)))
         .route("/join/{code}", get(page))
         .route("/join/{code}/install", get(install))
         .route("/join/{code}/relevo", get(binary))
@@ -53,30 +59,96 @@ type Peer = Option<Extension<ConnectInfo<SocketAddr>>>;
 /// What failures count against: the client's IP address, or its /64 for IPv6 (one host may have
 /// a whole one). Requests that came with no address count as one.
 fn address(peer: &Peer) -> IpAddr {
-    match peer
-        .as_ref()
-        .map(|Extension(ConnectInfo(a))| a.ip().to_canonical())
-    {
-        Some(IpAddr::V6(ip)) => {
-            let mut octets = ip.octets();
-            octets[8..].fill(0);
-            IpAddr::from(octets)
-        }
-        Some(ip) => ip,
+    match peer.as_ref() {
+        Some(Extension(ConnectInfo(a))) => one_host(a.ip()),
         None => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
     }
 }
 
-/// The tries at codes that do not exist, in memory only.
+/// `ip` as one host counts: an IPv4 address (also as `::ffff:a.b.c.d`), or an IPv6 /64.
+pub(crate) fn one_host(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V6(ip) => {
+            let mut octets = ip.octets();
+            octets[8..].fill(0);
+            IpAddr::from(octets)
+        }
+        ip => ip,
+    }
+}
+
+/// The tries at codes that do not exist in the window, in memory only. Each request does a
+/// constant amount of work on average: tries leave from the front of `queue` as they age.
 #[derive(Default)]
 pub(crate) struct Tries {
-    /// When each address (see `address`) made one: those in the window, and older ones until the
-    /// next prune.
-    by_address: HashMap<IpAddr, Vec<i64>>,
-    /// When the old ones were last dropped.
-    pruned_at: i64,
-    /// When the server last logged that it refuses everyone.
-    warned_at: Option<i64>,
+    /// Each try in the window, oldest first, with the address (see `address`) that made it.
+    queue: VecDeque<(i64, IpAddr)>,
+    /// How many of those each address made; an address with none is not in it.
+    by_address: HashMap<IpAddr, usize>,
+    /// When the server last logged that it refuses addresses past the ceiling, and whether it
+    /// then refused every address.
+    warned_at: Option<(i64, bool)>,
+}
+
+impl Tries {
+    /// Counts a try from `addr` at `now`, or refuses it when that address, or everyone, made
+    /// too many. Returns the time it is counted at: never before the newest one, so the queue
+    /// stays in order when requests race or the clock steps back.
+    fn start(&mut self, addr: IpAddr, now: i64) -> Result<i64, Refusal> {
+        let since = now - FAILURE_WINDOW_SECS;
+        while let Some(&(at, old)) = self.queue.front()
+            && at <= since
+        {
+            self.queue.pop_front();
+            self.drop_one(old);
+        }
+        let all = self.queue.len();
+        let mine = self.by_address.get(&addr).copied().unwrap_or(0);
+        let full = self.by_address.len() >= MAX_ADDRESSES;
+        if all >= MAX_ALL_FAILURES && (mine > 0 || full) {
+            if !self
+                .warned_at
+                .is_some_and(|(at, all)| at > since && (all || !full))
+            {
+                tracing::warn!(
+                    "{all} tries at invitation codes that do not exist in an hour, from {} \
+                     addresses: those that made one{} are refused for a while",
+                    self.by_address.len(),
+                    if full { ", and now every address," } else { "" }
+                );
+                self.warned_at = Some((now, full));
+            }
+            return Err(Refusal::Limited);
+        }
+        if mine >= MAX_FAILURES {
+            return Err(Refusal::Limited);
+        }
+        let at = self
+            .queue
+            .back()
+            .map_or(now, |&(newest, _)| newest.max(now));
+        self.queue.push_back((at, addr));
+        *self.by_address.entry(addr).or_default() += 1;
+        Ok(at)
+    }
+
+    /// Takes back the try `addr` started at `at`, if it is still in the window.
+    fn forget(&mut self, addr: IpAddr, at: i64) {
+        // Started a moment ago: it is at the back, behind only the tries made since.
+        if let Some(i) = self.queue.iter().rposition(|&try_| try_ == (at, addr)) {
+            self.queue.remove(i);
+            self.drop_one(addr);
+        }
+    }
+
+    fn drop_one(&mut self, addr: IpAddr) {
+        if let Some(n) = self.by_address.get_mut(&addr) {
+            *n -= 1;
+            if *n == 0 {
+                self.by_address.remove(&addr);
+            }
+        }
+    }
 }
 
 /// A try at a code under way. It counts as one at a code that does not exist from the moment it
@@ -90,44 +162,14 @@ struct Try<'a> {
 
 /// Starts a try from `addr`, or refuses it when that address, or everyone, made too many.
 fn start(app: &App, addr: IpAddr, now: i64) -> Result<Try<'_>, Refusal> {
-    let fresh = |t: &i64| *t > now - FAILURE_WINDOW_SECS;
-    let count = |times: &Vec<i64>| times.iter().filter(|t| fresh(t)).count();
-    let mut tries = lock(&app.join_tries);
-    if !fresh(&tries.pruned_at) {
-        tries.by_address.retain(|_, times| {
-            times.retain(fresh);
-            !times.is_empty()
-        });
-        tries.pruned_at = now;
-    }
-    let all: usize = tries.by_address.values().map(count).sum();
-    if all >= MAX_ALL_FAILURES {
-        if !tries.warned_at.is_some_and(|at| fresh(&at)) {
-            tracing::warn!(
-                "{all} tries at invitation codes that do not exist in an hour: every invitation \
-                 route is refused for a while"
-            );
-            tries.warned_at = Some(now);
-        }
-        return Err(Refusal::Limited);
-    }
-    let times = tries.by_address.entry(addr).or_default();
-    if count(times) >= MAX_FAILURES {
-        return Err(Refusal::Limited);
-    }
-    times.push(now);
-    Ok(Try { app, addr, at: now })
+    let at = lock(&app.join_tries).start(addr, now)?;
+    Ok(Try { app, addr, at })
 }
 
 impl Try<'_> {
     /// The code exists (or nothing was looked up): this try does not count.
     fn forget(self) {
-        let mut tries = lock(&self.app.join_tries);
-        if let Some(times) = tries.by_address.get_mut(&self.addr)
-            && let Some(i) = times.iter().rposition(|t| *t == self.at)
-        {
-            times.remove(i);
-        }
+        lock(&self.app.join_tries).forget(self.addr, self.at);
     }
 }
 
@@ -598,6 +640,60 @@ tell the user what it said rather than running it again. Do not share this link.
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ip(i: u32) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + i))
+    }
+
+    #[test]
+    fn tries_age_out_of_the_window_and_counts_stay_in_step() {
+        let mut t = Tries::default();
+        for _ in 0..MAX_FAILURES {
+            assert!(t.start(ip(1), 100).is_ok());
+        }
+        assert!(t.start(ip(1), 100).is_err());
+        // One taken back (its code existed): one more try.
+        t.forget(ip(1), 100);
+        assert!(t.start(ip(1), 101).is_ok());
+        assert!(t.start(ip(1), 101).is_err());
+        // An hour after the first ones, they leave; the one at 101 is still in.
+        assert!(t.start(ip(1), 100 + FAILURE_WINDOW_SECS).is_ok());
+        assert_eq!(t.queue.len(), 2);
+        assert_eq!(t.by_address[&ip(1)], 2);
+        // Once all are old, the address is gone from both.
+        assert!(t.start(ip(2), 101 + 2 * FAILURE_WINDOW_SECS).is_ok());
+        assert_eq!(t.queue.len(), 1);
+        assert_eq!(t.by_address.len(), 1);
+        // A try that already left the window is not taken back twice.
+        t.forget(ip(1), 101);
+        assert_eq!(t.by_address.len(), 1);
+    }
+
+    #[test]
+    fn a_clock_that_steps_back_keeps_the_queue_in_order() {
+        let mut t = Tries::default();
+        assert_eq!(t.start(ip(1), 200).ok(), Some(200));
+        // The clock stepped back: the try counts as at the newest time, so it leaves with it.
+        assert_eq!(t.start(ip(2), 100).ok(), Some(200));
+        t.forget(ip(2), 200);
+        assert_eq!((t.queue.len(), t.by_address.len()), (1, 1));
+        assert!(t.start(ip(3), 200 + FAILURE_WINDOW_SECS).is_ok());
+        assert_eq!((t.queue.len(), t.by_address.len()), (1, 1));
+    }
+
+    #[test]
+    fn past_the_ceiling_the_address_cap_counts_fresh_addresses() {
+        let mut t = Tries::default();
+        for i in 0..MAX_ADDRESSES as u32 {
+            assert!(t.start(ip(i), 0).is_ok());
+        }
+        // Full: a new address is refused, and nothing is added.
+        assert!(t.start(ip(u32::MAX >> 8), 1).is_err());
+        assert_eq!(t.by_address.len(), MAX_ADDRESSES);
+        // An hour later every one has left: a new address gets its try.
+        assert!(t.start(ip(u32::MAX >> 8), FAILURE_WINDOW_SECS).is_ok());
+        assert_eq!((t.queue.len(), t.by_address.len()), (1, 1));
+    }
 
     #[test]
     fn words_for_sh() {

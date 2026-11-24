@@ -7,13 +7,46 @@ import type { Delivery, Inbox, Note, Person, SessionRef, Team, Thread } from "./
 
 const MAX_CHARS = 60_000;
 
+// Whitespace, and the invisible characters a model may read through ("<\u200b/untrusted>").
+const GAP =
+  /^[\t-\r \x1c-\x1f\x85\xa0\xad\u034f\u061c\u115f\u1160\u1680\u180b-\u180f\u2000-\u200f\u2028-\u202f\u205f-\u2064\u2066-\u2069\u3000\u3164\ufe00-\ufe0f\ufeff\uffa0\u{e0000}-\u{e007f}\u{e0100}-\u{e01ef}]$/u;
+// "<", full-width, small, and the look-alikes ˂ ‹ 〈 〈 ⟨.
+const OPENS = new Set(["<", "\uff1c", "\ufe64", "\u02c2", "\u2039", "\u2329", "\u3008", "\u27e8"]);
+const SLASHES = new Set(["/", "\u2215", "\u2044"]);
+const TAGS = ["untrusted", "channel"];
+
+/** A character as it reads: full-width ASCII as ASCII, the long s as s, in lower case. */
+function fold(c: string): string {
+  const code = c.codePointAt(0)!;
+  if (code >= 0xff01 && code <= 0xff5e) c = String.fromCodePoint(code - 0xfee0);
+  else if (c === "\u017f") c = "s";
+  return c.length === 1 && c < "\x80" ? c.toLowerCase() : c;
+}
+
+/** Whether `chars` from `from` on (just after a `<`) read as one of TAGS, opened or closed. */
+function namesATag(chars: string[], from: number): boolean {
+  const seen: string[] = [];
+  for (let j = from; j < chars.length && seen.length < 10; j++) {
+    if (!GAP.test(chars[j])) seen.push(fold(chars[j]));
+  }
+  const start = seen.length && SLASHES.has(seen[0]) ? 1 : 0;
+  return TAGS.some((tag) => seen.slice(start, start + tag.length).join("") === tag);
+}
+
 /**
  * Keeps a note from closing or opening a wrapper: every `<untrusted`, `</untrusted`,
- * `<channel` and `</channel` (any case, spaces allowed after `<` and `/`) becomes
- * `&lt;…`, as in relevo mcp (src/render.rs).
+ * `<channel` and `</channel` becomes `&lt;…`, read as a model may read it: `<` may be
+ * full-width `＜`, small `﹤` or a look-alike (OPENS), `/` may be `／`, `∕` or `⁄`, the name in any case or in
+ * full-width letters, with whitespace or invisible characters anywhere after the `<`. As in
+ * relevo mcp (src/render.rs) and the Hermes plugin, character for character.
  */
 export function neutralize(text: string): string {
-  return text.replace(/<(?=[ \t\n\f\r]*(?:\/[ \t\n\f\r]*)?(?:untrusted|channel))/gi, "&lt;");
+  const chars = Array.from(text);
+  let out = "";
+  for (let i = 0; i < chars.length; i++) {
+    out += OPENS.has(chars[i]) && namesATag(chars, i + 1) ? "&lt;" : chars[i];
+  }
+  return out;
 }
 
 export function untrusted(from: string, text: string, inline = false): string {
@@ -241,7 +274,7 @@ export function renderThread(t: Thread, options: ThreadOptions = {}): string {
   // Release notes need no answer, so answering them is not offered.
   if (optional(t) && t.from !== me && !releaseOnly(t, me)) {
     lines.push(
-      "It does not name your person, so answering is optional: answer only from your own work or your person's files " +
+      "It does not name your person, so answering is optional: answer only from your own work or the folder you work in " +
         "(repeating someone's `about` line, or guessing who might know, is not an answer); do not claim it.",
     );
   }
@@ -381,7 +414,7 @@ export function renderArrival(t: Thread, me?: string): string {
   } else if (optional(t)) {
     intro =
       `Relevo: new in thread ${t.id}${to}; it does not name your person, so answering is optional.${who} ` +
-      `If your own work or your person's files answer it, reply with ${reply}; ` +
+      `If your own work or the folder you work in answers it, reply with ${reply}; ` +
       "if not, stay silent: repeating someone's `about` line, or guessing who might know, is not an answer. Do not claim it.";
   } else if (!isPending(t)) {
     // Another of the person's sessions already handled it: nothing stays pending, nothing to mark seen.

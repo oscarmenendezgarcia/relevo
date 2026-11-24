@@ -283,7 +283,7 @@ test("/relevo says when the server is out of reach, and the footer goes offline;
     const none = loadExtension({ env: { RELEVO_CONFIG: join(empty, "none.json") }, home: empty });
     await none.command("relevo", "", empty);
     assert.equal(last(none).message.details.state, "not-connected");
-    assert.match(last(none).message.content, /Relevo isn't connected on this machine\. Run relevo connect <server> with the token your admin gave you\.$/);
+    assert.match(last(none).message.content, /Relevo isn't connected on this machine\. Ask your admin for an invitation link, or run relevo connect <server> and paste your token when it asks\.$/);
   } finally {
     rmSync(empty, { recursive: true, force: true });
   }

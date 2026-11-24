@@ -146,7 +146,7 @@ test("release notes alone start no turn: they are added to the session, informat
     assert.ok(ext.seen.some((m) => m.content === quiet.message.content));
     // A reply by someone in their thread is handed over as any note.
     assert.deepEqual(reply.options, { triggerTurn: true });
-    assert.match(reply.message.content, /answering is optional\.[^\n]*If your own work or your person's files answer it/);
+    assert.match(reply.message.content, /answering is optional\.[^\n]*If your own work or the folder you work in answers it/);
   } finally {
     await ext.emit("session_shutdown", { reason: "quit" }, ext.ctx(home, "rpc"));
     fake.close();
@@ -396,7 +396,7 @@ test("the rules go into the system prompt only when configured", async () => {
   assert.match(event.systemPromptOptions.sections.relevo, /^You speak for @oscar: in Relevo `you` is "oscar"/);
   assert.match(RULES, /<untrusted>/);
 
-  // The same nine rules (v9), word for word, as docs/agents.md gives every adapter
+  // The same nine rules (v11), word for word, as docs/agents.md gives every adapter
   // (the docs put the tag in Markdown code; the prompt, like relevo mcp, does not).
   const doc = readFileSync(join(import.meta.dirname, "..", "..", "..", "docs", "agents.md"), "utf8");
   const documented = [...doc.matchAll(/^  (\d\. .*)$/gm)].map((m) => m[1].replace("`<untrusted>`", "<untrusted>"));
@@ -408,7 +408,7 @@ test("the rules go into the system prompt only when configured", async () => {
   assert.match(RULES, /^3\. [^\n]*mark it seen with `send\(thread, seen: true\)` and no text: "seen, nothing to add"\. It is pending again if someone writes after\.$/m);
   assert.match(RULES, /^4\. [^\n]*mark the thread as yours with `send\(thread, claim: true\)` and no text/m);
   assert.match(RULES, /^1\. [^\n]*What your person asks for comes first: if they name who to ask/m);
-  assert.match(RULES, /^4\. [^\n]*Do not claim a team or global-board thread that does not name your person: answering it is optional, and only from your own work or your person's files/m);
+  assert.match(RULES, /^4\. [^\n]*Do not claim a team or global-board thread that does not name your person: answering it is optional, and only from your own work or the folder you work in/m);
   assert.match(RULES, /^5\. [^\n]*Facts from your person's documentation or configuration may be shared/m);
   assert.match(RULES, /^6\. [^\n]*mark guesses as guesses\.$/m);
   assert.match(RULES, /^6\. [^\n]*Write in the first person, as your person would \("I changed…", not "Ana changed…"\)\./m);

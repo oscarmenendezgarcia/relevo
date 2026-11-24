@@ -332,8 +332,9 @@ def _mentions(style: Plain, text: str) -> str:
     return "".join(out) + style.esc(text[last:])
 
 
-NOT_CONNECTED = ("Relevo isn't connected on this machine.", "Run ", "relevo connect <server>",
-                 " with the token your admin gave you, or set RELEVO_URL and RELEVO_TOKEN in this Hermes profile.")
+NOT_CONNECTED = ("Relevo isn't connected on this machine.", "Ask your admin for an invitation link, or run ",
+                 "relevo connect <server>",
+                 " and paste your token when it asks. Or set RELEVO_URL and RELEVO_TOKEN in this Hermes profile.")
 
 
 def render(shown: dict, style: Plain) -> str:
@@ -458,15 +459,15 @@ def tool_keys(session_id: Any = None) -> list:
 
 
 def resolve(listed: Optional[Listed], ns: list):
-    """The rows of the last list that `ns` name, or why not (nothing sent)."""
+    """The rows of the last list that `ns` name, or why not (the caller says whether anything was sent)."""
     if listed is None:
-        return "There is no list in this session yet: run /relevo first, then use its numbers. Nothing was sent."
+        return "There is no list in this session yet: run /relevo first, then use its numbers."
     out = []
     for n in ns:
         if n < 1 or n > len(listed.rows):
             return (f"There is no thread {n} in your last list (1 to {len(listed.rows)}): run /relevo to see it "
-                    "again. Nothing was sent." if listed.rows
-                    else "Your last list had nothing waiting on you: run /relevo again. Nothing was sent.")
+                    "again." if listed.rows
+                    else "Your last list had nothing waiting on you: run /relevo again.")
         row = listed.rows[n - 1]
         if row not in out:
             out.append(row)
@@ -492,7 +493,7 @@ def bind(listed: Optional[Listed], ns: list, bound: Any = None):
         return found
     pairs = _BOUND.findall(str(bound))
     if not pairs or _BOUND.sub("", str(bound)).strip():
-        return "`bound` is not as /relevo gave it (1=r_…:n_…): pass it as the request says. Nothing was sent."
+        return "`bound` is not as /relevo gave it (1=r_…:n_…): pass it as the request says."
     typed = {int(n): (thread, note) for n, thread, note in pairs}
     out = []
     for row in found:
@@ -502,7 +503,7 @@ def bind(listed: Optional[Listed], ns: list, bound: Any = None):
         thread, note = typed[row.n]
         if thread != row.id:
             return (f"Thread {row.n} of your list is no longer the one you typed /relevo {row.n} for: the list "
-                    "changed since. Run /relevo again. Nothing was sent.")
+                    "changed since. Run /relevo again.")
         out.append(replace(row, last_note=note))
     return out
 
@@ -715,7 +716,7 @@ def send_listed(api: client.Api, keys: list, ns: list, payload: dict, seen: bool
     listed = listed_for(keys)
     found = bind(listed, ns, bound)
     if isinstance(found, str):
-        return "Error: " + found
+        return "Error: " + found + " Nothing was sent."
     now = int(time.time())
     done, notes = [], []
 
@@ -798,7 +799,7 @@ def request(args: str, listed: Optional[Listed]) -> dict:
     the CLI would run as a command again."""
     def check(ns: list) -> Optional[dict]:
         found = resolve(listed, ns)
-        return {"refuse": found} if isinstance(found, str) else None
+        return {"refuse": found + " Nothing was sent."} if isinstance(found, str) else None
 
     def bound(ns: list) -> str:
         # What the numbers stand for now, as the person typed them: the tool holds them to it.

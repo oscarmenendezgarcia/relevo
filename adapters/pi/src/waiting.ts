@@ -234,7 +234,7 @@ export function help(len: number): string {
   return `/relevo 1 <your answer> · /relevo ${Math.min(2, len)} to open it · /relevo seen ${Math.min(3, len)}`;
 }
 
-export const NOT_CONNECTED = "Relevo isn't connected on this machine. Run relevo connect <server> with the token your admin gave you.";
+export const NOT_CONNECTED = "Relevo isn't connected on this machine. Ask your admin for an invitation link, or run relevo connect <server> and paste your token when it asks.";
 
 /**
  * What /relevo shows, as plain text: what the model reads (the person sees it drawn by `draw`).
@@ -315,9 +315,9 @@ export function draw(shown: Shown, theme: Theme): string {
     case "not-connected":
       return (
         theme.bold("Relevo isn't connected on this machine.") +
-        " Run " +
+        " Ask your admin for an invitation link, or run " +
         theme.fg("accent", "relevo connect <server>") +
-        " with the token your admin gave you."
+        " and paste your token when it asks."
       );
     case "error":
       return theme.fg("error", shown.message);
@@ -440,23 +440,23 @@ export function bind(row: Row): string {
 }
 
 /**
- * The threads of the last list that `ns` name, or why not (nothing sent). A bound number must
+ * The threads of the last list that `ns` name, or why not (the caller says whether anything was sent). A bound number must
  * still be that thread with that latest note: a /relevo run between the person typing and the
  * tool running may have numbered the threads anew.
  */
 export function resolve(listed: Listed | null, ns: Array<number | ListNumber>): Row[] | string {
-  if (!listed) return "There is no list in this session yet: run /relevo first, then use its numbers. Nothing was sent.";
+  if (!listed) return "There is no list in this session yet: run /relevo first, then use its numbers.";
   const out: Row[] = [];
   for (const x of ns) {
     const { n, id, note } = typeof x === "number" ? { n: x, id: undefined, note: undefined } : x;
     const row = listed.rows[n - 1];
     if (id !== undefined && row?.id !== id) {
-      return `Thread ${n} of your list is no longer the one you typed /relevo ${n} for: the list changed since. Run /relevo again. Nothing was sent.`;
+      return `Thread ${n} of your list is no longer the one you typed /relevo ${n} for: the list changed since. Run /relevo again.`;
     }
     if (!row) {
       return listed.rows.length
-        ? `There is no thread ${n} in your last list (1 to ${listed.rows.length}): run /relevo to see it again. Nothing was sent.`
-        : "Your last list had nothing waiting on you: run /relevo again. Nothing was sent.";
+        ? `There is no thread ${n} in your last list (1 to ${listed.rows.length}): run /relevo to see it again.`
+        : "Your last list had nothing waiting on you: run /relevo again.";
     }
     // A bound number is judged against the note the person saw when they typed it: a newer one
     // since refuses as any newer note does.

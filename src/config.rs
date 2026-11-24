@@ -92,8 +92,8 @@ pub fn load(env: impl Fn(&str) -> Option<String>) -> Result<Config> {
             adapters,
         }),
         _ => bail!(
-            "{NOT_CONFIGURED}: run `relevo connect <url>` and give it the token \
-             (or set RELEVO_URL and RELEVO_TOKEN)"
+            "{NOT_CONFIGURED}: ask your admin for an invitation link, or run `relevo connect \
+             <url>` and paste your token when it asks (or set RELEVO_URL and RELEVO_TOKEN)"
         ),
     }
 }

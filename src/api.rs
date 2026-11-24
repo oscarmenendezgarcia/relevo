@@ -59,7 +59,21 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::join::routes())
         .fallback(|| async { ApiError::not_found("no such route") })
         .method_not_allowed_fallback(|| async { ApiError::not_found("no such route") })
+        .layer(axum::middleware::from_fn(no_head))
         .with_state(app)
+}
+
+/// axum answers HEAD by running the GET and dropping the body: on `/api/inbox` that would
+/// deliver notes nobody gets. A HEAD on `/api/…` is a wrong method, so `NOT_FOUND`.
+async fn no_head(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if req.method() == axum::http::Method::HEAD && req.uri().path().starts_with("/api/") {
+        return ApiError::not_found("no such route").into_response();
+    }
+    next.run(req).await
 }
 
 // ---------- shapes ----------

@@ -716,7 +716,7 @@ async fn channel_pushes_no_release_notes_and_inbox_lists_them() {
     let content = event["params"]["content"].as_str().unwrap();
     assert!(content.contains("Nice, thanks."), "{content}");
     assert!(
-        content.contains("If your own work or your person's files answer it"),
+        content.contains("If your own work or the folder you work in answers it"),
         "{content}"
     );
     assert!(ana.close().await.success());
@@ -2191,6 +2191,8 @@ async fn list_numbers_reply_open_and_refuse_what_was_handled_since() {
     assert!(failed && err.contains("run /relevo first"), "{err}");
     let (failed, err) = oscar.call("thread", json!({ "id": "1" })).await;
     assert!(failed && err.contains("run /relevo first"), "{err}");
+    // `thread` only reads: it does not say nothing was sent.
+    assert!(!err.contains("Nothing was sent"), "{err}");
 
     oscar.ok("waiting", json!({})).await;
     let (failed, err) = oscar
@@ -2198,6 +2200,11 @@ async fn list_numbers_reply_open_and_refuse_what_was_handled_since() {
         .await;
     assert!(
         failed && err.contains("There is no thread 4 in your last list (1 to 3)"),
+        "{err}"
+    );
+    let (failed, err) = oscar.call("thread", json!({ "id": "4" })).await;
+    assert!(
+        failed && err.ends_with("(1 to 3): run /relevo to see it again."),
         "{err}"
     );
     let (failed, err) = oscar
@@ -2567,8 +2574,8 @@ async fn waiting_says_when_the_server_is_out_of_reach_or_not_connected() {
     assert!(!failed);
     assert_eq!(
         out,
-        "**Relevo isn't connected on this machine.** Run `relevo connect <server>` with the token \
-         your admin gave you."
+        "**Relevo isn't connected on this machine.** Ask your admin for an invitation link, or run \
+         `relevo connect <server>` and paste your token when it asks."
     );
     mcp.close().await;
 }
@@ -2683,7 +2690,7 @@ async fn connect_installs_the_relevo_command_for_claude_code() {
     // No terminal to ask: skipped, saying how.
     let out = connect(&[]).await;
     assert!(
-        out.contains("skipped the /relevo command") && out.contains("--command"),
+        out.contains("skipped the /relevo command") && out.contains("relevo setup claude-code"),
         "{out}"
     );
     assert!(!path.exists());
@@ -2702,7 +2709,7 @@ async fn connect_installs_the_relevo_command_for_claude_code() {
     let out = connect(&[]).await;
     let line = out.lines().find(|l| l.contains("skipped")).unwrap();
     assert!(
-        line.ends_with("run relevo connect again with --command to install it"),
+        line.ends_with("run relevo setup claude-code to install it"),
         "{line}"
     );
     // A newer one of Relevo's is never downgraded.

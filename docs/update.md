@@ -4,7 +4,7 @@ From 0.4.0, the team's server hands out the clients of its own version, and ever
 
 ## What is handed out
 
-Every release builds, besides the server binaries, a **dist**: the `relevo` binary for each target (`aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`), the pi extension (`relevo-pi-<version>.tar.gz`, the contents of `adapters/pi`) and the Hermes plugin (`relevo-hermes-<version>.tar.gz`, the contents of `adapters/hermes/relevo`), and a **manifest** that lists them:
+Every release builds, besides the server binaries, a **dist**: the `relevo` binary for each target (`aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`, and `aarch64-apple-darwin`, macOS on Apple Silicon; there is none for Intel Macs), the pi extension (`relevo-pi-<version>.tar.gz`, the contents of `adapters/pi`) and the Hermes plugin (`relevo-hermes-<version>.tar.gz`, the contents of `adapters/hermes/relevo`), and a **manifest** that lists them:
 
 ```json
 { "version": "0.4.0",
@@ -27,7 +27,7 @@ GET /api/dist/manifest.sig
 GET /api/dist/<name>          a file the manifest lists, as is
 ```
 
-They answer `NOT_FOUND` when there is no dist, or no such file. `relevo setup pi` and `relevo setup hermes` (and the invitation link) install an adapter for the first time from the same files, checked against the manifest's size and SHA-256 (the server is the one the person joined, as for the install script's binary); from then on `relevo update` checks the signature. The binaries are also handed out, without a token, to whoever holds an invitation that still works (`GET /join/<code>/relevo?target=<triple>`, see `docs/protocol.md`, "Invitations"), for the install script of the invitation link. The server logs a warning at start when the dist's version is not its own. It never signs anything and holds no key.
+They answer `NOT_FOUND` when there is no dist, or no such file. `relevo setup pi` and `relevo setup hermes` (and `relevo connect --setup`) install an adapter for the first time from the same files, checked as `relevo update` checks them: the manifest's signature by the release key, then its size and SHA-256. A server without `manifest.sig`, or with one the key did not make, gets nothing installed, and an installed adapter is never replaced with an older version (no downgrades): it stays, and the agent is set up with it. That holds for a `relevo` you already have. The invitation link's script installs `relevo` itself from the server, checked only against the SHA-256s the server put in the script, and that `relevo` then checks the adapters: they are trusted as far as the script was. The binaries are also handed out, without a token, to whoever holds an invitation that still works (`GET /join/<code>/relevo?target=<triple>`, see `docs/protocol.md`, "Invitations"), for the install script of the invitation link. The server logs a warning at start when the dist's version is not its own. It never signs anything and holds no key.
 
 ## The clients
 
