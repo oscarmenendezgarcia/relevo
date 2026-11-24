@@ -394,7 +394,8 @@ async fn an_adapter_is_installed_only_from_a_signed_manifest() {
 )]
 async fn setup_never_replaces_an_adapter_with_an_older_one() {
     let m = Machine::new().await;
-    // pi's extension of a newer release is there; the server hands out 0.7.0, signed.
+    // pi's extension of a newer release is there; the server hands out 0.7.0, signed. As
+    // `relevo update`: the newer one stays, and is set up as it is.
     let pi = m.home().join(".local/share/relevo/pi");
     std::fs::create_dir_all(&pi).unwrap();
     let newer = json!({ "name": "relevo-pi", "version": "9.0.0" }).to_string();
@@ -405,9 +406,12 @@ async fn setup_never_replaces_an_adapter_with_an_older_one() {
         said.contains("has 9.0.0, newer than the 0.7.0") && said.contains("(no downgrades)"),
         "{said}"
     );
-    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains("Added Relevo to pi."), "{said}");
     assert_eq!(
         std::fs::read_to_string(pi.join("package.json")).unwrap(),
         newer
     );
+    let pi = std::fs::canonicalize(&pi).unwrap();
+    assert_eq!(m.ran(), [format!("pi install {}", pi.display())]);
 }

@@ -541,7 +541,8 @@ async fn check_signature(
 /// Installs adapter `kind` in `dir` (a new or empty folder, or one of that adapter, replaced in
 /// one step) from the dist of the server `config` names, and registers `dir` for updates. As
 /// `relevo update`, it installs nothing whose manifest `key` did not sign, nor an archive that
-/// does not match the manifest's size and SHA-256. Returns the version installed.
+/// does not match the manifest's size and SHA-256, nor a release older than the adapter already
+/// in `dir`, which it leaves as it is. Returns the version in `dir` now.
 pub async fn install_from_server(
     config: &Config,
     env: &impl Fn(&str) -> Option<String>,
@@ -588,14 +589,17 @@ pub async fn install_from_server(
             let have = kind
                 .version_in(dir)
                 .map_err(|e| anyhow!("{e:#}: left as it is"))?;
-            // As `relevo update`: an old release, signed as it was, never replaces a newer one.
+            // As `relevo update`: an old release, signed as it was, never replaces a newer one;
+            // the newer one stays and is set up as it is.
             if Version::parse(&manifest.version)? < Version::parse(&have)? {
-                bail!(
+                println!(
                     "{} has {have}, newer than the {} {} hands out: left as it is (no downgrades)",
                     dir.display(),
                     manifest.version,
                     config.url
                 );
+                register(env, kind, dir)?;
+                return Ok(have);
             }
         }
         Err(_) => fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?,
