@@ -188,6 +188,7 @@ enum Command {
     /// id on stdout.
     Send {
         /// The note, or - to read it from stdin.
+        #[arg(allow_hyphen_values = true)]
         text: String,
         /// Answer in this thread (its id) instead of opening one.
         #[arg(long, value_name = "THREAD")]
@@ -533,30 +534,48 @@ async fn send(text: String, reply: Option<String>, via: String) -> Result<()> {
             body.insert("thread".into(), thread.as_str().into());
         }
         body.insert("text".into(), text.into());
-        client.send(body).await
+        client.send(body, "`relevo web`").await
     }
     .await;
-    if let Err(e) = client.end(std::time::Duration::from_secs(2)).await {
-        eprintln!("ending the session: {e}");
+    let end = client.end(std::time::Duration::from_secs(2));
+    match &sent {
+        Ok(_) => {
+            if let Err(e) = end.await {
+                eprintln!("ending the session: {e}");
+            }
+        }
+        // Unreached or refused: no session was recorded, so there is none to end.
+        Err(e) if e.unreachable() => {}
+        Err(client::Error::Api { code, .. }) if code == "UNAUTHORIZED" => {}
+        Err(_) => {
+            let _ = end.await;
+        }
     }
     let v = sent.map_err(|e| {
         let mut out = e.to_string();
         if let client::Error::Api { code, body, .. } = &e
             && code == "UNKNOWN_PERSON"
         {
-            out.push_str("\nNothing was sent.\n\n");
+            out.push_str("\n\n");
             out.push_str(&relevo::render::team(&body["error"]["valid"], None));
             out.push_str(&relevo::render::teams(&body["error"]["teams"], None));
         }
         anyhow::anyhow!(out.trim_end().to_string())
     })?;
+    use std::io::Write;
     let id = v["thread"].as_str().unwrap_or_default();
-    println!("{id}");
-    let whom = relevo::render::whom(&v, reply.is_none());
-    match reply {
-        None => eprintln!("{}", whom.trim_end()),
-        Some(_) => eprintln!("{}", format!("Replied in thread {id}. {whom}").trim_end()),
+    // The note is written: a reader gone already is no error, or a script that retries on one
+    // would write it twice.
+    match writeln!(std::io::stdout(), "{id}") {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => return Err(e.into()),
+        _ => {}
     }
+    let whom = relevo::render::whom(&v, reply.is_none());
+    let line = match reply {
+        None => whom,
+        Some(_) => format!("Replied in thread {id}. {whom}"),
+    };
+    let _ = writeln!(std::io::stderr(), "{}", line.trim_end());
     Ok(())
 }
 
@@ -831,7 +850,10 @@ async fn main() -> Result<()> {
             };
             if text.trim().is_empty() {
                 use clap::CommandFactory;
-                Cli::command()
+                let mut cli = Cli::command();
+                cli.build();
+                cli.find_subcommand_mut("send")
+                    .expect("send is a subcommand")
                     .error(clap::error::ErrorKind::InvalidValue, "the note is empty")
                     .exit();
             }
@@ -1226,6 +1248,11 @@ mod tests {
         assert_eq!(
             send(&["--reply", "r_1", "--via", " GitHub Actions ", "-"]),
             Ok(("-".into(), Some("r_1".into()), "GitHub Actions".into()))
+        );
+        // A note may start with a hyphen; - alone is stdin.
+        assert_eq!(
+            send(&["--via", "CI", "-5 tests fail"]),
+            Ok(("-5 tests fail".into(), None, "CI".into()))
         );
         // A name the server would ignore, and a missing note, are misuse.
         assert_eq!(send(&["--via", "a@b", "hi"]), Err(2));

@@ -84,6 +84,16 @@ fn sessions(s: &Server, who: &str) -> Vec<db::SessionInfo> {
 
 /// `relevo send` as `who`, with a home of its own and `stdin` as its input.
 async fn send(s: &Server, who: &str, args: &[&str], stdin: Option<&str>) -> Output {
+    let mut child = command(s, who, args).spawn().unwrap();
+    let mut input = child.stdin.take().unwrap();
+    if let Some(text) = stdin {
+        input.write_all(text.as_bytes()).await.unwrap();
+    }
+    drop(input);
+    child.wait_with_output().await.unwrap()
+}
+
+fn command(s: &Server, who: &str, args: &[&str]) -> Command {
     let home = s.dir.join("home");
     std::fs::create_dir_all(&home).unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_relevo"));
@@ -102,13 +112,15 @@ async fn send(s: &Server, who: &str, args: &[&str], stdin: Option<&str>) -> Outp
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child = cmd.spawn().unwrap();
-    let mut input = child.stdin.take().unwrap();
-    if let Some(text) = stdin {
-        input.write_all(text.as_bytes()).await.unwrap();
-    }
-    drop(input);
-    child.wait_with_output().await.unwrap()
+    cmd
+}
+
+/// The notes on the server.
+fn notes(s: &Server) -> i64 {
+    s.app
+        .db()
+        .query_row("SELECT count(*) FROM notes", [], |r| r.get(0))
+        .unwrap()
 }
 
 fn text(out: &[u8]) -> String {
@@ -205,7 +217,7 @@ async fn errors_exit_1_with_the_servers_code() {
     assert!(out.stdout.is_empty());
     let err = text(&out.stderr);
     assert!(err.contains("UNKNOWN_PERSON"), "{err}");
-    assert!(err.contains("Nothing was sent."), "{err}");
+    assert_eq!(err.matches("othing was sent").count(), 1, "{err}");
     assert!(err.contains("- @oscar (Oscar)"), "{err}");
     assert!(sessions(&s, "ana").is_empty());
     // A thread that is not there (or not hers): nothing is written, no session stays.
@@ -224,15 +236,42 @@ async fn errors_exit_1_with_the_servers_code() {
     let out = send(&s, "ana", &["@oscar hi"], None).await;
     assert_eq!(out.status.code(), Some(1));
     assert!(out.stdout.is_empty());
-    assert!(
-        text(&out.stderr).contains("UNAUTHORIZED"),
-        "{}",
-        text(&out.stderr)
-    );
-    let notes: i64 = s
-        .app
-        .db()
-        .query_row("SELECT count(*) FROM notes", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(notes, 0);
+    // One line: the session it never had is not ended, nor reported.
+    let err = text(&out.stderr);
+    assert!(err.starts_with("Error: UNAUTHORIZED: "), "{err}");
+    assert_eq!(err.lines().count(), 1, "{err}");
+    // A server that is not there: one line, which says what to check, and no wait to end the
+    // session.
+    s.url = "http://127.0.0.1:9".into();
+    let out = send(&s, "ana", &["@oscar hi"], None).await;
+    assert_eq!(out.status.code(), Some(1));
+    let err = text(&out.stderr);
+    assert!(err.starts_with("Error: could not reach"), "{err}");
+    assert!(err.contains("check with `relevo web`"), "{err}");
+    assert_eq!(err.lines().count(), 1, "{err}");
+    assert_eq!(notes(&s), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_note_may_start_with_a_hyphen() {
+    let s = server(&["oscar", "ana"]).await;
+    let out = send(&s, "ana", &["-5 tests fail on main, @oscar"], None).await;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let id = text(&out.stdout).trim_end().to_string();
+    let t = thread(&s, "oscar", &id).await;
+    assert_eq!(t["notes"][0]["text"], "-5 tests fail on main, @oscar");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reader_gone_is_no_error_once_the_note_is_written() {
+    let s = server(&["oscar", "ana"]).await;
+    let mut child = command(&s, "ana", &["@oscar main is red"]).spawn().unwrap();
+    // Nobody reads the id: writing it fails with a broken pipe.
+    drop(child.stdout.take());
+    drop(child.stdin.take());
+    let out = child.wait_with_output().await.unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stderr), "Sent to @oscar (1 person).\n");
+    assert_eq!(notes(&s), 1);
+    assert!(sessions(&s, "ana").is_empty());
 }
