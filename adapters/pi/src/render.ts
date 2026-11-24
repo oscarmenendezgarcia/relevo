@@ -36,7 +36,7 @@ function namesATag(chars: string[], from: number): boolean {
 /**
  * Keeps a note from closing or opening a wrapper: every `<untrusted`, `</untrusted`,
  * `<channel` and `</channel` becomes `&lt;…`, read as a model may read it: `<` may be
- * full-width `＜` or small `﹤`, `/` may be `／`, `∕` or `⁄`, the name in any case or in
+ * full-width `＜`, small `﹤` or a look-alike (OPENS), `/` may be `／`, `∕` or `⁄`, the name in any case or in
  * full-width letters, with whitespace or invisible characters anywhere after the `<`. As in
  * relevo mcp (src/render.rs) and the Hermes plugin, character for character.
  */

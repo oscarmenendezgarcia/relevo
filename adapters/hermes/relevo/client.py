@@ -595,8 +595,9 @@ def _names_a_tag(text: str, start: int) -> bool:
 
 def _defang(text: str) -> str:
     """Others' text may not open or close an <untrusted> or <yours> block of its own: every "<"
-    that reads as one (a full-width "＜" or small "﹤", "／", "∕" or "⁄" for the slash, any case
-    or full-width letters, whitespace or invisible characters anywhere after it) is "&lt;"."""
+    that reads as one (a full-width "＜", small "﹤" or a look-alike, see _OPENS; "／", "∕" or "⁄"
+    for the slash, any case or full-width letters, whitespace or invisible characters anywhere
+    after it) is "&lt;"."""
     text = text or ""
     return "".join("&lt;" if c in _OPENS and _names_a_tag(text, i + 1) else c for i, c in enumerate(text))
 

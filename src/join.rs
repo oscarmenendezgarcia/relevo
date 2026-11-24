@@ -92,8 +92,9 @@ pub(crate) struct Tries {
 
 impl Tries {
     /// Counts a try from `addr` at `now`, or refuses it when that address, or everyone, made
-    /// too many.
-    fn start(&mut self, addr: IpAddr, now: i64) -> Result<(), Refusal> {
+    /// too many. Returns the time it is counted at: never before the newest one, so the queue
+    /// stays in order when requests race or the clock steps back.
+    fn start(&mut self, addr: IpAddr, now: i64) -> Result<i64, Refusal> {
         let since = now - FAILURE_WINDOW_SECS;
         while let Some(&(at, old)) = self.queue.front()
             && at <= since
@@ -122,9 +123,13 @@ impl Tries {
         if mine >= MAX_FAILURES {
             return Err(Refusal::Limited);
         }
-        self.queue.push_back((now, addr));
+        let at = self
+            .queue
+            .back()
+            .map_or(now, |&(newest, _)| newest.max(now));
+        self.queue.push_back((at, addr));
         *self.by_address.entry(addr).or_default() += 1;
-        Ok(())
+        Ok(at)
     }
 
     /// Takes back the try `addr` started at `at`, if it is still in the window.
@@ -157,8 +162,8 @@ struct Try<'a> {
 
 /// Starts a try from `addr`, or refuses it when that address, or everyone, made too many.
 fn start(app: &App, addr: IpAddr, now: i64) -> Result<Try<'_>, Refusal> {
-    lock(&app.join_tries).start(addr, now)?;
-    Ok(Try { app, addr, at: now })
+    let at = lock(&app.join_tries).start(addr, now)?;
+    Ok(Try { app, addr, at })
 }
 
 impl Try<'_> {
@@ -662,6 +667,18 @@ mod tests {
         // A try that already left the window is not taken back twice.
         t.forget(ip(1), 101);
         assert_eq!(t.by_address.len(), 1);
+    }
+
+    #[test]
+    fn a_clock_that_steps_back_keeps_the_queue_in_order() {
+        let mut t = Tries::default();
+        assert_eq!(t.start(ip(1), 200).ok(), Some(200));
+        // The clock stepped back: the try counts as at the newest time, so it leaves with it.
+        assert_eq!(t.start(ip(2), 100).ok(), Some(200));
+        t.forget(ip(2), 200);
+        assert_eq!((t.queue.len(), t.by_address.len()), (1, 1));
+        assert!(t.start(ip(3), 200 + FAILURE_WINDOW_SECS).is_ok());
+        assert_eq!((t.queue.len(), t.by_address.len()), (1, 1));
     }
 
     #[test]
