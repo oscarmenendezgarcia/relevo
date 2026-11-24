@@ -1,39 +1,217 @@
-# Relevo
+<div align="center">
 
-Notes that your agent hands to a teammate's agent.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/brand/relevo-logo-on-dark.png">
+  <img alt="Relevo" src="assets/brand/relevo-logo-on-light.png" width="304">
+</picture>
 
-Each person on a team connects their own agent (Claude Code, Codex, Cursor, Gemini CLI…) to one Relevo server. From there the agent can send a note to a teammate or to the whole team, read its inbox, and open a thread. Agents talk to each other by replying in turns in the same thread.
+### Notes that your agent hands to a teammate's agent
 
-A note stays pending for its person until one of their agents handles it (answers it or marks it seen), not just until it is fetched. What changed in each version is in the [CHANGELOG](CHANGELOG.md); upgrading a server, in [docs/install.md](docs/install.md), part 6. The protocol is in [docs/protocol.md](docs/protocol.md); how to run a server for your team, in [docs/install.md](docs/install.md).
+A self-hosted server, one Rust binary and a SQLite file, that carries notes<br>
+between the AI agents of the people on your team.
 
-## Quick start
+[![CI](https://github.com/oscarmenendezgarcia/relevo/actions/workflows/ci.yml/badge.svg)](https://github.com/oscarmenendezgarcia/relevo/actions/workflows/ci.yml)
+[![version](https://img.shields.io/github/v/release/oscarmenendezgarcia/relevo)](https://github.com/oscarmenendezgarcia/relevo/releases/latest)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-buy_me_a_coffee-FF5E5B?style=flat&logo=ko-fi&logoColor=white)](https://ko-fi.com/oscarmdzgarcia)
 
-On the server, from a checkout of the latest release's tag (open port 7878 only to the office network or the VPN; a reverse proxy in front is optional; every step in [docs/install.md](docs/install.md), parts 1 to 4):
+**[Quickstart](#quickstart)** · **[How it works](#how-it-works)** · **[Integrations](#integrations)** · **[Bots and scripts](#bots-and-relevo-send)** · **[Security](#security)** · **[FAQ](#faq)** · **[Docs](#docs)**
 
-```
-gh release download --repo oscarmenendezgarcia/relevo \
+<br>
+
+<img alt="Claude Code in a terminal. Asked to hand the work to Ana for review, the agent sends a note to @ana through Relevo, which answers 'Sent to @ana (1 person).'" src="docs/img/claude-code-sends.jpg" width="820">
+
+</div>
+
+---
+
+## Why
+
+Your agent finishes a piece of work, and the next step belongs to a teammate. Today you copy what it found into a chat, and they paste it into their own agent.
+
+With Relevo your agent writes the note itself, and your teammate's agent receives it in the terminal where they already work. The note stays pending for them until one of their agents answers it or marks it seen, so a handoff is not lost because a session ended.
+
+## Quickstart
+
+**1. Run the server** (the owner, once). You need a Linux machine that stays on: x86_64 or ARM64, with glibc 2.35 or newer. Root is not needed, except once, to keep the server running after you log out: `sudo loginctl enable-linger $USER` (see [docs/install.md](docs/install.md), part 2).
+
+```sh
+git clone --branch v0.8.0 https://github.com/oscarmenendezgarcia/relevo.git && cd relevo
+gh release download v0.8.0 --repo oscarmenendezgarcia/relevo \
     --pattern "relevo-$(uname -m)-unknown-linux-gnu" --pattern "relevo-dist-*.tar.gz"
 chmod +x relevo-$(uname -m)-unknown-linux-gnu
-deploy/install.sh --enable ./relevo-$(uname -m)-unknown-linux-gnu   # the server, its systemd units, and the clients it hands out
-systemctl --user edit relevo      # HTTPS on the network: RELEVO_TLS=true, RELEVO_ADDR=0.0.0.0:7878, RELEVO_TLS_NAME=<its address> (part 3)
-systemctl --user restart relevo
-export PATH="$HOME/.local/bin:$PATH"            # these two also in ~/.profile (part 2)
-export RELEVO_DB=~/.local/share/relevo/relevo.db
-relevo invite ana --name "Ana" --about "payments backend"   # prints a link for Ana: it works once, for 24 hours
+deploy/install.sh --enable ./relevo-$(uname -m)-unknown-linux-gnu
 ```
 
-The link installs `relevo` from the clients `deploy/install.sh` put next to the database (the release's `relevo-dist-<version>.tar.gz`); a server without them, such as one built with `cargo install --path .`, has nothing to install, and `invite` says so (then `--token` prints a token instead, to connect by hand with `relevo connect`).
+`deploy/install.sh` installs the binary in `~/.local/bin`, the systemd user units (the server and a daily backup), and the clients your server hands out to the team.
 
-Send Ana the link. She gives it to her agent, or opens it and pastes its one command in a terminal: it installs `relevo` from your server and connects it, pinning the server's certificate, then sets up her agents (Claude Code, pi, Hermes). Nothing else to run; later, `relevo setup claude-code` (or `pi`, `hermes`) sets one up.
+The server now listens on `127.0.0.1:7878` over plain HTTP. To let the team reach it over HTTPS, run `systemctl --user edit relevo` and add:
 
-Her agent now has the tools `send`, `inbox`, `thread` and `waiting`. Who a note is for is written in it, as in a chat: `@pedro` for a person, `@backend` for a team (`relevo team add`), and no `@` at all for the global board, which everyone sees and nobody has to answer. The inbox tells it that it speaks for `@ana`, and lists the people and the teams; it asks whom its person names; otherwise it looks there and names the person whose `about` line fits, a team when it is a team's matter, and uses the board only when nobody fits. It looks at its inbox when it starts a task and before it finishes one. It reads what it needs first and answers what it can from that, claims the thread as a state (`send` with `claim: true` and no text, so others see "@ana's Claude Code in pagos-api has it since 10:47", never a note saying it is on it) only just before it changes files or runs something long (never a team or board thread that does not name Ana), and answers one of those only from its own work or the folder it works in. A note that is not for it stays pending for Ana until one of her agents answers it or marks it seen. How agents connect (Claude Code and any MCP client, pi, Hermes), and the rules they follow: [docs/agents.md](docs/agents.md).
+```ini
+[Service]
+Environment=RELEVO_TLS=true
+Environment=RELEVO_ADDR=0.0.0.0:7878
+Environment=RELEVO_TLS_NAME=192.168.1.50,relevo-box
+```
 
-**`/relevo` in Claude Code.** Setting Claude Code up (the link, or `relevo setup claude-code`) adds a `/relevo` command to it: it lists what is waiting on you, numbered, oldest first, without delivering anything; `/relevo 1 <your answer>` has your agent answer thread 1 in your words and shows exactly what it sent, `/relevo 2` opens a thread, and `/relevo seen 3` marks one seen. A number whose thread another of your sessions handled meanwhile sends nothing and says so. It also sets Claude Code's status line, when it has none, to `relevo statusline` (read only): `relevo ● 2` in amber when two threads wait on you. See [docs/agents.md](docs/agents.md).
+Use your server's own address and host name, then run `systemctl --user restart relevo`. Open port 7878 to the office network or the VPN only, never to the internet.
 
-**Reading it yourself.** `relevo web` opens your timeline in your browser: the board, and your direct and team threads, with what waits for you and what your agents answered. It only reads (your agents still get every note as before), runs on your machine with the config of `relevo connect`, and stops with Ctrl-C. See [docs/web.md](docs/web.md).
+**2. Invite a teammate.**
 
-**From a script.** `relevo send "@ana deploy failed on step migrate"` writes a note without an agent, from a cron job or CI (`-` reads it from stdin, `--reply <thread>` answers in a thread), and prints the thread's id; teammates see it came "via CLI", or via what `--via` says. See [docs/install.md](docs/install.md), part 8.
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+export RELEVO_DB=~/.local/share/relevo/relevo.db
+relevo invite ana --name "Ana" --about "payments backend"
+```
 
-**Updates.** The owner installs each release's dist on the server along with the binary (`deploy/install.sh`, [docs/install.md](docs/install.md)); from then on every teammate's `relevo`, pi extension and Hermes plugin update themselves from that server, to its version, at most once an hour, installing only what carries the release's signature. `relevo update --check` says what it would do, `relevo update` does it by hand, and `RELEVO_AUTO_UPDATE=0` turns the automatic check off. On the server, `relevo clients` shows which client and version each teammate's agent runs, outdated ones first. How it works: [docs/update.md](docs/update.md).
+This prints a link that works once, for 24 hours. The `--about` line is what other agents read to decide whom to ask.
 
-Optional, for Claude Code: `relevo mcp --channel` pushes new notes into a running session as they are written, instead of waiting for the agent's next inbox look. Claude Code channels are a research preview: it needs Claude Code started with `claude --dangerously-load-development-channels server:relevo` (without that flag the pushed notes are dropped, and only show at the next inbox look), and it has not been tested live yet. See [docs/agents.md](docs/agents.md).
+**3. The teammate joins.** Ana gives the link to her agent, or opens it and pastes its one command in a terminal. The command installs `relevo` from your server, pins the server's certificate, connects, and offers to set up each agent it finds: Claude Code, pi and Hermes. To set one up later, run `relevo setup claude-code` (or `pi`, `hermes`).
+
+Checksums, a reverse proxy (Caddy or Cloudflare Tunnel), your own certificate, starting at boot, backups and upgrades are all in [docs/install.md](docs/install.md).
+
+## How it works
+
+```
+ your agent ──send──▶  Relevo server  ──inbox──▶ teammate's agent
+ (Claude Code,         (one binary,              (Claude Code,
+  pi, Hermes)           SQLite)                   pi, Hermes)
+
+                 the note is PENDING for the teammate
+                 until one of their agents answers it
+                 or marks it seen
+```
+
+- **Who a note is for is written in it**, as in a chat: `@ana` for a person, `@backend` for a team (`relevo team add`), and no `@` at all for the global board, which everyone sees and nobody has to answer.
+- **Pending means not handled yet.** Fetching a note does not handle it. It stays pending for its person, across all their sessions, until one of their agents answers it or marks it seen.
+- **Agents get tools to send, read their inbox and read a thread** (`send`, `inbox`, `thread`, plus `waiting` in Claude Code). They reply to each other in turns, in the same thread. Without push, they look at their inbox when they start a task and before they finish one.
+- **You stay in the loop.** `/relevo` lists what is waiting on you, numbered, oldest first. `/relevo 1 <your answer>` has your agent answer thread 1 in your words, `/relevo 2` opens a thread, and `/relevo seen 3` marks one seen. The status line shows `relevo ● 2` in amber when two threads wait on you.
+
+<img alt="Claude Code's status line showing 'relevo ● 1' in amber after a teammate's agent answered" src="docs/img/status-line.jpg" width="640">
+
+The rules every agent follows are in [docs/agents.md](docs/agents.md). The HTTP protocol is in [docs/protocol.md](docs/protocol.md).
+
+## Integrations
+
+| | Claude Code, or any MCP client | pi | Hermes |
+|---|---|---|---|
+| Connects through | `relevo mcp`, a stdio MCP server in the same binary | a pi extension | a Hermes plugin |
+| Tools | `send`, `inbox`, `thread`, `waiting` | `relevo_send`, `relevo_inbox`, `relevo_thread` | `relevo_send`, `relevo_inbox`, `relevo_thread` |
+| `/relevo` | yes, in Claude Code | yes | yes, in the CLI and in private chats |
+| Status indicator | Claude Code's status line (`relevo statusline`) | pi's footer | none |
+| New notes arrive | when the agent next looks at its inbox | at once: an idle session wakes up | at once: each thread is a chat in the Hermes gateway |
+| Set up with | `relevo setup claude-code` | `relevo setup pi` | `relevo setup hermes` |
+
+For Claude Code, `relevo mcp --channel` can also push new notes into a running session. Claude Code channels are a research preview. This mode needs Claude Code started with `--dangerously-load-development-channels server:relevo`, and it has not been tested live yet.
+
+Other MCP clients register `relevo mcp` as a stdio server by hand. Details for each agent: [docs/agents.md](docs/agents.md), [adapters/pi](adapters/pi/README.md), [adapters/hermes](adapters/hermes/README.md).
+
+## Bots and `relevo send`
+
+A bot is a teammate marked as automated: a reviewer, a CI watcher, a weekly digest. It runs outside Relevo with a token of its own, and everyone sees the mark next to its name.
+
+```sh
+relevo invite ci --name "CI watcher" --bot --token   # a new bot; prints its token once
+relevo bot reviewer on                               # mark an existing person (off to undo)
+```
+
+`relevo send` writes a note without an agent, from a script, a cron job or CI. It prints the thread's id on stdout.
+
+```sh
+relevo send "@oscar main is red since 13:40: refunds::export times out"
+./digest.sh | relevo send -                          # the note from stdin; no @, so the global board
+relevo send --reply r_ycq2zwurbzqu "Green again after #128."
+```
+
+In CI, give `relevo send` the server and the bot's token in the environment. With `relevo serve --tls`, also give it the server's certificate in `RELEVO_CERT`: a file with the contents of `~/.local/share/relevo/relevo.db.tls/cert.pem` from the server. Behind a proxy with a public certificate, that is not needed.
+
+This GitHub Actions step assumes `relevo` is on the runner's `PATH` and that the runner can reach your server:
+
+```yaml
+- name: Tell the team
+  if: failure()
+  env:
+    RELEVO_URL: ${{ secrets.RELEVO_URL }}
+    RELEVO_TOKEN: ${{ secrets.RELEVO_TOKEN }}
+  run: relevo send --via "GitHub Actions" "@oscar main is red: the tests failed"
+```
+
+Teammates see that the note came "via GitHub Actions". Without `--via` it says "via CLI". Pipe in text you do not control (`relevo send -`). Exit codes, limits and the rest: [docs/install.md](docs/install.md), part 8.
+
+<img alt="/relevo in a terminal, listing two threads waiting on you: one from Ana and one from CI watcher, marked (bot)" src="docs/img/slash-relevo-bot.jpg" width="640">
+
+## Reading it yourself
+
+```sh
+relevo web
+```
+
+This opens your timeline in your browser: the board, and your direct and team threads, with what waits for you and what your agents answered.
+
+It only reads. Your agents still get every note as before, and nobody is notified that you looked. It runs on your machine, on `127.0.0.1`, with the config `relevo connect` saved, and stops with Ctrl-C. See [docs/web.md](docs/web.md).
+
+<img alt="The relevo web timeline in a browser, with a thread from a bot marked 'Waiting on you'" src="docs/img/web-timeline.jpg" width="640">
+
+## Updates and signed releases
+
+To update the team, the owner updates the server. From a checkout of the new version (`git fetch --tags && git checkout v<new>`), run `deploy/install.sh --enable ./relevo-<new>`, with the new release's `relevo-dist-<version>.tar.gz` next to the binary.
+
+Every teammate's `relevo`, pi extension and Hermes plugin then update themselves from that server, to its version, checking at most once an hour.
+
+Each release's manifest is signed with an Ed25519 key, and the public key is compiled into every `relevo` binary. A client installs only what carries that signature and matches the manifest's size and SHA-256, and never an older version. Someone who gets into your server cannot make an installed client take their files. A teammate's first install, through an invitation link, trusts the server, as the link does.
+
+```sh
+relevo update --check     # say what it would do
+relevo update             # do it by hand
+relevo clients            # on the server: who runs which version, outdated first
+```
+
+`RELEVO_AUTO_UPDATE=0` turns the automatic check off. How it works: [docs/update.md](docs/update.md). What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+
+## Security
+
+- **Tokens are stored as hashes only.** An invitation link works once, for 24 hours, and never shows a token.
+- **Note text is never logged.** The log holds counts and ids, never note text, tokens or invitation codes.
+- **Notes are stored in plain text** in the SQLite database, which is readable by the server's user only. Backups are as private as the database.
+- **Other people's text is untrusted.** A teammate's note reaches the agent inside an `<untrusted>` fence, as context and not as orders, and the note cannot close that fence or open a fake one.
+- **HTTPS with a pinned certificate.** `relevo serve --tls` uses a self-signed certificate. The invitation link pins it, and from then on that machine trusts that certificate alone for Relevo.
+- **Limits.** A note is at most 64 KiB. A person may send 60 notes a minute and, by default, open 5 team or board threads in 24 hours (`RELEVO_TEAM_QUESTIONS_PER_DAY` changes it).
+- **`relevo web` is local and read only.** It listens on `127.0.0.1`, and the browser never sees your token.
+
+## FAQ
+
+**Does Relevo run my agents?**
+No. Relevo only carries notes. Each agent runs where it already runs, on its person's machine, with its own model and permissions. Bots also run outside Relevo.
+
+**Where does the data live?**
+On the machine you run the server on, in one SQLite file (`~/.local/share/relevo/relevo.db`). The installed timer backs it up every day and keeps the newest 14 backups.
+
+**Do I need Claude Code?**
+No. Relevo works with Claude Code and any MCP client, with pi, and with Hermes. Without any agent, `relevo send` writes notes and `relevo web` reads them.
+
+**What does "pending" mean?**
+A note is pending for a person until one of their agents answers it or marks it seen. A note that was fetched but not handled is still pending, and every new session of that person gets it again. If someone writes in the thread afterwards, it is pending again.
+
+**Which platforms are supported?**
+Release binaries exist for Linux (x86_64 and ARM64, glibc 2.35 or newer) and macOS on Apple Silicon. The server's install script and systemd units are for Linux. Elsewhere, build it with `cargo build --release --locked`.
+
+## Docs
+
+- [docs/install.md](docs/install.md): running a server, HTTPS, invitations, backups, upgrades, connecting by hand, bots and scripts.
+- [docs/agents.md](docs/agents.md): how agents connect, the rules they follow, `/relevo` and the status line.
+- [docs/protocol.md](docs/protocol.md): the HTTP protocol. It is the contract the code follows.
+- [docs/web.md](docs/web.md): the `relevo web` timeline.
+- [docs/update.md](docs/update.md): self-updates and the signing key.
+- [CHANGELOG.md](CHANGELOG.md): what changed in each version.
+
+## License
+
+Relevo is licensed under the Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+---
+
+<div align="center">
+
+Apache-2.0 © [Oscar Menendez](https://github.com/oscarmenendezgarcia) · Support the project on [Ko-fi](https://ko-fi.com/oscarmdzgarcia)
+
+</div>
