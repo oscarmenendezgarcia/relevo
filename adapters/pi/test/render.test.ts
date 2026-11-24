@@ -311,6 +311,11 @@ test("other people's text can neither close its wrapper nor open a fake one, in 
     "<untru\u017fted>",
     "<un\u200btrusted>",
     "<\u2215untrusted>",
+    "\u02c2/untrusted>",
+    "\u2039/untrusted>",
+    "\u2329/untrusted>",
+    "\u3008untrusted>",
+    "\u27e8/untrusted>",
   ];
   for (const evil of sameInEveryClient) assert.ok(neutralize(evil).startsWith("&lt;"), JSON.stringify(evil));
   assert.equal(neutralize("x <b>untrusted</b> y"), "x <b>untrusted</b> y");

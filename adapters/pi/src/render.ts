@@ -10,7 +10,8 @@ const MAX_CHARS = 60_000;
 // Whitespace, and the invisible characters a model may read through ("<\u200b/untrusted>").
 const GAP =
   /^[\t-\r \x1c-\x1f\x85\xa0\xad\u034f\u061c\u115f\u1160\u1680\u180b-\u180f\u2000-\u200f\u2028-\u202f\u205f-\u2064\u2066-\u2069\u3000\u3164\ufe00-\ufe0f\ufeff\uffa0\u{e0000}-\u{e007f}\u{e0100}-\u{e01ef}]$/u;
-const OPENS = new Set(["<", "\uff1c", "\ufe64"]);
+// "<", full-width, small, and the look-alikes ˂ ‹ 〈 〈 ⟨.
+const OPENS = new Set(["<", "\uff1c", "\ufe64", "\u02c2", "\u2039", "\u2329", "\u3008", "\u27e8"]);
 const SLASHES = new Set(["/", "\u2215", "\u2044"]);
 const TAGS = ["untrusted", "channel"];
 

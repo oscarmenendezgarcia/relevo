@@ -568,7 +568,7 @@ def you_of(data: dict) -> Optional[str]:
 _GAP = re.compile("[\t-\r \x1c-\x1f\x85\xa0\xad\u034f\u061c\u115f\u1160\u1680\u180b-\u180f\u2000-\u200f"
                   "\u2028-\u202f\u205f-\u2064\u2066-\u2069\u3000\u3164\ufe00-\ufe0f\ufeff\uffa0"
                   "\U000e0000-\U000e007f\U000e0100-\U000e01ef]")
-_OPENS = "<\uff1c\ufe64"
+_OPENS = "<\uff1c\ufe64\u02c2\u2039\u2329\u3008\u27e8"  # "<", full-width, small, look-alikes
 _SLASHES = "/\u2215\u2044"
 _TAGS = ("untrusted", "yours")
 

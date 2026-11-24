@@ -12,7 +12,7 @@ const TAGS: [&[u8]; 2] = [b"untrusted", b"channel"];
 
 /// `text` with every `<untrusted`, `</untrusted`, `<channel` and `</channel` turned into
 /// `&lt;…`, so it can neither close the block it sits in nor fake another one. Read as a model
-/// may read it: `<` may be full-width `＜` or small `﹤`, `/` may be `／`, `∕` or `⁄`, the name
+/// may read it: `<` may be full-width `＜`, small `﹤` or a look-alike (see `is_open`), `/` may be `／`, `∕` or `⁄`, the name
 /// may be in any case or in full-width letters, and whitespace or invisible characters may come
 /// anywhere after the `<`. The pi extension and the Hermes plugin do the same, character for
 /// character.
@@ -20,7 +20,7 @@ pub fn neutralise(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut last = 0;
     for (i, c) in text.char_indices() {
-        if matches!(c, '<' | '\u{ff1c}' | '\u{fe64}') && names_a_tag(&text[i + c.len_utf8()..]) {
+        if is_open(c) && names_a_tag(&text[i + c.len_utf8()..]) {
             out.push_str(&text[last..i]);
             out.push_str("&lt;");
             last = i + c.len_utf8();
@@ -28,6 +28,21 @@ pub fn neutralise(text: &str) -> String {
     }
     out.push_str(&text[last..]);
     out
+}
+
+/// Whether `c` reads as `<`: itself, full-width `＜`, small `﹤`, or the look-alike `˂`, `‹`,
+/// `〈`, `〈` and `⟨`.
+fn is_open(c: char) -> bool {
+    matches!(
+        c,
+        '<' | '\u{ff1c}'
+            | '\u{fe64}'
+            | '\u{2c2}'
+            | '\u{2039}'
+            | '\u{2329}'
+            | '\u{3008}'
+            | '\u{27e8}'
+    )
 }
 
 /// Whether `rest`, after a `<`, reads as one of `TAGS`, opened or closed.
@@ -754,7 +769,7 @@ mod tests {
     }
 
     /// Ways to write a closing or opening tag that each client must catch.
-    const SAME_IN_EVERY_CLIENT: [&str; 14] = [
+    const SAME_IN_EVERY_CLIENT: [&str; 19] = [
         "<\u{180b}/untrusted>",
         "<\u{e0100}/untrusted>",
         "\u{ff1c}\u{ff0f}untrusted\u{ff1e}",
@@ -769,6 +784,11 @@ mod tests {
         "<untru\u{17f}ted>",
         "<un\u{200b}trusted>",
         "<\u{2215}untrusted>",
+        "\u{2c2}/untrusted>",
+        "\u{2039}/untrusted>",
+        "\u{2329}/untrusted>",
+        "\u{3008}untrusted>",
+        "\u{27e8}/untrusted>",
     ];
 
     #[test]
