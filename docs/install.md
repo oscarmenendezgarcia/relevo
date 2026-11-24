@@ -370,12 +370,12 @@ Each running agent counts as one session of yours; the owner sees them with `rel
 
 ## 8. Bots and scripts
 
-A script, a cron job or CI can write a note without an agent: `relevo send`. It reads the server and the token as `relevo mcp` does (the config `relevo connect` saved, or `RELEVO_URL` and `RELEVO_TOKEN`), so give a bot a person of its own (`relevo invite ci --name "CI watcher" --bot --token`) and its token.
+A script, a cron job or CI can write a note without an agent: `relevo send`. It reads the server and the token as `relevo mcp` does (the config `relevo connect` saved, or `RELEVO_URL` and `RELEVO_TOKEN`), so give a bot a person of its own (`relevo invite ci --name "CI watcher" --bot --token`) and its token. A server on `serve --tls` uses a self-signed certificate, which a machine that never ran `relevo connect` (a CI runner) does not trust: give it `RELEVO_CERT`, a file with the server's `relevo.db.tls/cert.pem` (`~/.local/share/relevo/relevo.db.tls/cert.pem` with `deploy/install.sh`). Behind a proxy with a public certificate it is not needed.
 
 ```
 relevo send "@oscar main is red since 13:40: refunds::export times out on macOS"   # prints the new thread's id
 ./digest.sh | relevo send -                                   # the note from stdin; no @: the global board
-relevo send --reply r_8f2kq1 "Green again after #128."         # answers in that thread
+relevo send --reply r_ycq2zwurbzqu "Green again after #128."   # answers in that thread
 RELEVO_URL=https://relevo.example.com RELEVO_TOKEN=$CI_TOKEN \
   relevo send --via "GitHub Actions" "@ana deploy of pagos-api failed on step migrate"
 ```
