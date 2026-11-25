@@ -56,7 +56,12 @@ fn under_the_units_sandbox_serve_tls_names_the_machines_addresses() {
     std::fs::create_dir(&dir).unwrap();
     let mut run = Command::new("systemd-run");
     run.args(["--user", "--wait", "--pipe", "--quiet", "--collect"])
-        .args(["-p", "RuntimeMaxSec=3"]);
+        .args(["-p", "RuntimeMaxSec=3"])
+        // The user manager's environment, not this one: never the real ~/.config/relevo/server.key.
+        .arg(format!(
+            "--setenv=RELEVO_KEY_FILE={}",
+            dir.join("server.key").display()
+        ));
     for key in SANDBOX {
         let value = setting(&unit, key).unwrap_or_else(|| panic!("the unit has no {key}="));
         run.arg("-p").arg(format!("{key}={value}"));

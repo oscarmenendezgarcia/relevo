@@ -5,12 +5,13 @@
 //! (`tests/fixtures/make-layout9.sh`), migrated in place when this version first opens them, then
 //! used through the HTTP router.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
+use relevo::crypto::Key;
 use relevo::{App, Clock, api, db};
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -81,6 +82,18 @@ fn made_by(path: &str, dump: &str, layout: i64) -> i64 {
     assert_eq!(version, layout);
     conn.query_row("SELECT max(last_seen) FROM sessions", [], |r| r.get(0))
         .unwrap()
+}
+
+/// `serve`'s open of the database at `path`, with a key file of its own next to it (never the
+/// real one).
+fn serve_open(path: &str) -> anyhow::Result<(rusqlite::Connection, Key)> {
+    db::open_migrating(path, &Path::new(path).with_extension("key"))
+}
+
+/// The server over the database at `path` as `serve` opens it, on a clock fixed at `now`.
+fn serve(path: &str, now: i64) -> Arc<App> {
+    let (conn, key) = serve_open(path).unwrap();
+    App::with_dist(conn, Clock::fixed(now), 5, None, key).unwrap()
 }
 
 fn user_version(path: &str) -> i64 {
@@ -192,11 +205,7 @@ async fn a_layout_5_database_migrates_and_what_waited_for_a_reply_stays_pending(
     let dir = TempDir::new();
     let path = dir.db();
     let seen = layout5(&path);
-    let app = App::new(
-        db::open_migrating(&path).unwrap(),
-        Clock::fixed(seen + 60),
-        5,
-    );
+    let app = serve(&path, seen + 60);
     assert_eq!(user_version(&path), 10);
     let f = Fixture {
         app,
@@ -410,7 +419,7 @@ fn a_migrated_database_has_the_layout_of_a_new_one() {
         let migrated = dir.0.join(name);
         let migrated = migrated.to_str().unwrap();
         make(migrated);
-        db::open_migrating(migrated).unwrap();
+        serve_open(migrated).unwrap();
         assert_eq!(layout(migrated), layout(new), "{name}");
         // Every reference holds: the threads table was made again.
         let conn = rusqlite::Connection::open(migrated).unwrap();
@@ -444,7 +453,7 @@ fn a_layout_6_database_with_a_broken_thread_reference_names_the_row_and_refuses_
         )
         .unwrap();
     drop(conn);
-    let err = format!("{:#}", db::open_migrating(&path).unwrap_err());
+    let err = format!("{:#}", serve_open(&path).unwrap_err());
     // Which row, not only how many: the owner has to be able to find it.
     assert!(
         err.contains(&format!("notes rowid {note} refers to threads")),
@@ -462,7 +471,7 @@ async fn a_layout_7_database_gets_the_meta_table_and_this_versions_release_notes
     let dir = TempDir::new();
     let path = dir.db();
     let seen = layout7(&path);
-    let conn = db::open_migrating(&path).unwrap();
+    let (conn, key) = serve_open(&path).unwrap();
     // The table is there, and has announced nothing: this start is an upgrade.
     let announced = |conn: &rusqlite::Connection| -> Option<String> {
         conn.query_row("SELECT value FROM meta WHERE key = 'announced'", [], |r| {
@@ -475,26 +484,26 @@ async fn a_layout_7_database_gets_the_meta_table_and_this_versions_release_notes
     // This build posts its notes only if it is a release: its version's section dated, and first
     // in the CHANGELOG. A build between releases posts and records nothing.
     let version = env!("CARGO_PKG_VERSION");
-    let outcome = announce(&conn, version, CHANGELOG, true, seen + 30).unwrap();
+    let outcome = announce(&conn, &key, version, CHANGELOG, true, seen + 30).unwrap();
     if release_section(CHANGELOG, version).is_none() {
         assert_eq!(outcome, Outcome::NotReleased);
         assert_eq!(announced(&conn), None);
     }
     // The release posts them, once: a restart posts nothing.
     let release = "# Changelog\n\n## 9.0.0 (14-nov-2026)\n\nThreads never close.\n";
-    let Outcome::Posted(thread) = announce(&conn, "9.0.0", release, true, seen + 30).unwrap()
+    let Outcome::Posted(thread) = announce(&conn, &key, "9.0.0", release, true, seen + 30).unwrap()
     else {
         panic!("not posted");
     };
     assert_eq!(
-        announce(&conn, "9.0.0", release, true, seen + 40).unwrap(),
+        announce(&conn, &key, "9.0.0", release, true, seen + 40).unwrap(),
         Outcome::Announced
     );
     assert_eq!(announced(&conn).as_deref(), Some("9.0.0"));
     let version = "9.0.0";
     // Everyone of the old database takes part, and nobody has it pending.
     let f = Fixture {
-        app: App::new(conn, Clock::fixed(seen + 60), 5),
+        app: App::with_dist(conn, Clock::fixed(seen + 60), 5, None, key).unwrap(),
         v: serde_json::from_str(FIXTURE7).unwrap(),
     };
     for who in ["ana", "bob", "carl"] {
@@ -523,7 +532,7 @@ fn a_failed_migration_from_layout_7_leaves_it_at_layout_7() {
              BEGIN SELECT RAISE(ABORT, 'refused for the test'); END;",
         )
         .unwrap();
-    let err = format!("{:#}", db::open_migrating(&path).unwrap_err());
+    let err = format!("{:#}", serve_open(&path).unwrap_err());
     assert!(err.contains("from layout 7 to 8"), "{err}");
     assert!(err.contains("refused for the test"), "{err}");
     // Nothing of it stayed: still layout 7, its indexes as 0.4.x made them, its threads closed.
@@ -548,7 +557,7 @@ fn a_failed_migration_from_layout_7_leaves_it_at_layout_7() {
     // Once the cause is gone, it migrates.
     conn.execute_batch("DROP TRIGGER no_reopening").unwrap();
     drop(conn);
-    db::open_migrating(&path).unwrap();
+    serve_open(&path).unwrap();
     assert_eq!(user_version(&path), 10);
 }
 
@@ -570,7 +579,7 @@ fn a_broken_reference_elsewhere_does_not_stop_the_migration() {
     )
     .unwrap();
     drop(conn);
-    db::open_migrating(&path).unwrap();
+    serve_open(&path).unwrap();
     assert_eq!(user_version(&path), 10);
     // Still broken: the check the migration makes is over the tables that refer to threads.
     let conn = rusqlite::Connection::open(&path).unwrap();
@@ -597,8 +606,8 @@ fn other_layouts_are_refused_and_left_as_they_are() {
             .unwrap()
             .pragma_update(None, "user_version", version)
             .unwrap();
-        for open in [db::open, db::open_migrating] {
-            let err = format!("{:#}", open(&path).unwrap_err());
+        for err in [db::open(&path).map(drop), serve_open(&path).map(drop)] {
+            let err = format!("{:#}", err.unwrap_err());
             assert!(err.contains(says), "{err}");
         }
         let err = format!("{:#}", db::check(&path).unwrap_err());
@@ -670,7 +679,7 @@ fn only_serve_migrates_and_checking_writes_nothing() {
 
         // The server migrates it; then everything opens it, and checking says so, also while it
         // is open (read-only, through its -wal and -shm).
-        let conn = db::open_migrating(path).unwrap();
+        let (conn, _) = serve_open(path).unwrap();
         assert_eq!(user_version(path), 10);
         assert_eq!(db::check(path).unwrap(), db::Layout::Current);
         db::open(path).unwrap();
@@ -735,11 +744,7 @@ async fn a_layout_6_database_migrates_its_team_questions_to_the_global_board() {
         rows.into_iter().filter(|r| !r.contains(&closed)).collect()
     };
     let before = open(flags(&path));
-    let app = App::new(
-        db::open_migrating(&path).unwrap(),
-        Clock::fixed(seen + 60),
-        5,
-    );
+    let app = serve(&path, seen + 60);
     assert_eq!(user_version(&path), 10);
     // Delivery, handled and claims stay as they were, and so does what is pending.
     assert_eq!(open(flags(&path)), before);
@@ -861,11 +866,7 @@ async fn a_layout_7_database_migrates_and_its_closed_threads_open_with_nothing_p
             .unwrap()
     };
     assert!(unfetched(&path) >= 2);
-    let app = App::new(
-        db::open_migrating(&path).unwrap(),
-        Clock::fixed(seen + 60),
-        5,
-    );
+    let app = serve(&path, seen + 60);
     assert_eq!(user_version(&path), 10);
     // Nothing became pending, and no thread is closed.
     assert_eq!(waiting(&path), before);
@@ -999,11 +1000,7 @@ async fn a_layout_8_database_migrates_and_its_sessions_report_their_clients() {
     let path = dir.db();
     let seen = layout8(&path);
     let before = flags(&path);
-    let app = App::new(
-        db::open_migrating(&path).unwrap(),
-        Clock::fixed(seen + 60),
-        5,
-    );
+    let app = serve(&path, seen + 60);
     assert_eq!(user_version(&path), 10);
     // Delivery, handled and claims are as they were.
     assert_eq!(flags(&path), before);
@@ -1053,11 +1050,7 @@ async fn a_layout_9_database_migrates_and_its_sessions_say_their_agent() {
     let path = dir.db();
     let seen = layout9(&path);
     let before = flags(&path);
-    let app = App::new(
-        db::open_migrating(&path).unwrap(),
-        Clock::fixed(seen + 60),
-        5,
-    );
+    let app = serve(&path, seen + 60);
     assert_eq!(user_version(&path), 10);
     // Delivery, handled and claims are as they were.
     assert_eq!(flags(&path), before);

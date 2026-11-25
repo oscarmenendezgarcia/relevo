@@ -40,6 +40,8 @@ pub const MAX_WAITS_PER_TOKEN: usize = 10;
 /// Shared state of the HTTP server.
 pub struct App {
     db: Mutex<Connection>,
+    /// Seals and opens note text and thread titles (`crypto`).
+    key: crypto::Key,
     pub clock: Clock,
     pub team_questions_per_day: u32,
     /// The clients this server hands out (`crate::dist`), if any.
@@ -58,26 +60,49 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl App {
-    pub fn new(conn: Connection, clock: Clock, team_questions_per_day: u32) -> Arc<App> {
-        App::with_dist(conn, clock, team_questions_per_day, None)
+    /// The state over `conn` with a new random key, kept nowhere: for a database in memory, or
+    /// one `serve` never encrypted (see `with_dist`).
+    pub fn new(
+        conn: Connection,
+        clock: Clock,
+        team_questions_per_day: u32,
+    ) -> anyhow::Result<Arc<App>> {
+        App::with_dist(
+            conn,
+            clock,
+            team_questions_per_day,
+            None,
+            crypto::Key::random(),
+        )
     }
 
-    /// The same, handing out the dist in `dist` (`GET /api/dist/...`).
+    /// The same, handing out the dist in `dist` (`GET /api/dist/...`), with `key`. Refused when
+    /// the database says another key encrypted it (`meta.key_check`).
     pub fn with_dist(
         conn: Connection,
         clock: Clock,
         team_questions_per_day: u32,
         dist: Option<PathBuf>,
-    ) -> Arc<App> {
-        Arc::new(App {
+        key: crypto::Key,
+    ) -> anyhow::Result<Arc<App>> {
+        if db::key_check(&conn)?.is_some_and(|check| !key.opens(&check)) {
+            anyhow::bail!("this key does not open this database");
+        }
+        Ok(Arc::new(App {
             db: Mutex::new(conn),
+            key,
             clock,
             team_questions_per_day,
             dist,
             news: Mutex::new(HashMap::new()),
             waits: Mutex::new(HashMap::new()),
             join_tries: Mutex::default(),
-        })
+        }))
+    }
+
+    /// The key that seals and opens note text and thread titles.
+    pub fn key(&self) -> &crypto::Key {
+        &self.key
     }
 
     /// Tells about every bump of `person`'s channel from now on.

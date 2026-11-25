@@ -148,7 +148,9 @@ async fn server(dist: &Path) -> (String, String) {
         Clock::system(),
         5,
         Some(dist.to_path_buf()),
-    );
+        relevo::crypto::Key::random(),
+    )
+    .unwrap();
     let token = db::invite(&app.db(), "ana", "Ana", None, "laptop", db::now_unix())
         .unwrap()
         .secret;

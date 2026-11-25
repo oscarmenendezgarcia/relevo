@@ -32,7 +32,7 @@ async fn sessions_lists_label_session_context_and_last_seen() {
     let conn = db::open(path).unwrap();
     let ana = db::invite(&conn, "ana", "Ana", None, "Claude Code", now).unwrap();
     let bob = db::invite(&conn, "bob", "Bob", None, "bot", now).unwrap();
-    let app = App::new(conn, Clock::system(), 5);
+    let app = App::new(conn, Clock::system(), 5).unwrap();
     for (token, session, context) in [
         (&ana.secret, Some("term-0001"), Some("pagos-api")),
         (&ana.secret, None, None),
@@ -85,7 +85,7 @@ async fn clients_lists_each_sessions_client_against_the_servers_version_outdated
     let ana = db::invite(&conn, "ana", "Ana", None, "Claude Code", now).unwrap();
     let bob = db::invite(&conn, "bob", "Bob", None, "pi", now).unwrap();
     let carl = db::invite(&conn, "carl", "Carl", None, "Hermes", now).unwrap();
-    let app = App::new(conn, Clock::system(), 5);
+    let app = App::new(conn, Clock::system(), 5).unwrap();
     let current = format!("pi/{server}");
     // (token, session, context, Relevo-Client, User-Agent), in the order they are seen.
     for (token, session, context, client, agent) in [
@@ -478,7 +478,15 @@ fn relevo_is_the_servers_own_name_and_in_no_list() {
         )
         .unwrap();
         let release = format!("## {} (1-jan-2026)\n\nNews.\n", env!("CARGO_PKG_VERSION"));
-        relevo::release::announce(&conn, env!("CARGO_PKG_VERSION"), &release, true, 0).unwrap();
+        relevo::release::announce(
+            &conn,
+            &relevo::crypto::Key::random(),
+            env!("CARGO_PKG_VERSION"),
+            &release,
+            true,
+            0,
+        )
+        .unwrap();
     }
     for args in [
         &["invite", "relevo", "--name", "Mine", "--token"][..],
@@ -542,6 +550,8 @@ fn serve_records_or_posts_the_release_notes_once_it_listens() {
         cmd.arg("--db")
             .arg(path)
             .args(["serve", "--addr", "127.0.0.1:0"])
+            // Never the real ~/.config/relevo/server.key.
+            .env("RELEVO_KEY_FILE", dir.join("server.key"))
             .env_remove("RELEVO_RELEASE_NOTES")
             .env("RUST_LOG", "info")
             .stdout(std::fs::File::create(&log).unwrap())

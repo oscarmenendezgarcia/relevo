@@ -5,6 +5,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
+use crate::crypto::{Key, note_aad, title_aad};
 use crate::db::{SYSTEM_PERSON_SQL, random_id};
 
 /// This build's CHANGELOG, whose section for its version is posted.
@@ -244,9 +245,10 @@ pub fn note_text(version: &str, section: &str) -> String {
 
 /// Posts the release notes of `version` (from `changelog`) on the global board if the database
 /// has not announced it, or a newer one, yet; with `post` off, only records it. One transaction,
-/// so several processes starting at once post them once.
+/// so several processes starting at once post them once. The note is sealed with `key`.
 pub fn announce(
     conn: &Connection,
+    key: &Key,
     version: &str,
     changelog: &str,
     post: bool,
@@ -279,7 +281,7 @@ pub fn announce(
         match system_person(&tx)? {
             None => Outcome::NameTaken,
             Some((person, token)) => {
-                Outcome::Posted(post_note(&tx, person, &token, version, &section, now)?)
+                Outcome::Posted(post_note(&tx, key, person, &token, version, &section, now)?)
             }
         }
     };
@@ -311,6 +313,7 @@ fn system_person(tx: &Connection) -> Result<Option<(i64, String)>> {
 /// everyone active takes part, nobody is named, so it is pending for nobody.
 fn post_note(
     tx: &Connection,
+    key: &Key,
     person: i64,
     token: &str,
     version: &str,
@@ -318,10 +321,11 @@ fn post_note(
     now: i64,
 ) -> Result<String> {
     let id = random_id("r_");
+    let title = format!("Relevo {version}");
     tx.execute(
         "INSERT INTO threads (id, kind, title, opener_id, status, created_at)
          VALUES (?1, 'global', ?2, ?3, 'open', ?4)",
-        params![id, format!("Relevo {version}"), person, now],
+        params![id, key.seal(&title_aad(&id), title.as_bytes()), person, now],
     )?;
     tx.execute(
         "INSERT INTO participants (thread_id, person_id) VALUES (?1, ?2)",
@@ -332,15 +336,19 @@ fn post_note(
          SELECT ?1, id FROM people WHERE active = 1 AND id != ?2 ORDER BY handle",
         params![id, person],
     )?;
+    let note = random_id("n_");
     tx.execute(
         "INSERT INTO notes (id, thread_id, author_id, token_id, via, text, created_at)
          VALUES (?1, ?2, ?3, ?4, 'release notes', ?5, ?6)",
         params![
-            random_id("n_"),
+            note,
             id,
             person,
             token,
-            note_text(version, section),
+            key.seal(
+                &note_aad(&id, &note),
+                note_text(version, section).as_bytes()
+            ),
             now
         ],
     )?;
@@ -425,7 +433,7 @@ mod tests {
         assert_eq!(announced(&conn), None);
         let release = dev.replace("(unreleased)", "(14-nov-2026)");
         assert!(matches!(
-            announce(&conn, "0.5.0", &release, true, 0).unwrap(),
+            announce(&conn, &Key::random(), "0.5.0", &release, true, 0).unwrap(),
             Outcome::Posted(_)
         ));
         // The release itself records its version.

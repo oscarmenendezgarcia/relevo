@@ -42,7 +42,7 @@ struct Setup {
 
 /// A team server on loopback with Ana and Bob, and a `relevo web` for Ana in front of it.
 async fn setup() -> Setup {
-    let app = App::new(db::open(":memory:").unwrap(), Clock::system(), 50);
+    let app = App::new(db::open(":memory:").unwrap(), Clock::system(), 50).unwrap();
     let now = db::now_unix();
     let ana = db::invite(&app.db(), "ana", "Ana", None, "laptop", now).unwrap();
     let bob = db::invite(&app.db(), "bob", "Bob", None, "laptop", now).unwrap();

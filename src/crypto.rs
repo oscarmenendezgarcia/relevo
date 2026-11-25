@@ -28,6 +28,13 @@ const CHECK_AAD: &str = "key_check";
 /// The server's key.
 pub struct Key(LessSafeKey);
 
+/// Says nothing of the key.
+impl std::fmt::Debug for Key {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Key")
+    }
+}
+
 /// A sealed value this key does not open: sealed by another key, for another row, or damaged.
 #[derive(Debug)]
 pub struct Undecryptable;
@@ -348,7 +355,7 @@ mod tests {
         ] {
             std::fs::write(&file, vec![7u8; bytes]).unwrap();
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).unwrap();
-            let err = format!("{:#}", load(&file).err().expect("refused"));
+            let err = format!("{:#}", load(&file).expect_err("refused"));
             assert!(err.contains(says), "{bytes} {mode:o}: {err}");
             // Never made again over it.
             assert!(load_or_create(&file).is_err());

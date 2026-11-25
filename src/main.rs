@@ -718,12 +718,12 @@ fn public_url(
 
 /// Posts this version's release notes on the global board, once (`relevo::release`). A failure is
 /// logged, and the server starts all the same.
-fn release_notes(conn: &rusqlite::Connection, no_release_notes: bool, now: i64) {
+fn release_notes(app: &App, no_release_notes: bool, now: i64) {
     use relevo::release::{self, Outcome};
     let version = env!("CARGO_PKG_VERSION");
     let env = std::env::var("RELEVO_RELEASE_NOTES").ok();
     let post = release::enabled(no_release_notes, env.as_deref());
-    match release::announce(conn, version, release::CHANGELOG, post, now) {
+    match release::announce(&app.db(), app.key(), version, release::CHANGELOG, post, now) {
         Ok(Outcome::Posted(thread)) => {
             tracing::info!(%thread, "posted the release notes of relevo {version} on the global board")
         }
@@ -927,8 +927,9 @@ async fn main() -> Result<()> {
     {
         check_tls(*tls, tls_name, tls_cert.as_deref())?;
     }
-    // Only the server migrates an older layout: an admin command refuses it.
-    let conn = if matches!(cli.command, Command::Serve { .. }) {
+    // Only the server migrates an older layout, and handles the key: an admin command refuses
+    // the one, and needs not the other (it reads no note text nor thread title).
+    let (conn, key) = if matches!(cli.command, Command::Serve { .. }) {
         // Logging starts before the database opens, so a migration is logged.
         tracing_subscriber::fmt()
             .with_env_filter(
@@ -936,9 +937,11 @@ async fn main() -> Result<()> {
                     .unwrap_or_else(|_| "info".into()),
             )
             .init();
-        db::open_migrating(&db_file)?
+        let key_file = relevo::crypto::path(config::env)?;
+        let (conn, key) = db::open_migrating(&db_file, &key_file)?;
+        (conn, Some(key))
     } else {
-        db::open(&db_file)?
+        (db::open(&db_file)?, None)
     };
     let now = db::now_unix();
     match cli.command {
@@ -965,7 +968,14 @@ async fn main() -> Result<()> {
                 Ok(note) => tracing::info!("{note}"),
                 Err(warning) => tracing::warn!("{warning}"),
             }
-            let app = App::with_dist(conn, Clock::system(), team_questions_per_day, Some(dist));
+            let key = key.expect("serve opens the database with its key");
+            let app = App::with_dist(
+                conn,
+                Clock::system(),
+                team_questions_per_day,
+                Some(dist),
+                key,
+            )?;
             let listener = tokio::net::TcpListener::bind(addr).await?;
             let scheme = if tls.is_some() { "https" } else { "http" };
             let url = public_url(
@@ -985,7 +995,7 @@ async fn main() -> Result<()> {
                 "invitation links point at this address (--public-url changes it)"
             );
             // Posted once the server can serve: bound, with its TLS set up.
-            release_notes(&app.db(), no_release_notes, db::now_unix());
+            release_notes(&app, no_release_notes, db::now_unix());
             if tls.is_none() && !addr.ip().is_loopback() {
                 tracing::warn!(
                     %addr,

@@ -22,7 +22,7 @@ struct Team {
 
 /// A team of the given handles, each with one token, on a fixed clock.
 fn team(handles: &[&str]) -> Team {
-    let app = App::new(db::open(":memory:").unwrap(), Clock::fixed(T0), 5);
+    let app = App::new(db::open(":memory:").unwrap(), Clock::fixed(T0), 5).unwrap();
     let mut tokens = HashMap::new();
     {
         let conn = app.db();
@@ -952,7 +952,7 @@ async fn sixth_team_question_in_24_hours_fails() {
 
 #[tokio::test]
 async fn team_limit_is_configurable() {
-    let app = App::new(db::open(":memory:").unwrap(), Clock::fixed(T0), 1);
+    let app = App::new(db::open(":memory:").unwrap(), Clock::fixed(T0), 1).unwrap();
     let ana = db::invite(&app.db(), "ana", "Ana", None, "l", T0).unwrap();
     db::invite(&app.db(), "bob", "Bob", None, "l", T0).unwrap();
     let t = Team {
@@ -4577,4 +4577,97 @@ async fn done_or_a_reply_handles_only_what_reached_the_session() {
         .await;
     assert!(listed(&next.inbox().await, &id).is_none());
     assert!(listed(&t.agent("bob", "pi-000003", "").inbox().await, &id).is_none());
+}
+
+/// Note text and thread titles are stored sealed, each for its own row: what the database holds
+/// is no plain text, and a value tampered with, or moved to another row, is an internal error
+/// (500), never the value nor a panic.
+#[tokio::test]
+async fn text_and_titles_are_stored_sealed_and_a_damaged_one_is_an_internal_error() {
+    let t = team(&["ana", "bob"]);
+    let id = t.ok("ana", json!({ "text": "@bob Rotate the key" })).await;
+    t.ok("bob", json!({ "thread": id, "text": "Done." })).await;
+    {
+        let conn = t.app.db();
+        let stored: Vec<(String, Vec<u8>)> = conn
+            .prepare(
+                "SELECT typeof(text), text FROM notes WHERE thread_id = ?1
+                 UNION ALL SELECT typeof(title), title FROM threads WHERE id = ?1",
+            )
+            .unwrap()
+            .query_map([&id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(stored.len(), 3);
+        for (kind, bytes) in &stored {
+            assert_eq!(kind, "blob");
+            let shown = String::from_utf8_lossy(bytes);
+            assert!(
+                !shown.contains("Rotate") && !shown.contains("Done"),
+                "{shown}"
+            );
+        }
+    }
+    assert_eq!(
+        t.thread("bob", &id).await["notes"][0]["text"],
+        "@bob Rotate the key"
+    );
+
+    // One byte of the reply's tag changed: every read of the thread is a 500, said in general.
+    let reads = [
+        format!("/api/threads/{id}"),
+        "/api/inbox?all=1".to_string(),
+        format!("/api/timeline/threads/{id}"),
+        "/api/timeline?tab=threads".to_string(),
+    ];
+    {
+        let conn = t.app.db();
+        let (seq, mut sealed): (i64, Vec<u8>) = conn
+            .query_row(
+                "SELECT seq, text FROM notes WHERE thread_id = ?1 ORDER BY seq DESC LIMIT 1",
+                [&id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        let last = sealed.len() - 1;
+        sealed[last] ^= 1;
+        conn.execute(
+            "UPDATE notes SET text = ?2 WHERE seq = ?1",
+            rusqlite::params![seq, sealed],
+        )
+        .unwrap();
+    }
+    for uri in &reads {
+        let (status, v) = t.get("ana", uri).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{uri}: {v}");
+        assert_eq!(v["error"]["code"], "INTERNAL", "{uri}: {v}");
+        assert!(!v.to_string().contains("Done"), "{uri}: {v}");
+    }
+
+    // Each note's own value back, but the first one's moved onto the second: still a 500.
+    let id2 = t.ok("ana", json!({ "text": "@bob Second" })).await;
+    t.ok("bob", json!({ "thread": id2, "text": "Fine." })).await;
+    assert_eq!(t.thread("ana", &id2).await["notes"][1]["text"], "Fine.");
+    t.app
+        .db()
+        .execute(
+            "UPDATE notes SET text = (SELECT text FROM notes WHERE thread_id = ?1 ORDER BY seq
+                                      LIMIT 1)
+             WHERE thread_id = ?1 AND seq = (SELECT max(seq) FROM notes WHERE thread_id = ?1)",
+            [&id2],
+        )
+        .unwrap();
+    let (status, _) = t.get("ana", &format!("/api/threads/{id2}")).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    // A title moved to another thread does not open there either.
+    t.app
+        .db()
+        .execute(
+            "UPDATE threads SET title = (SELECT title FROM threads WHERE id = ?1) WHERE id = ?2",
+            [&id, &id2],
+        )
+        .unwrap();
+    let (status, _) = t.get("ana", &format!("/api/timeline/threads/{id2}")).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
 }

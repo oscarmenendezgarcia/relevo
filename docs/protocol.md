@@ -358,9 +358,17 @@ The database keeps the version announced in a small `meta` table (key, value), w
 
 The invitations' table came in 0.7.0 without a new layout (10 still): every command that opens a database of layout 10 creates it if it is missing, as an index added in 0.6.x, and nothing before 0.7.0 reads it, so a 0.6.x binary still opens a database 0.7.0 used.
 
+### Encryption at rest
+
+The text of every note and the title of every thread are stored encrypted, with ChaCha20-Poly1305, under the server's key: 32 random bytes, raw, in a file kept apart from the database, `$HOME/.config/relevo/server.key`, or the file `RELEVO_KEY_FILE` names (there is no flag). Nothing else is encrypted: ids, handles, names, `about`, mentions, participants, contexts, dates, team titles and the idempotency results of `send` stay as they were. Each value is stored as one version byte (1), a random 12-byte nonce, then the ciphertext and its tag, with associated data that names its row (`note:<thread id>:<note id>`, `title:<thread id>`), so a value copied into another row does not decrypt there. The columns stay `TEXT` in the schema and hold these values as BLOBs.
+
+Only `relevo serve` handles the key; the admin commands never read note text nor thread titles, and need none. When it opens a database never encrypted (one made by an admin command, or by `serve` before this), it reads the key file, or makes it when there is none (0600, its directory made 0700 if missing; written to a file of its own, synced, linked into place and the directory synced, so the key outlives a crash before the database records anything; a key already there is never replaced), encrypts every note text and thread title still in plain form, and records in `meta` a `key_check` (a known value encrypted under the key), all in the transaction that opens it: a start that dies before it commits leaves the database as it was, and the next one takes the same key file. It logs the counts, never the text, and says when it made the key. When it opens a database encrypted already, it never makes a key: with no key file it refuses to start (`this database is encrypted but there is no key at <path> (RELEVO_KEY_FILE). Restore the key it was encrypted with; without it, its notes cannot be read.`), and with a key that does not decrypt `key_check` too (`this key does not open this database (RELEVO_KEY_FILE=<path>).` and, on a line of its own, `Use the key it was encrypted with. Without it, its notes cannot be read.`). A key file of another size than 32 bytes, or that anyone but its owner may read or write, is refused, and says so.
+
+A value the key does not decrypt (damaged, or copied from another row) is never shown: a request that would read it is answered `INTERNAL` (500), and the log says only that it could not be decrypted.
+
 ## Privacy and logs
 
-The server logs counts and ids, never note text, tokens or invitation codes. The database holds token hashes only, but note text in plain form, so the server creates it (and SQLite its `-wal` and `-shm` files) readable by the server's user only (mode 0600).
+The server logs counts and ids, never note text, tokens or invitation codes. The database holds token hashes only, and note text and thread titles encrypted ([Encryption at rest](#encryption-at-rest)); the rest of it is plain, so the server still creates it (and SQLite its `-wal` and `-shm` files) readable by the server's user only (mode 0600). Encryption protects copies of the database and of its backups, not the running server: whoever controls the server, or its key, can read the notes.
 
 ## Later (not v0)
 

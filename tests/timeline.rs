@@ -21,7 +21,7 @@ struct Server {
 /// A server with these people (name: the handle in capitals), each with one token, on a fixed
 /// clock, and these teams (name, members).
 fn server(handles: &[&str], teams: &[(&str, &[&str])]) -> Server {
-    let app = App::new(db::open(":memory:").unwrap(), Clock::fixed(T0), 50);
+    let app = App::new(db::open(":memory:").unwrap(), Clock::fixed(T0), 50).unwrap();
     let mut tokens = HashMap::new();
     {
         let conn = app.db();
@@ -851,7 +851,7 @@ fn a_layout_7_database_without_the_timeline_tables_gets_them_when_it_migrates() 
         )
         .unwrap();
     }
-    let conn = db::open_migrating(path).unwrap();
+    let (conn, _) = db::open_migrating(path, &dir.join("server.key")).unwrap();
     let found: i64 = conn
         .query_row(
             "SELECT count(*) FROM sqlite_master WHERE name IN ('note_contexts', 'thread_closes',

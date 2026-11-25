@@ -58,7 +58,9 @@ fn fixture(with_dist: bool) -> Fixture {
         Clock::system(),
         5,
         Some(dist_dir),
-    );
+        relevo::crypto::Key::random(),
+    )
+    .unwrap();
     let token = db::invite(&app.db(), "ana", "Ana", None, "laptop", db::now_unix())
         .unwrap()
         .secret;
@@ -217,7 +219,7 @@ async fn without_a_dist_everything_is_not_found() {
         assert_eq!(code(&body), "NOT_FOUND");
     }
     // Nor with no dist configured at all.
-    let app = App::new(db::open(":memory:").unwrap(), Clock::system(), 5);
+    let app = App::new(db::open(":memory:").unwrap(), Clock::system(), 5).unwrap();
     let token = db::invite(&app.db(), "ana", "Ana", None, "x", db::now_unix())
         .unwrap()
         .secret;
