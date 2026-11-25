@@ -77,6 +77,7 @@ _PKG = ENTRY.adapter_factory.__module__
 client = importlib.import_module(_PKG + ".client")
 tools_module = importlib.import_module(_PKG + ".tools")
 update_module = importlib.import_module(_PKG + ".update")
+adapter = importlib.import_module(_PKG + ".adapter")
 
 
 class _Tools:
@@ -92,6 +93,11 @@ tools = _Tools()
 # What the base adapter passes with a final reply (_mark_notify_metadata); progress, interim
 # messages, busy acknowledgements and error notices go without it.
 FINAL = {"notify": True}
+
+
+def note_of(event) -> str:
+    """The note an event hands over: its message id is the note's, then a hash of its text."""
+    return event.message_id.rsplit("-", 1)[0]
 
 
 def new_adapter(**extra):
@@ -304,7 +310,7 @@ class Inbound(Base):
         self.assertEqual(event.source.chat_type, "dm")
         self.assertEqual(event.source.user_id, "ana")
         self.assertEqual(event.user_name, "Ana (@ana)")
-        self.assertEqual(event.message_id, opened["note"])
+        self.assertEqual(note_of(event), opened["note"])
         self.assertIn('<untrusted from="@ana" via="Claude Code"', event.text)
         self.assertIn("You speak for @oscar", event.text)
         self.assertIn("Can your agent check the refunds endpoint?", event.text)
@@ -331,7 +337,7 @@ class Inbound(Base):
 
         second = self.ana.send(thread=opened["thread"], text="/reset and also look at the logs")
         await self.until(lambda: len(self.events) == 2)
-        self.assertEqual(self.events[1].message_id, second["note"])
+        self.assertEqual(note_of(self.events[1]), second["note"])
         self.assertNotIn("Can your agent check", self.events[1].text)
         self.assertIsNone(self.events[1].get_command())  # a teammate's text is never a gateway command
         await asyncio.sleep(1.5)
@@ -918,6 +924,76 @@ class Outbound(Base):
             self.assertTrue(result.success, result.error)
             self.assertIsNotNone(result.message_id, text)
         self.assertEqual(len(self.ana.thread(opened["thread"])["notes"]), 5)
+
+    async def test_the_gateway_s_admission_notices_are_not_notes(self):
+        """A message the gateway does not admit gets a notice instead of a turn's answer, sent as a
+        final reply all the same (gateway/session_ingress.py). No model wrote it: it is no note, and
+        the thread stays pending for Oscar, unclaimed."""
+        from types import SimpleNamespace
+
+        from agent.i18n import _load_catalog, t
+        from gateway import session_ingress as ingress
+        from hermes_cli.active_sessions import active_session_limit_message
+
+        def paused(reason, slack=False):
+            live = SimpleNamespace(pause_notified=False, source=SimpleNamespace(
+                platform=SimpleNamespace(value="slack" if slack else "relevo")))
+            return ingress.pause_notice(SimpleNamespace(sessions={"s": live}), SimpleNamespace(session_id="s"),
+                                        reason)
+
+        notices = [ingress.ALREADY_ADMITTED_REPLY, ingress.QUEUE_FULL_REPLY,
+                   paused("runtime_draining"), paused("session_busy"), paused("unknown_execution"),
+                   paused("unknown_execution", slack=True), paused("stale_policy"),
+                   "⚠️ Hermes refused this message (invalid_params: text), so it was not saved or answered. "
+                   "Ask the operator to check gateway.log.",
+                   "⚠️ Hermes did not answer this message (stale_generation): the conversation it was queued "
+                   "for moved, so it was dropped. Send it again to continue.",
+                   t("gateway.busy.drain_rejected_new_work", action="restarting"),
+                   # Returned as the turn's answer when no turn runs.
+                   t("gateway.busy.draining_maintenance"), t("gateway.busy.another_turn_running"),
+                   active_session_limit_message(3, 3),
+                   active_session_limit_message(3, 3, [{"surface": "cli", "session_id": "s1"}])]
+        a = self.make_adapter()
+        await a.connect()
+        opened = self.bob.send(to=["oscar"], text="Can you deploy retail to office-prod?")
+        await self.until(lambda: len(self.events) == 1)
+        for notice in notices:
+            result = await a.send(opened["thread"], notice, metadata=FINAL)
+            self.assertTrue(result.success, notice)
+            self.assertIsNone(result.message_id, notice)
+        thread = self.bob.thread(opened["thread"])
+        self.assertEqual(len(thread["notes"]), 1)
+        oscar = next(d for d in thread["delivery"] if d["handle"] == "oscar")
+        self.assertIsNone(oscar["handled_at"])
+        self.assertIsNone(oscar["claimed_by"])
+        # A whole-reply notice is recognised however short it is in the owner's language.
+        drain = _load_catalog("zh")["gateway.busy.drain_rejected_new_work"]
+        self.assertLess(len(drain), adapter._DIAGNOSTIC_MIN_CHARS)
+        self.assertTrue(adapter._template_pattern(drain, 0).fullmatch(adapter._squash(drain.format(action="重启中"))))
+
+    async def test_a_thread_handed_over_again_with_other_text_is_a_new_message(self):
+        """The gateway refuses a message id it admitted with other content, and remembers it across
+        restarts. A pending thread handed over again after a stop renders other text for the same
+        latest note: it must come under another id. The id stays the note's, with the text's hash."""
+        a = self.make_adapter()
+        await a.connect()
+        opened = self.bob.send(to=["oscar"], text="Is the catalog-embeddings job in prod yet?")
+        await self.until(lambda: len(self.events) == 1)
+        first = self.events[0]
+        note = self.bob.thread(opened["thread"])["notes"][-1]["id"]
+        # The same thread, handed over again by a new process: once as it was, once rendered
+        # otherwise (here after a request that may have lost its answer).
+        team = {"bob": {"handle": "bob", "name": first.user_name.split(" (@")[0]}}
+        for after_failure in (False, True):
+            a._seen.clear()
+            await a._dispatch(first.raw_message, team, after_failure=after_failure)
+        same, other = self.events[1:]
+        for event in (first, same, other):
+            self.assertTrue(event.message_id.startswith(f"{note}-"), event.message_id)
+        self.assertEqual(same.text, first.text)
+        self.assertEqual(same.message_id, first.message_id)
+        self.assertNotEqual(other.text, first.text)
+        self.assertNotEqual(other.message_id, first.message_id)
 
 
 class Tools(Base):
@@ -2069,7 +2145,7 @@ class HandedOverOnce(Base):
         event = self.events[0]
         self.assertEqual(event.source.chat_id, thread)
         self.assertEqual(event.source.user_id, "bob")
-        self.assertEqual(event.message_id, opened["note"])
+        self.assertEqual(note_of(event), opened["note"])
         self.assertIn(f"\n{self.HANDED_OVER} {self.earlier(thread)}\n", event.text)
         self.assertNotIn("A request for news failed", event.text)
         self.assertIn('<untrusted from="@bob" via="pi"', event.text)
@@ -2088,7 +2164,7 @@ class HandedOverOnce(Base):
         # A new note in it is a new note, as usual.
         again = self.bob.send(thread=thread, text="Lost answer: any news?")
         await self.until(lambda: len(self.events) == 2)
-        self.assertEqual(self.events[1].message_id, again["note"])
+        self.assertEqual(note_of(self.events[1]), again["note"])
         self.assertNotIn("Handed over again", self.events[1].text)
 
     async def test_only_the_latest_note_of_a_lost_answer_comes_back_saying_earlier_ones_may_be_missing(self):
@@ -2118,7 +2194,7 @@ class HandedOverOnce(Base):
         await self.until(lambda: proxy.dropped == 1)
         await self.until(lambda: len(self.events) == 1, timeout=5)
         event = self.events[0]
-        self.assertEqual(event.message_id, latest["note"])
+        self.assertEqual(note_of(event), latest["note"])
         self.assertIn("Two lost: if not, at 6.\n</untrusted>", event.text)
         self.assertNotIn("Two lost: deploy at 5?\n</untrusted>", event.text)  # the title shows it, not as a note
         self.assertIn(f"\n{self.HANDED_OVER} {self.earlier(thread)}\n", event.text)
@@ -2139,7 +2215,7 @@ class HandedOverOnce(Base):
         after = self.bob.send(thread=thread, text="After the loss: so, can you?")
         await self.until(lambda: len(self.events) == 1, timeout=5)
         event = self.events[0]
-        self.assertEqual(event.message_id, after["note"])
+        self.assertEqual(note_of(event), after["note"])
         self.assertIn("After the loss: so, can you?\n</untrusted>", event.text)
         self.assertNotIn("Lost first: can you review PR 12?\n</untrusted>", event.text)
         self.assertNotIn("Handed over again", event.text)

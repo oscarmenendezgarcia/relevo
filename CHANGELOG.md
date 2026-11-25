@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.1 (unreleased)
+
+**Fixed: Hermes could post its own "already received a different message" warning as your reply.**
+- When the Hermes gateway handed a pending thread over again (after a restart, say), the plugin gave it the same message id with different text. Hermes refused it, and its warning went into the thread as your note, so the thread counted as answered. The message id now changes with what is handed over, so this no longer happens.
+- Notices the gateway sends instead of a turn's answer (a message it did not admit, a full queue, a paused or restarting conversation) never become notes: the thread stays pending for you.
+
 ## 0.8.0 (24-nov-2026)
 
 **Bots on the team.**
