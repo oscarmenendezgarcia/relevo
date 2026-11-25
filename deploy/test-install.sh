@@ -97,9 +97,10 @@ done
 [ ! -e "$fake/systemctl.log" ] || fail "called systemctl without --enable"
 expect_in_out "systemctl --user enable --now relevo.service relevo-backup.timer"
 # The unit's sandbox lets the server make its key there; the script makes no key.
-[ "$(mode "$home/.config/relevo")" = 700 ] || fail "key dir mode $(mode "$home/.config/relevo")"
-[ ! -e "$home/.config/relevo/server.key" ] || fail "install.sh made a key"
-expect_in_out "$home/.config/relevo/server.key"
+key_dir=$home/.config/relevo-server
+[ "$(mode "$key_dir")" = 700 ] || fail "key dir mode $(mode "$key_dir")"
+[ ! -e "$home/.config/relevo-server/server.key" ] || fail "install.sh made a key"
+expect_in_out "$home/.config/relevo-server/server.key"
 
 if command -v systemd-analyze >/dev/null; then
     echo "the installed units verify against the installed binary"
@@ -237,7 +238,7 @@ EOF2
     kill "$serve"
     wait "$serve" 2>/dev/null || true
     [ "$(version "$db")" = "$want" ] || fail "serve did not migrate: $(cat "$fake/serve.log")"
-    [ "$(mode "$home/.config/relevo/server.key")" = 600 ] || fail "serve made no private key"
+    [ "$(mode "$home/.config/relevo-server/server.key")" = 600 ] || fail "serve made no private key"
     [ "$(RELEVO_DB=$db "$bin" people | cut -f1 | tr '\n' ' ')" = "ana bob carl " ] ||
         fail "people after the migration: $(RELEVO_DB=$db "$bin" people)"
 

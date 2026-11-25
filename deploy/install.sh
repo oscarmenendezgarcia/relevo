@@ -3,8 +3,8 @@
 #
 #   the binary          ~/.local/bin/relevo
 #   the data directory  ~/.local/share/relevo (0700), with backups/ (0700)
-#   the key directory   ~/.config/relevo (0700), where the server makes its key (server.key) at
-#                       its first start: with the systemd units only
+#   the key directory   ~/.config/relevo-server (0700), where the server makes its key
+#                       (server.key) at its first start: with the systemd units only
 #   the systemd units   ~/.config/systemd/user/relevo.service, relevo-backup.{service,timer}
 #   the dist            ~/.local/share/relevo/dist: the clients the server hands out
 #
@@ -83,7 +83,7 @@ bin_dir=$HOME/.local/bin
 data_dir=$HOME/.local/share/relevo
 backup_dir=$data_dir/backups
 dist_dir=$data_dir/dist
-key_dir=$HOME/.config/relevo
+key_dir=$HOME/.config/relevo-server
 db=$data_dir/relevo.db
 unit_dir=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
 units=(relevo.service relevo-backup.service relevo-backup.timer)
@@ -114,7 +114,7 @@ say "$binary: $version"
 # A new binary may refuse a database made by another version: find out before replacing anything.
 # Only reading it: an older layout is migrated by `relevo serve` when it starts, never here. An
 # encrypted database needs its key: the one in RELEVO_KEY_FILE when it is set (it is passed
-# through), else ~/.config/relevo/server.key, as the unit has it.
+# through), else ~/.config/relevo-server/server.key, as the unit has it.
 if [ -e "$db" ]; then
     if ! out=$("$binary" --db "$db" check-db 2>&1); then
         die "nothing changed: this binary does not accept $db:

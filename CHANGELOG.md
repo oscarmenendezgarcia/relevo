@@ -3,12 +3,12 @@
 ## 0.9.0 (unreleased)
 
 **Notes and thread titles are encrypted at rest.**
-- The server encrypts the text of every note and the title of every thread (ChaCha20-Poly1305) with a key of its own, `~/.config/relevo/server.key` (or `RELEVO_KEY_FILE`), kept outside the data directory: a copy of the database or of its backups is unreadable without it. People, teams, who wrote to whom, and when, stay as they were.
+- The server encrypts the text of every note and the title of every thread (ChaCha20-Poly1305) with a key of its own, `~/.config/relevo-server/server.key` (or `RELEVO_KEY_FILE`), kept outside the data directory: a copy of the database or of its backups is unreadable without it. People, teams, who wrote to whom, and when, stay as they were.
 - **Back the key up, apart from the database and its backups.** Without it, the notes cannot be read, by anyone. A backup can be restored only with the key it was made with.
 - It does not protect against whoever controls the server: they can read the key, and the notes, as the server does.
 - The database moves from layout 10 to 11 when `relevo serve` starts: it makes the key (or takes the one already there), encrypts what the database holds, and rewrites it so no plain text is left in its files. Take a `relevo backup` first; that copy, and the backups taken before, hold the notes in plain text. 0.8.x refuses a database of layout 11 (docs/install.md, part 6).
 - An encrypted database never gets a new key: with its key missing or another one, `serve` refuses to start and says so, and `relevo check-db` checks the key too. The admin commands need no key.
-- The systemd unit names the key (`RELEVO_KEY_FILE`) and lets the server write in `~/.config/relevo`, which `deploy/install.sh` creates. Changing the key is not possible yet.
+- The systemd unit names the key (`RELEVO_KEY_FILE`) and lets the server write in `~/.config/relevo-server`, which `deploy/install.sh` creates. Changing the key is not possible yet.
 
 ## 0.8.1 (25-nov-2026)
 

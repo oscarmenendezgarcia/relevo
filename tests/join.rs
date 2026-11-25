@@ -820,7 +820,7 @@ fn serve_invite_and_join_for_real() {
         Command::new(relevo)
             .args(["--db", db_path, "serve", "--addr", "127.0.0.1:0", "--tls"])
             .args(["--tls-name", "127.0.0.1"])
-            // Never the real ~/.config/relevo/server.key.
+            // Never the real ~/.config/relevo-server/server.key.
             .env("RELEVO_KEY_FILE", temp.0.join("server.key"))
             .env("RUST_LOG", "debug")
             .env_remove("RELEVO_PUBLIC_URL")

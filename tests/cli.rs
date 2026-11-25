@@ -554,7 +554,7 @@ fn serve_records_or_posts_the_release_notes_once_it_listens() {
         cmd.arg("--db")
             .arg(path)
             .args(["serve", "--addr", "127.0.0.1:0"])
-            // Never the real ~/.config/relevo/server.key.
+            // Never the real ~/.config/relevo-server/server.key.
             .env("RELEVO_KEY_FILE", dir.join("server.key"))
             .env_remove("RELEVO_RELEASE_NOTES")
             .env("RUST_LOG", "info")
@@ -731,7 +731,7 @@ async fn admin_commands_need_no_key_and_check_db_checks_it() {
     assert!(
         err.contains(&format!(
             "this database is encrypted but there is no key at {} (RELEVO_KEY_FILE)",
-            home.join(".config/relevo/server.key").display()
+            home.join(".config/relevo-server/server.key").display()
         )),
         "{err}"
     );

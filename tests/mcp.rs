@@ -1716,7 +1716,7 @@ async fn serve_tls(db: &Path, port: Option<u16>, args: &[&str]) -> Served {
         .arg(db)
         .args(["serve", "--tls", "--addr", &format!("127.0.0.1:{port}")])
         .args(args)
-        // Never the real ~/.config/relevo/server.key; the same one at every start.
+        // Never the real ~/.config/relevo-server/server.key; the same one at every start.
         .env("RELEVO_KEY_FILE", db.with_extension("key"))
         .env("NO_COLOR", "1")
         .env("RUST_LOG", "info")

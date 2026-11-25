@@ -39,7 +39,8 @@ fn the_unit_lets_serve_read_the_machines_addresses() {
 }
 
 /// The server makes its key at its first start: the unit names it (never left to `HOME`), and its
-/// sandbox lets the server write in the key's directory.
+/// sandbox lets the server write in the key's directory, a directory of its own: never in
+/// `~/.config/relevo`, the clients' (their config.json, the adapters).
 #[test]
 fn the_unit_names_the_key_and_lets_serve_make_it() {
     let unit = read("deploy/systemd/relevo.service");
@@ -48,14 +49,20 @@ fn the_unit_names_the_key_and_lets_serve_make_it() {
         .filter_map(|l| l.trim().strip_prefix("Environment=RELEVO_KEY_FILE="))
         .next_back()
         .expect("the unit sets RELEVO_KEY_FILE");
-    assert_eq!(key, "%h/.config/relevo/server.key");
+    assert_eq!(key, "%h/.config/relevo-server/server.key");
     let dir = key.rsplit_once('/').unwrap().0;
-    let writable = setting(&unit, "ReadWritePaths").unwrap();
+    let writable: Vec<&str> = setting(&unit, "ReadWritePaths")
+        .unwrap()
+        .split_whitespace()
+        .map(|p| p.trim_start_matches('-'))
+        .collect();
+    assert!(writable.contains(&dir), "{writable:?}");
     assert!(
-        writable
-            .split_whitespace()
-            .any(|p| p.trim_start_matches('-') == dir),
-        "{writable}"
+        !writable
+            .iter()
+            .any(|p| p.trim_end_matches('/') == "%h/.config/relevo"
+                || p.trim_end_matches('/') == "%h/.config"),
+        "{writable:?}"
     );
 }
 
@@ -78,7 +85,7 @@ fn under_the_units_sandbox_serve_tls_names_the_machines_addresses() {
     let mut run = Command::new("systemd-run");
     run.args(["--user", "--wait", "--pipe", "--quiet", "--collect"])
         .args(["-p", "RuntimeMaxSec=3"])
-        // The user manager's environment, not this one: never the real ~/.config/relevo/server.key.
+        // The user manager's environment, not this one: never the real ~/.config/relevo-server/server.key.
         .arg(format!(
             "--setenv=RELEVO_KEY_FILE={}",
             dir.join("server.key").display()

@@ -16,7 +16,7 @@ ExecStart=%h/.local/bin/relevo serve
 Environment=RELEVO_DB=%h/.local/share/relevo/relevo.db
 # The key that encrypts note text and thread titles, made at the first start, kept apart from the
 # database and its backups: back it up on its own (see docs/install.md, part 5).
-Environment=RELEVO_KEY_FILE=%h/.config/relevo/server.key
+Environment=RELEVO_KEY_FILE=%h/.config/relevo-server/server.key
 Environment=RELEVO_ADDR=127.0.0.1:7878
 Environment=RUST_LOG=info
 # Plain log lines in the journal (stdout and stderr go there): `journalctl --user -u relevo`.
@@ -39,7 +39,7 @@ MemoryMax=128M
 UMask=0077
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=%h/.local/share/relevo -%h/.config/relevo
+ReadWritePaths=%h/.local/share/relevo -%h/.config/relevo-server
 PrivateTmp=yes
 # These need no namespaces, so they hold even where the mount sandbox above cannot be set up
 # (see "Sandbox" in docs/install.md). AF_NETLINK only reads the machine's addresses (glibc's

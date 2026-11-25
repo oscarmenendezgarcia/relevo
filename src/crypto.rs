@@ -1,7 +1,7 @@
-//! Encryption at rest (docs/protocol.md, "Privacy and logs"): note text and thread titles are
+//! Encryption at rest (docs/protocol.md, "Encryption at rest"): note text and thread titles are
 //! stored sealed with ChaCha20-Poly1305 under the server's key, 32 random bytes in a file kept
-//! apart from the database (`$HOME/.config/relevo/server.key`, or the file `RELEVO_KEY_FILE`
-//! names).
+//! apart from the database (`$HOME/.config/relevo-server/server.key`, or the file
+//! `RELEVO_KEY_FILE` names), in a directory of its own.
 //!
 //! A sealed value is one version byte (1), a random 12-byte nonce, then the ciphertext and its
 //! 16-byte tag. Its associated data says where it belongs (`note:<thread>:<note>`,
@@ -125,7 +125,7 @@ impl Key {
     }
 }
 
-/// The key file: `RELEVO_KEY_FILE`, else `$HOME/.config/relevo/server.key`.
+/// The key file: `RELEVO_KEY_FILE`, else `$HOME/.config/relevo-server/server.key`.
 pub fn path(env: impl Fn(&str) -> Option<String>) -> Result<PathBuf> {
     if let Some(p) = env("RELEVO_KEY_FILE").filter(|p| !p.is_empty()) {
         return Ok(PathBuf::from(p));
@@ -133,7 +133,7 @@ pub fn path(env: impl Fn(&str) -> Option<String>) -> Result<PathBuf> {
     let home = env("HOME")
         .filter(|h| !h.is_empty())
         .ok_or_else(|| anyhow!("HOME is not set; set RELEVO_KEY_FILE"))?;
-    Ok(Path::new(&home).join(".config/relevo/server.key"))
+    Ok(Path::new(&home).join(".config/relevo-server/server.key"))
 }
 
 /// The key in `file`, or `None` when there is no file. Only reads. A file of another size than
@@ -351,7 +351,7 @@ mod tests {
         };
         assert_eq!(
             path(env(&[("HOME", "/home/x")])).unwrap(),
-            Path::new("/home/x/.config/relevo/server.key")
+            Path::new("/home/x/.config/relevo-server/server.key")
         );
         assert_eq!(
             path(env(&[("HOME", "/home/x"), ("RELEVO_KEY_FILE", "/srv/k")])).unwrap(),

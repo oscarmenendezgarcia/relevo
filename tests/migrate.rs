@@ -1180,7 +1180,7 @@ async fn a_layout_10_database_is_encrypted_in_place_and_reads_back_as_it_was() {
     assert_eq!(holds_any(&path, &plain).len(), plain.len());
 
     // The key file is made where it is asked for, its directory too, both private.
-    let key_path = dir.0.join("config/relevo/server.key");
+    let key_path = dir.0.join("config/relevo-server/server.key");
     let (conn, key) = db::open_migrating(&path, &key_path).unwrap();
     assert_eq!(user_version(&path), 11);
     assert_eq!(mode(&key_path), 0o600);
