@@ -38,6 +38,27 @@ fn the_unit_lets_serve_read_the_machines_addresses() {
     );
 }
 
+/// The server makes its key at its first start: the unit names it (never left to `HOME`), and its
+/// sandbox lets the server write in the key's directory.
+#[test]
+fn the_unit_names_the_key_and_lets_serve_make_it() {
+    let unit = read("deploy/systemd/relevo.service");
+    let key = unit
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("Environment=RELEVO_KEY_FILE="))
+        .next_back()
+        .expect("the unit sets RELEVO_KEY_FILE");
+    assert_eq!(key, "%h/.config/relevo/server.key");
+    let dir = key.rsplit_once('/').unwrap().0;
+    let writable = setting(&unit, "ReadWritePaths").unwrap();
+    assert!(
+        writable
+            .split_whitespace()
+            .any(|p| p.trim_start_matches('-') == dir),
+        "{writable}"
+    );
+}
+
 /// The first `serve --tls` under the unit's sandbox makes a certificate for the same names as
 /// without it: the machine's network addresses included. Skipped without a systemd user manager.
 #[test]

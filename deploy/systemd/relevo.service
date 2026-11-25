@@ -14,6 +14,9 @@ StartLimitBurst=5
 Type=exec
 ExecStart=%h/.local/bin/relevo serve
 Environment=RELEVO_DB=%h/.local/share/relevo/relevo.db
+# The key that encrypts note text and thread titles, made at the first start, kept apart from the
+# database and its backups: back it up on its own (see docs/install.md, part 5).
+Environment=RELEVO_KEY_FILE=%h/.config/relevo/server.key
 Environment=RELEVO_ADDR=127.0.0.1:7878
 Environment=RUST_LOG=info
 # Plain log lines in the journal (stdout and stderr go there): `journalctl --user -u relevo`.
@@ -26,7 +29,9 @@ StandardError=journal
 Restart=on-failure
 RestartSec=5
 
-# Limits and sandbox. The data directory is the only place it may write.
+# Limits and sandbox. The data directory is the only place it may write, and the directory of its
+# key, where it makes the key at its first start (deploy/install.sh creates it; `-`: a unit
+# without it still starts, and the server says it cannot make the key).
 # Room for 1,024 connections that have not been authenticated yet, each holding at most a 16 KiB
 # request head and its TLS buffers (about 40 KiB in all). A body (up to 400 KiB) is read only
 # after its token is checked.
@@ -34,7 +39,7 @@ MemoryMax=128M
 UMask=0077
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=%h/.local/share/relevo
+ReadWritePaths=%h/.local/share/relevo -%h/.config/relevo
 PrivateTmp=yes
 # These need no namespaces, so they hold even where the mount sandbox above cannot be set up
 # (see "Sandbox" in docs/install.md). AF_NETLINK only reads the machine's addresses (glibc's
