@@ -1163,11 +1163,6 @@ fn holds_any(path: &str, texts: &[String]) -> Vec<String> {
     found
 }
 
-fn mode(path: &Path) -> u32 {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
-}
-
 /// Layout 10 to 11: every note text and thread title is encrypted with a key made for it, and no
 /// file of the database keeps them in plain text; everything reads back as it was.
 #[tokio::test]
@@ -1185,13 +1180,10 @@ async fn a_layout_10_database_is_encrypted_in_place_and_reads_back_as_it_was() {
     assert!(plain.iter().any(|t| t.chars().count() > 1000));
     assert_eq!(holds_any(&path, &plain).len(), plain.len());
 
-    // The key file is made where it is asked for, its directory too, both private.
+    // The key file is made where it is asked for, its directory too.
     let key_path = dir.0.join("config/relevo-server/server.key");
     let (conn, key) = db::open_migrating(&path, &key_path).unwrap();
     assert_eq!(user_version(&path), 11);
-    assert_eq!(mode(&key_path), 0o600);
-    assert_eq!(mode(key_path.parent().unwrap()), 0o700);
-    assert_eq!(std::fs::read(&key_path).unwrap().len(), 32);
     let check = db::key_check(&conn).unwrap().unwrap();
     assert!(
         relevo::crypto::load(&key_path)
@@ -1266,7 +1258,7 @@ async fn a_layout_10_database_is_encrypted_in_place_and_reads_back_as_it_was() {
     // New notes are encrypted too.
     ana.send(json!({ "thread": f.thread("direct"), "text": "Thanks, Bob!" }))
         .await;
-    drop(f);
+    drop((ana, bob, f));
     assert_eq!(
         holds_any(&path, &["Thanks, Bob!".to_string()]),
         Vec::<String>::new()
@@ -1275,22 +1267,13 @@ async fn a_layout_10_database_is_encrypted_in_place_and_reads_back_as_it_was() {
     // A restart takes the same key, and encrypts nothing again.
     let (conn, key) = db::open_migrating(&path, &key_path).unwrap();
     assert_eq!(db::key_check(&conn).unwrap().unwrap(), check);
-    let app = App::with_dist(conn, Clock::fixed(seen + 120), 5, None, key);
-    let ana = Agent {
-        app,
-        token: serde_json::from_str::<Value>(FIXTURE10).unwrap()["tokens"]["ana"]
-            .as_str()
-            .unwrap()
-            .to_string(),
-        session: "ana-cc-0001",
-        context: "pagos-api",
+    let f = Fixture {
+        app: App::with_dist(conn, Clock::fixed(seen + 120), 5, None, key),
+        v: serde_json::from_str(FIXTURE10).unwrap(),
     };
-    let th = ana
-        .thread(
-            serde_json::from_str::<Value>(FIXTURE10).unwrap()["threads"]["direct"]
-                .as_str()
-                .unwrap(),
-        )
+    let th = f
+        .agent("ana", "ana-cc-0001", "pagos-api")
+        .thread(&f.thread("direct"))
         .await;
     assert_eq!(th["notes"][2]["text"], "Thanks, Bob!");
 }

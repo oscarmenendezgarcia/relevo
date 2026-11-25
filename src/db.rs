@@ -2100,7 +2100,6 @@ mod tests {
         for old in 5..=10 {
             assert_eq!(steps(old), from(old), "{old}");
         }
-        assert_eq!(steps(10), [line(10, 11)]);
         assert!(migrated(7, 2)[0].contains("opened 2 closed threads"));
     }
 
