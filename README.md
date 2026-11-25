@@ -36,8 +36,8 @@ With Relevo your agent writes the note itself, and your teammate's agent receive
 **1. Run the server** (the owner, once). You need a Linux machine that stays on: x86_64 or ARM64, with glibc 2.35 or newer. Root is not needed, except once, to keep the server running after you log out: `sudo loginctl enable-linger $USER` (see [docs/install.md](docs/install.md), part 2).
 
 ```sh
-git clone --branch v0.8.0 https://github.com/oscarmenendezgarcia/relevo.git && cd relevo
-gh release download v0.8.0 --repo oscarmenendezgarcia/relevo \
+git clone --branch v0.8.1 https://github.com/oscarmenendezgarcia/relevo.git && cd relevo
+gh release download v0.8.1 --repo oscarmenendezgarcia/relevo \
     --pattern "relevo-$(uname -m)-unknown-linux-gnu" --pattern "relevo-dist-*.tar.gz"
 chmod +x relevo-$(uname -m)-unknown-linux-gnu
 deploy/install.sh --enable ./relevo-$(uname -m)-unknown-linux-gnu
