@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 
 use crate::App;
 use crate::auth::Reader;
+use crate::crypto::{Key, note_aad, title_aad};
 use crate::db::{IS_BOT_SQL, SYSTEM_PERSON_SQL, rfc3339};
 use crate::error::ApiError;
 
@@ -231,11 +232,12 @@ const FOR_YOU: &str = "(t.kind != 'global' OR p.named_seq IS NOT NULL)";
 const ANSWERED: &str = "t.opener_id != p.person_id
     AND EXISTS (SELECT 1 FROM notes w WHERE w.thread_id = t.id AND w.author_id = p.person_id)";
 
-fn row(r: &rusqlite::Row) -> rusqlite::Result<Row> {
+fn row(r: &rusqlite::Row, key: &Key) -> rusqlite::Result<Row> {
+    let id: String = r.get(0)?;
     Ok(Row {
-        id: r.get(0)?,
+        title: key.text(r, 2, &title_aad(&id))?,
+        id,
         kind: r.get(1)?,
-        title: r.get(2)?,
         from: r.get(3)?,
         named: r.get(4)?,
         pending: r.get(5)?,
@@ -307,25 +309,23 @@ JOIN participants o ON o.thread_id = me.thread_id AND o.person_id != me.person_i
 JOIN people pe ON pe.id = o.person_id
 WHERE me.person_id = ?1 ORDER BY pe.handle";
 
-/// The note columns, the text cut one character past `TEXT_CHARS` when `cut` (so a longer one is
-/// known), with the context it was written in.
-fn note_sql(cut: bool, filter: &str) -> String {
-    let text = if cut {
-        format!("substr(n.text, 1, {})", TEXT_CHARS + 1)
-    } else {
-        "n.text".to_string()
-    };
+/// The note columns, with the context it was written in. The text is sealed: it is cut once
+/// opened (`note`).
+fn note_sql(filter: &str) -> String {
     format!(
-        "SELECT n.seq, n.id, a.handle, n.via, c.context, n.created_at, {text},
-                n.author_id IS {SYSTEM_PERSON_SQL}
+        "SELECT n.seq, n.id, a.handle, n.via, c.context, n.created_at, n.text,
+                n.author_id IS {SYSTEM_PERSON_SQL}, n.thread_id
          FROM notes n JOIN people a ON a.id = n.author_id
          LEFT JOIN note_contexts c ON c.seq = n.seq
          {filter}"
     )
 }
 
-fn note(r: &rusqlite::Row, cut: bool) -> rusqlite::Result<(i64, NoteOut)> {
-    let mut text: String = r.get(6)?;
+/// A row of `note_sql` as a note, its text opened and cut to `TEXT_CHARS` when `cut`.
+fn note(r: &rusqlite::Row, key: &Key, cut: bool) -> rusqlite::Result<(i64, NoteOut)> {
+    let id: String = r.get(1)?;
+    let thread: String = r.get(8)?;
+    let mut text = key.text(r, 6, &note_aad(&thread, &id))?;
     let mut truncated = false;
     if cut && let Some((at, _)) = text.char_indices().nth(TEXT_CHARS) {
         text.truncate(at);
@@ -334,7 +334,7 @@ fn note(r: &rusqlite::Row, cut: bool) -> rusqlite::Result<(i64, NoteOut)> {
     Ok((
         r.get(0)?,
         NoteOut {
-            id: r.get(1)?,
+            id,
             author: r.get(2)?,
             via: r.get(3)?,
             context: r.get(4)?,
@@ -375,7 +375,7 @@ fn texts<'a>(items: impl IntoIterator<Item = &'a String>) -> Vec<SqlValue> {
 
 /// The threads of `rows`, in one query for each of their participants, teams and notes (not one
 /// per thread).
-fn threads_out(conn: &Connection, rows: Vec<Row>) -> Result<Vec<ThreadOut>, ApiError> {
+fn threads_out(conn: &Connection, key: &Key, rows: Vec<Row>) -> Result<Vec<ThreadOut>, ApiError> {
     let ids: Vec<SqlValue> = texts(rows.iter().map(|r| &r.id));
     let not_global: Vec<SqlValue> =
         texts(rows.iter().filter(|r| r.kind != "global").map(|r| &r.id));
@@ -407,8 +407,8 @@ fn threads_out(conn: &Connection, rows: Vec<Row>) -> Result<Vec<ThreadOut>, ApiE
         .map(SqlValue::Integer)
         .collect();
     let notes: HashMap<i64, NoteOut> =
-        rows_in(conn, &note_sql(true, "WHERE n.seq IN (…)"), &seqs, |r| {
-            note(r, true)
+        rows_in(conn, &note_sql("WHERE n.seq IN (…)"), &seqs, |r| {
+            note(r, key, true)
         })?
         .into_iter()
         .collect();
@@ -531,13 +531,13 @@ pub async fn list(
         .prepare(&page_sql(&params))?
         .query_map(
             params![me, params.before.unwrap_or(i64::MAX), team, with],
-            row,
+            |r| row(r, app.key()),
         )?
         .collect::<rusqlite::Result<_>>()?;
     let more = rows.len() > params.limit;
     rows.truncate(params.limit);
     let cursor = more.then(|| rows.last().map(|r| r.last_seq.to_string()));
-    let threads = threads_out(&conn, rows)?;
+    let threads = threads_out(&conn, app.key(), rows)?;
 
     let (board, threads_count, waiting, answered): (i64, i64, i64, i64) =
         conn.query_row(&counts_sql(), [me], |r| {
@@ -608,16 +608,16 @@ pub async fn thread(
         .query_row(
             &format!("{ROW_SQL} WHERE p.person_id = ?1 AND p.thread_id = ?2"),
             params![reader.person_id, id],
-            row,
+            |r| row(r, app.key()),
         )
         .optional()?
         .ok_or_else(|| ApiError::not_found("no such thread"))?;
-    let mut out = threads_out(&conn, vec![row])?
+    let mut out = threads_out(&conn, app.key(), vec![row])?
         .pop()
         .ok_or_else(ApiError::internal)?;
     let notes: Vec<NoteOut> = conn
-        .prepare(&note_sql(false, "WHERE n.thread_id = ?1 ORDER BY n.seq"))?
-        .query_map([&out.id], |r| note(r, false).map(|(_, n)| n))?
+        .prepare(&note_sql("WHERE n.thread_id = ?1 ORDER BY n.seq"))?
+        .query_map([&out.id], |r| note(r, app.key(), false).map(|(_, n)| n))?
         .collect::<rusqlite::Result<_>>()?;
     out.notes = Notes::All(notes);
     out.first_note = None;

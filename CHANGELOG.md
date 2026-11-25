@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.0 (unreleased)
+
+**Notes and thread titles are encrypted at rest.**
+- The server encrypts the text of every note and the title of every thread with a key of its own, kept outside the data directory: in a copy of the database or of its backups, that text cannot be read without the key. Who wrote to whom, when, mentions and contexts can.
+- **Back the key up, apart from the database and its backups** (`~/.config/relevo-server/server.key`). Without it, the notes cannot be read, by anyone, and a backup can be restored only with the key it was made with. Changing the key is not possible yet.
+- It does not protect against whoever controls the server: they can read the key, and the notes, as the server does. Backups from before 0.9.0 stay in plain text.
+
+**For admins**
+- Take a `relevo backup` first. The database moves from layout 10 to 11 when `relevo serve` starts: it takes the key (`RELEVO_KEY_FILE`, else `~/.config/relevo-server/server.key`), making it if missing, encrypts what the database holds, and rewrites it so no plain text is left in its files. That backup, and the ones before, stay plain. 0.8.x refuses a database of layout 11 (docs/install.md, part 6).
+- An encrypted database never gets a new key: with its key missing or another one, `serve` refuses to start and says so, and `relevo check-db` checks the key too. The admin commands need no key.
+- The systemd unit names the key and lets the server write in `~/.config/relevo-server` only (not `~/.config/relevo`), which `deploy/install.sh` creates.
+
 ## 0.8.1 (25-nov-2026)
 
 **Fixed: Hermes could post its own "already received a different message" warning as your reply.**

@@ -34,7 +34,7 @@ fail() {
 
 # Runs install.sh with the fake HOME and systemctl; its output goes to $fake/out.
 install_() {
-    env -u XDG_CONFIG_HOME HOME="$home" RELEVO_SYSTEMCTL="$fake/systemctl" \
+    env -u XDG_CONFIG_HOME -u RELEVO_KEY_FILE HOME="$home" RELEVO_SYSTEMCTL="$fake/systemctl" \
         "$here/install.sh" "$@" >"$fake/out" 2>&1
 }
 
@@ -96,6 +96,11 @@ for unit in relevo.service relevo-backup.service relevo-backup.timer; do
 done
 [ ! -e "$fake/systemctl.log" ] || fail "called systemctl without --enable"
 expect_in_out "systemctl --user enable --now relevo.service relevo-backup.timer"
+# The unit's sandbox lets the server make its key there; the script makes no key.
+key_dir=$home/.config/relevo-server
+[ "$(mode "$key_dir")" = 700 ] || fail "key dir mode $(mode "$key_dir")"
+[ ! -e "$home/.config/relevo-server/server.key" ] || fail "install.sh made a key"
+expect_in_out "$home/.config/relevo-server/server.key"
 
 if command -v systemd-analyze >/dev/null; then
     echo "the installed units verify against the installed binary"
@@ -204,6 +209,7 @@ EOF2
 
     install_ --enable "$binary" || fail "upgrade: $(cat "$fake/out")"
     expect_in_out "the layout of relevo 0.1.0 to 0.2.x"
+    expect_in_out "delete it once the upgrade is confirmed"
     cmp -s "$binary" "$bin" || fail "new binary not installed"
     # The probe and the backup only read it: the same bytes, no -wal or -shm left behind.
     [ "$(sha256sum <"$db")" = "$before" ] || fail "install.sh wrote the database"
@@ -224,7 +230,7 @@ EOF2
     [ "$(sha256sum <"$db")" = "$before" ] || fail "people wrote the database"
 
     # The server migrates it when it starts; the team is still there, nothing to invite again.
-    RELEVO_DB=$db "$bin" serve --addr 127.0.0.1:0 >"$fake/serve.log" 2>&1 &
+    env -u RELEVO_KEY_FILE HOME="$home" RELEVO_DB="$db" "$bin" serve --addr 127.0.0.1:0 >"$fake/serve.log" 2>&1 &
     serve=$!
     for _ in $(seq 100); do
         [ "$(version "$db")" = "$want" ] && break
@@ -233,6 +239,7 @@ EOF2
     kill "$serve"
     wait "$serve" 2>/dev/null || true
     [ "$(version "$db")" = "$want" ] || fail "serve did not migrate: $(cat "$fake/serve.log")"
+    [ "$(mode "$home/.config/relevo-server/server.key")" = 600 ] || fail "serve made no private key"
     [ "$(RELEVO_DB=$db "$bin" people | cut -f1 | tr '\n' ' ')" = "ana bob carl " ] ||
         fail "people after the migration: $(RELEVO_DB=$db "$bin" people)"
 
@@ -335,7 +342,7 @@ if command -v openssl >/dev/null; then
         fail "left over: $(find "$data" -maxdepth 1 -name '.dist*')"
 
     echo "  serve finds it"
-    RELEVO_DB=$data/relevo.db "$bin" serve --addr 127.0.0.1:0 >"$fake/serve.log" 2>&1 &
+    env -u RELEVO_KEY_FILE HOME="$home" RELEVO_DB="$data/relevo.db" "$bin" serve --addr 127.0.0.1:0 >"$fake/serve.log" 2>&1 &
     serve=$!
     for _ in $(seq 100); do
         grep -q "relevo listening" "$fake/serve.log" && break

@@ -129,6 +129,7 @@ impl Machine {
             Clock::system(),
             5,
             Some(dist),
+            relevo::crypto::Key::random(),
         );
         let token = db::invite(&app.db(), "ana", "Ana", None, "laptop", db::now_unix())
             .unwrap()

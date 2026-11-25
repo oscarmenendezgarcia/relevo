@@ -3,6 +3,8 @@
 #
 #   the binary          ~/.local/bin/relevo
 #   the data directory  ~/.local/share/relevo (0700), with backups/ (0700)
+#   the key directory   ~/.config/relevo-server (0700), where the server makes its key
+#                       (server.key) at its first start: with the systemd units only
 #   the systemd units   ~/.config/systemd/user/relevo.service, relevo-backup.{service,timer}
 #   the dist            ~/.local/share/relevo/dist: the clients the server hands out
 #
@@ -81,6 +83,7 @@ bin_dir=$HOME/.local/bin
 data_dir=$HOME/.local/share/relevo
 backup_dir=$data_dir/backups
 dist_dir=$data_dir/dist
+key_dir=$HOME/.config/relevo-server
 db=$data_dir/relevo.db
 unit_dir=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
 units=(relevo.service relevo-backup.service relevo-backup.timer)
@@ -109,7 +112,9 @@ version=$("$binary" --version 2>&1) || die "$binary does not run here: $version"
 say "$binary: $version"
 
 # A new binary may refuse a database made by another version: find out before replacing anything.
-# Only reading it: an older layout is migrated by `relevo serve` when it starts, never here.
+# Only reading it: an older layout is migrated by `relevo serve` when it starts, never here. An
+# encrypted database needs its key: the one in RELEVO_KEY_FILE when it is set (it is passed
+# through), else ~/.config/relevo-server/server.key, as the unit has it.
 if [ -e "$db" ]; then
     if ! out=$("$binary" --db "$db" check-db 2>&1); then
         die "nothing changed: this binary does not accept $db:
@@ -165,6 +170,10 @@ private_dir() {
 }
 private_dir "$data_dir"
 private_dir "$backup_dir"
+# The unit's sandbox lets the server write in this directory only if it is there.
+if [ "$systemd" = 1 ]; then
+    private_dir "$key_dir"
+fi
 
 if [ "$changed_binary" = 1 ]; then
     # Before the server can run the new binary, which may migrate the database: a copy of it as
@@ -175,6 +184,8 @@ if [ "$changed_binary" = 1 ]; then
         say "backing up $db to $copy"
         run "$binary" --db "$db" backup "$copy" ||
             die "nothing installed: the backup of $db failed"
+        say "  (until relevo 0.9.0 or later has served it, a database holds the notes in plain"
+        say "  text, and so does this copy: delete it once the upgrade is confirmed)"
     fi
     say "installing $bin_dir/relevo"
     run mkdir -p "$bin_dir"
@@ -268,6 +279,18 @@ else
     say "Run the server yourself: RELEVO_DB=$db $bin_dir/relevo serve"
 fi
 
+# The unit names its key itself; a server run by hand takes RELEVO_KEY_FILE, as here.
+key_file=$key_dir/server.key
+[ "$systemd" = 1 ] || key_file=${RELEVO_KEY_FILE:-$key_file}
+say ""
+if [ -e "$key_file" ]; then
+    say "The server encrypts note text and thread titles with its key:"
+else
+    say "The server encrypts note text and thread titles with a key it makes at its first start:"
+fi
+say "  $key_file"
+say "Keep a copy of it apart from the database and its backups: without it, the notes cannot"
+say "be read (docs/install.md, part 5)."
 say ""
 say "Admin commands (invite, people, backup...) must use the same database:"
 say "  export RELEVO_DB=$db    # add it to ~/.profile"

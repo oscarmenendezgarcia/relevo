@@ -7,8 +7,11 @@ use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
 use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+
+use crate::crypto::{self, Key};
 
 const SCHEMA: &str = "
 -- `threads.status` is always 'open' since layout 8 (relevo 0.5): threads no longer close. The
@@ -30,6 +33,9 @@ CREATE TABLE IF NOT EXISTS tokens (
     created_at INTEGER NOT NULL,
     revoked_at INTEGER
 );
+-- `threads.title` and `notes.text` hold, since layout 11, values encrypted for their row
+-- (`crypto`): BLOBs, which a TEXT column keeps as they are. A database `serve` has not opened
+-- since it was made may still hold them in plain text (see `server_key`).
 CREATE TABLE IF NOT EXISTS threads (
     id         TEXT PRIMARY KEY,
     kind       TEXT NOT NULL CHECK (kind IN ('direct', 'team', 'global')),
@@ -228,6 +234,8 @@ CREATE TABLE IF NOT EXISTS thread_closes (
 -- `system_person`, the id of the person `relevo` who posts them, and what `serve` last said of
 -- the address it serves at, for invitation links (`public_url`, `tls_pin`, `tls_fingerprint`,
 -- `tls_port`: see `set_public`). Layout 8 brings it (a database of layout 7 gets it as it migrates).
+-- `key_check` says which key encrypted the database (`crypto`; set by `serve`, see `server_key`),
+-- and `scrub_pending` that it is still to be rewritten since (see `scrub`).
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -343,11 +351,13 @@ pub const SESSION_LIFETIME_SECS: i64 = 7 * 24 * 3600;
 pub const CLAIM_LAPSE_SECS: i64 = 15 * 60;
 
 /// The layout of `SCHEMA`, kept in SQLite's `user_version`. A database of layout 5 (relevo 0.1.0
-/// to 0.2.x), 6 (relevo 0.3.x), 7 (relevo 0.4.x), 8 (development builds of 0.5.0) or 9 (relevo
-/// 0.5.x) is migrated in place (`MIGRATE_FROM_5` to `MIGRATE_FROM_9`, then `OPEN_CLOSED`), by
-/// `relevo serve` only; any other layout is refused, never half-updated
-/// (`CREATE TABLE IF NOT EXISTS` would skip the old tables and fail on their missing columns).
-const SCHEMA_VERSION: i64 = 10;
+/// to 0.2.x), 6 (relevo 0.3.x), 7 (relevo 0.4.x), 8 (development builds of 0.5.0), 9 (relevo
+/// 0.5.x) or 10 (relevo 0.6.0 to 0.8.x) is migrated in place (`MIGRATE_FROM_5` to
+/// `MIGRATE_FROM_9`, then `OPEN_CLOSED`, then `server_key`), by `relevo serve` only; any other
+/// layout is refused, never half-updated (`CREATE TABLE IF NOT EXISTS` would skip the old tables
+/// and fail on their missing columns). Layout 11 changes no table: its note text and thread
+/// titles are encrypted (`crypto`), which no version before it can read.
+const SCHEMA_VERSION: i64 = 11;
 
 /// Layout 5 to 6: the handled state of each participant, from what layout 5 recorded as handling.
 /// A thread that was `waiting` there (open, direct, its latest note not theirs) waited for their
@@ -499,23 +509,33 @@ UPDATE session_threads SET resolved = 0 WHERE resolved != 0;
 UPDATE threads SET status = 'open' WHERE status = 'closed';
 ";
 
-/// Opens (or creates) the database and applies the schema. A database of layout 5 to 9 is
+/// Opens (or creates) the database and applies the schema. A database of layout 5 to 10 is
 /// refused: only `relevo serve` migrates it (`open_migrating`), so that an admin command never
-/// changes the layout behind the owner's back, before a backup. `":memory:"` works for tests.
+/// changes the layout behind the owner's back, before a backup. No key: the admin commands never
+/// read note text nor thread titles. `":memory:"` works for tests.
 pub fn open(path: &str) -> Result<Connection> {
-    open_with(path, false, OPEN_PATIENCE)
+    Ok(open_with(path, None, OPEN_PATIENCE)?.0)
 }
 
-/// `open`, migrating a database of layout 5 to 9 in place: for `relevo serve`.
-pub fn open_migrating(path: &str) -> Result<Connection> {
-    open_with(path, true, OPEN_PATIENCE)
+/// `open`, migrating a database of layout 5 to 10 in place, with the key in `key_file`: for
+/// `relevo serve`. A database encrypted already opens only with the key it was encrypted with,
+/// which must be there; one never encrypted takes the key in `key_file` (made if missing), and
+/// every note text and thread title in it is encrypted (see `server_key`).
+pub fn open_migrating(path: &str, key_file: &Path) -> Result<(Connection, Key)> {
+    let (conn, key) = open_with(path, Some(key_file), OPEN_PATIENCE)?;
+    Ok((conn, key.expect("a key file gives a key")))
 }
 
 /// How long opening waits, in all, for other processes opening the same file at the same time
 /// (two servers started at once on a new database, or on a copy not yet in WAL mode).
 const OPEN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(15);
 
-fn open_with(path: &str, migrate: bool, patience: std::time::Duration) -> Result<Connection> {
+/// Migrates, and handles the key, when given a key file.
+fn open_with(
+    path: &str,
+    key_file: Option<&Path>,
+    patience: std::time::Duration,
+) -> Result<(Connection, Option<Key>)> {
     create_private(path).with_context(|| format!("creating database {path}"))?;
     // SQLite answers "database is locked" at once, without waiting, to a switch to WAL mode while
     // another process reads the file, and in a few other moments of another one making it or
@@ -525,7 +545,7 @@ fn open_with(path: &str, migrate: bool, patience: std::time::Duration) -> Result
     let deadline = std::time::Instant::now() + patience;
     let mut pause = std::time::Duration::from_millis(5);
     loop {
-        match try_open(path, migrate, deadline) {
+        match try_open(path, key_file, deadline) {
             Err(e) if busy(&e) && !left(deadline).is_zero() => {
                 std::thread::sleep(pause.min(left(deadline)));
                 pause = (pause * 2).min(std::time::Duration::from_millis(100));
@@ -555,7 +575,12 @@ fn busy(e: &anyhow::Error) -> bool {
 }
 
 /// One attempt of `open_with`, waiting for other processes' locks until `deadline` at most.
-fn try_open(path: &str, migrate: bool, deadline: std::time::Instant) -> Result<Connection> {
+fn try_open(
+    path: &str,
+    key_file: Option<&Path>,
+    deadline: std::time::Instant,
+) -> Result<(Connection, Option<Key>)> {
+    let migrate = key_file.is_some();
     let mut conn = Connection::open(path).with_context(|| format!("opening database {path}"))?;
     wait_until(&conn, deadline)?;
     // A layout it refuses is left as it is: found before anything is written, WAL mode included.
@@ -611,8 +636,10 @@ fn try_open(path: &str, migrate: bool, deadline: std::time::Instant) -> Result<C
                 tx.execute_batch(MIGRATE_FROM_8)
                     .with_context(|| format!("migrating database {path} from layout 8 to 9"))?;
             }
-            tx.execute_batch(MIGRATE_FROM_9)
-                .with_context(|| format!("migrating database {path} from layout 9 to 10"))?;
+            if old <= 9 {
+                tx.execute_batch(MIGRATE_FROM_9)
+                    .with_context(|| format!("migrating database {path} from layout 9 to 10"))?;
+            }
             from = Some(old);
         }
         Layout::New | Layout::Current => {}
@@ -635,6 +662,9 @@ fn try_open(path: &str, migrate: bool, deadline: std::time::Instant) -> Result<C
         tx.execute_batch(OPEN_CLOSED)
             .with_context(|| format!("migrating database {path} from layout 7 to 8"))?;
     }
+    let key = key_file
+        .map(|file| server_key(&tx, path, file))
+        .transpose()?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
     if let Some(old) = from {
@@ -642,10 +672,158 @@ fn try_open(path: &str, migrate: bool, deadline: std::time::Instant) -> Result<C
             tracing::info!(db = path, "{line}");
         }
     }
+    if let (Some(file), Some((_, Some(sealed)))) = (key_file, &key) {
+        let key_file = file.display();
+        let which = if sealed.made { "a new" } else { "the existing" };
+        tracing::info!(
+            "encrypting with {which} key at {key_file}: keep a copy of it apart from the \
+             database and its backups; without it, the notes cannot be read"
+        );
+        tracing::info!(
+            db = path,
+            key = %key_file,
+            notes = sealed.notes,
+            titles = sealed.titles,
+            "encrypted the database's note text and thread titles"
+        );
+    }
+    if migrate {
+        let pending: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM meta WHERE key = 'scrub_pending')",
+            [],
+            |r| r.get(0),
+        )?;
+        if pending && let Err(e) = scrub(&conn) {
+            tracing::warn!(
+                db = path,
+                error = %format!("{e:#}"),
+                "the database could not be rewritten after its notes were encrypted: pages of \
+                 it may still hold them in plain text; the next start tries again"
+            );
+        }
+    }
     conn.pragma_update(None, "foreign_keys", "ON")?;
     // Open: from now on, each statement waits for another process's lock as long as it needs.
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
-    Ok(conn)
+    Ok((conn, key.map(|(key, _)| key)))
+}
+
+/// Rewrites the database once its notes were encrypted, so that no page of it, nor of its `-wal`,
+/// still holds them in plain text: `VACUUM` writes every page again, and a truncating checkpoint
+/// moves them into the file and empties the `-wal`. Until both are done, `meta.scrub_pending`
+/// stays, and every start of `serve` tries again: a crash between the encryption and this loses
+/// nothing.
+fn scrub(conn: &Connection) -> Result<()> {
+    conn.execute_batch("VACUUM")?;
+    let blocked: i64 = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
+    if blocked != 0 {
+        bail!("another connection kept the checkpoint from finishing");
+    }
+    conn.execute("DELETE FROM meta WHERE key = 'scrub_pending'", [])?;
+    tracing::info!("rewrote the database: no page of it holds the notes in plain text");
+    Ok(())
+}
+
+/// What `server_key` did to a database never encrypted before.
+struct Sealed {
+    /// The key file was made now.
+    made: bool,
+    notes: usize,
+    titles: usize,
+}
+
+/// The key of the database `tx` has open (in its migration transaction), from `file`. One
+/// encrypted already (`meta.key_check`) opens only with its own key (`key_for`). One never
+/// encrypted takes the key in `file`, made if missing: written and synced before this
+/// transaction commits, so a start that dies before the commit leaves the database as it was and
+/// the next one takes the same key. Every note text and thread title still in plain text is
+/// sealed with it, and `key_check` records it.
+fn server_key(tx: &Connection, path: &str, file: &Path) -> Result<(Key, Option<Sealed>)> {
+    if let Some(check) = key_check(tx)? {
+        return Ok((key_for(&check, file)?, None));
+    }
+    let (key, made) = crypto::load_or_create(file)?;
+    let (notes, titles) =
+        seal_plain(tx, &key).with_context(|| format!("encrypting database {path}"))?;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES ('key_check', ?1)",
+        [key.check()],
+    )?;
+    if notes + titles > 0 {
+        tx.execute(
+            "INSERT OR IGNORE INTO meta (key, value) VALUES ('scrub_pending', '1')",
+            [],
+        )?;
+    }
+    let sealed = Sealed {
+        made,
+        notes,
+        titles,
+    };
+    Ok((key, Some(sealed)))
+}
+
+/// Seals every note text and thread title still in plain text with `key`, as bytes (whatever
+/// they hold), and says how many of each.
+fn seal_plain(tx: &Connection, key: &Key) -> rusqlite::Result<(usize, usize)> {
+    let mut notes = 0;
+    let mut after = 0;
+    loop {
+        let batch: Vec<(i64, String, String, Vec<u8>)> = tx
+            .prepare_cached(
+                "SELECT seq, id, thread_id, CAST(text AS BLOB) FROM notes
+                 WHERE seq > ?1 AND typeof(text) = 'text' ORDER BY seq LIMIT 500",
+            )?
+            .query_map([after], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let Some((last, ..)) = batch.last() else {
+            break;
+        };
+        after = *last;
+        for (seq, id, thread, text) in &batch {
+            tx.prepare_cached("UPDATE notes SET text = ?2 WHERE seq = ?1")?
+                .execute(params![seq, key.seal(&crypto::note_aad(thread, id), text)])?;
+        }
+        notes += batch.len();
+    }
+    let titles: Vec<(String, Vec<u8>)> = tx
+        .prepare("SELECT id, CAST(title AS BLOB) FROM threads WHERE typeof(title) = 'text'")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (id, title) in &titles {
+        tx.prepare_cached("UPDATE threads SET title = ?2 WHERE id = ?1")?
+            .execute(params![id, key.seal(&crypto::title_aad(id), title)])?;
+    }
+    Ok((notes, titles.len()))
+}
+
+/// `meta.key_check`: set once `serve` has encrypted the database.
+pub fn key_check(conn: &Connection) -> Result<Option<Vec<u8>>> {
+    Ok(conn
+        .query_row("SELECT value FROM meta WHERE key = 'key_check'", [], |r| {
+            r.get(0)
+        })
+        .optional()?)
+}
+
+/// The key in `file`, which must be the one that made `check`.
+fn key_for(check: &[u8], file: &Path) -> Result<Key> {
+    let shown = file.display();
+    let Some(key) = crypto::load(file)? else {
+        bail!(
+            "this database is encrypted but there is no key at {shown} (RELEVO_KEY_FILE). \
+             Restore the key it was encrypted with; without it, its notes cannot be read."
+        );
+    };
+    if !key.opens(check) {
+        bail!(
+            "this key does not open this database (RELEVO_KEY_FILE={shown}).\n\
+             Use the key it was encrypted with. Without it, its notes cannot be read."
+        );
+    }
+    Ok(key)
 }
 
 /// What a migration from layout `old` logs, a line per step, once it has committed.
@@ -673,8 +851,14 @@ fn migrated(old: i64, opened: i64) -> Vec<String> {
                 .to_string(),
         );
     }
+    if old <= 9 {
+        lines.push(
+            "migrated the database from layout 9 to 10: sessions keep the agent they say they are"
+                .to_string(),
+        );
+    }
     lines.push(
-        "migrated the database from layout 9 to 10: sessions keep the agent they say they are"
+        "migrated the database from layout 10 to 11: note text and thread titles are encrypted"
             .to_string(),
     );
     lines
@@ -709,7 +893,7 @@ fn broken_thread_refs(tx: &Connection) -> Result<Vec<(String, i64, String)>> {
     Ok(out)
 }
 
-/// Why a command other than `serve` refuses a database of layout 5 to 9.
+/// Why a command other than `serve` refuses a database of layout 5 to 10.
 fn no_migration(path: &str, layout: Layout) -> String {
     format!(
         "database {path} has the layout of {}, which only `relevo serve` migrates (in place, \
@@ -728,7 +912,8 @@ pub enum Layout {
     /// This version's layout.
     Current,
     /// Layout 5 (relevo 0.1.0 to 0.2.x), 6 (relevo 0.3.x), 7 (relevo 0.4.x), 8 (development
-    /// builds of 0.5.0) or 9 (relevo 0.5.x): `relevo serve` migrates it.
+    /// builds of 0.5.0), 9 (relevo 0.5.x) or 10 (relevo 0.6.0 to 0.8.x): `relevo serve` migrates
+    /// it.
     Migrates(i64),
 }
 
@@ -740,6 +925,7 @@ impl Layout {
             Layout::Migrates(6) => "relevo 0.3.x",
             Layout::Migrates(7) => "relevo 0.4.x",
             Layout::Migrates(9) => "relevo 0.5.x",
+            Layout::Migrates(10) => "relevo 0.6.0 to 0.8.x",
             Layout::Migrates(_) => "a development build of relevo 0.5.0 (before its release)",
             Layout::New | Layout::Current => "this relevo",
         }
@@ -777,13 +963,32 @@ fn layout(conn: &Connection, path: &str) -> Result<Layout> {
 }
 
 /// The layout of the existing database at `path`, or why this version refuses it, found without
-/// writing anything (see `read_only`).
-pub fn check(path: &str) -> Result<Layout> {
+/// writing anything (see `read_only`). An encrypted database must have its key in `key_file`
+/// (read only: never made here); one not encrypted yet needs none, but a key file already there
+/// must be one `serve` would take. `key_file` is only asked for then: where it cannot be said
+/// (no `HOME`), a database that needs no key still checks.
+pub fn check(path: &str, key_file: impl FnOnce() -> Result<PathBuf>) -> Result<Layout> {
     if !std::path::Path::new(path).is_file() {
         bail!("no database at {path}");
     }
     let conn = read_only(path).with_context(|| format!("opening database {path}"))?;
-    layout(&conn, path)
+    let found = layout(&conn, path)?;
+    let has_meta: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta')",
+        [],
+        |r| r.get(0),
+    )?;
+    match has_meta.then(|| key_check(&conn)).transpose()?.flatten() {
+        Some(check) => {
+            key_for(&check, &key_file()?)?;
+        }
+        None => {
+            if let Ok(file) = key_file() {
+                crypto::load(&file)?;
+            }
+        }
+    }
+    Ok(found)
 }
 
 /// Opens the existing database at `path` to read it only, writing nothing: not the database, and
@@ -810,9 +1015,9 @@ pub fn read_only(path: &str) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
-/// Creates a missing database file readable by the server user only: it holds every note in
-/// plain text. SQLite gives the `-wal` and `-shm` files the same mode. Existing files are left as
-/// they are.
+/// Creates a missing database file readable by the server user only: all but the note text and
+/// thread titles is plain. SQLite gives the `-wal` and `-shm` files the same mode. Existing files
+/// are left as they are.
 fn create_private(path: &str) -> std::io::Result<()> {
     if path == ":memory:" {
         return Ok(());
@@ -1818,7 +2023,8 @@ mod tests {
                 let path = path.to_str().unwrap().to_string();
                 std::thread::spawn(move || {
                     gate.wait();
-                    open_migrating(&path).map(drop)
+                    let key = std::path::Path::new(&path).with_extension("key");
+                    open_migrating(&path, &key).map(drop)
                 })
             })
             .collect();
@@ -1827,7 +2033,10 @@ mod tests {
                 panic!("{}: {e:#}", path.display());
             }
         }
-        assert_eq!(check(path.to_str().unwrap()).unwrap(), Layout::Current);
+        assert_eq!(
+            check(path.to_str().unwrap(), || Ok(path.with_extension("key"))).unwrap(),
+            Layout::Current
+        );
     }
 
     #[test]
@@ -1863,7 +2072,7 @@ mod tests {
         holder.execute_batch("BEGIN EXCLUSIVE").unwrap();
         let patience = std::time::Duration::from_millis(400);
         let start = std::time::Instant::now();
-        let err = open_with(path, false, patience).unwrap_err();
+        let err = open_with(path, None, patience).unwrap_err();
         let took = start.elapsed();
         assert!(busy(&err), "{err:#}");
         assert!(took >= patience, "{took:?}");
@@ -1887,14 +2096,10 @@ mod tests {
                 .collect()
         };
         let line = |from, to| format!("migrated the database from layout {from} to {to}");
-        assert_eq!(
-            steps(5),
-            [line(5, 6), line(6, 7), line(7, 8), line(8, 9), line(9, 10)]
-        );
-        assert_eq!(steps(6), [line(6, 7), line(7, 8), line(8, 9), line(9, 10)]);
-        assert_eq!(steps(7), [line(7, 8), line(8, 9), line(9, 10)]);
-        assert_eq!(steps(8), [line(8, 9), line(9, 10)]);
-        assert_eq!(steps(9), [line(9, 10)]);
+        let from = |old: i64| -> Vec<String> { (old..11).map(|l| line(l, l + 1)).collect() };
+        for old in 5..=10 {
+            assert_eq!(steps(old), from(old), "{old}");
+        }
         assert!(migrated(7, 2)[0].contains("opened 2 closed threads"));
     }
 

@@ -682,6 +682,7 @@ async fn channel_pushes_no_release_notes_and_inbox_lists_them() {
     ana.ok("inbox", json!({})).await;
     let relevo::release::Outcome::Posted(board) = relevo::release::announce(
         &s.app.db(),
+        s.app.key(),
         "99.0.0",
         "## 99.0.0 (1-jan-2026)\n\nNews for everyone.\n",
         true,
@@ -1715,6 +1716,8 @@ async fn serve_tls(db: &Path, port: Option<u16>, args: &[&str]) -> Served {
         .arg(db)
         .args(["serve", "--tls", "--addr", &format!("127.0.0.1:{port}")])
         .args(args)
+        // Never the real ~/.config/relevo-server/server.key; the same one at every start.
+        .env("RELEVO_KEY_FILE", db.with_extension("key"))
         .env("NO_COLOR", "1")
         .env("RUST_LOG", "info")
         .env_remove("RELEVO_TLS")
@@ -2242,9 +2245,14 @@ async fn list_numbers_reply_open_and_refuse_what_was_handled_since() {
         .app
         .db()
         .query_row(
-            "SELECT text FROM notes WHERE thread_id = ?1 ORDER BY seq DESC LIMIT 1",
+            "SELECT id, text FROM notes WHERE thread_id = ?1 ORDER BY seq DESC LIMIT 1",
             [&direct],
-            |r| r.get(0),
+            |r| {
+                let note: String = r.get(0)?;
+                s.app
+                    .key()
+                    .text(r, 1, &relevo::crypto::note_aad(&direct, &note))
+            },
         )
         .unwrap();
     assert_eq!(

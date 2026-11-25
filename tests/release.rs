@@ -60,7 +60,15 @@ impl Server {
     }
 
     fn announce_with(&self, version: &str, changelog: &str, post: bool) -> Outcome {
-        release::announce(&self.app.db(), version, changelog, post, T0 + 30).unwrap()
+        release::announce(
+            &self.app.db(),
+            self.app.key(),
+            version,
+            changelog,
+            post,
+            T0 + 30,
+        )
+        .unwrap()
     }
 
     fn announced(&self) -> Option<String> {
@@ -263,7 +271,15 @@ async fn a_new_database_a_downgrade_or_the_same_version_posts_nothing() {
     let released = release::release_section(release::CHANGELOG, version).is_some();
     assert_eq!(recorded.as_deref(), released.then_some(version));
     assert_eq!(
-        release::announce(&conn, version, release::CHANGELOG, true, T0).unwrap(),
+        release::announce(
+            &conn,
+            &relevo::crypto::Key::random(),
+            version,
+            release::CHANGELOG,
+            true,
+            T0
+        )
+        .unwrap(),
         if released {
             Outcome::Announced
         } else {
@@ -347,7 +363,15 @@ fn several_processes_starting_at_once_post_once() {
             let path = path.clone();
             std::thread::spawn(move || {
                 let conn = db::open(&path).unwrap();
-                release::announce(&conn, "0.5.0", &log("0.5.0"), true, T0).unwrap()
+                release::announce(
+                    &conn,
+                    &relevo::crypto::Key::random(),
+                    "0.5.0",
+                    &log("0.5.0"),
+                    true,
+                    T0,
+                )
+                .unwrap()
             })
         })
         .collect();
@@ -485,7 +509,15 @@ async fn a_person_who_had_the_name_keeps_it_and_nothing_is_posted() {
         .unwrap();
     assert_eq!(made, 0);
     assert_eq!(
-        release::announce(&conn, "0.5.0", &log("0.5.0"), true, T0).unwrap(),
+        release::announce(
+            &conn,
+            &relevo::crypto::Key::random(),
+            "0.5.0",
+            &log("0.5.0"),
+            true,
+            T0
+        )
+        .unwrap(),
         Outcome::NameTaken
     );
     let threads: i64 = conn
@@ -557,7 +589,15 @@ fn a_team_that_had_the_name_counts_as_taken() {
     let path = legacy(&dir, false);
     let conn = db::open(&path).unwrap();
     assert_eq!(
-        release::announce(&conn, "0.5.0", &log("0.5.0"), true, T0).unwrap(),
+        release::announce(
+            &conn,
+            &relevo::crypto::Key::random(),
+            "0.5.0",
+            &log("0.5.0"),
+            true,
+            T0
+        )
+        .unwrap(),
         Outcome::NameTaken
     );
     let announced: String = conn

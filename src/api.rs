@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::auth::Caller;
+use crate::crypto::{Key, note_aad, title_aad};
 use crate::db::{
     CONTEXT_FORMAT, IS_BOT_SQL, RESERVED_HANDLES, SYSTEM_PERSON_SQL, context_repo, random_id,
     rfc3339, valid_context,
@@ -275,15 +276,21 @@ JOIN people o ON o.id = t.opener_id
 LEFT JOIN session_threads s ON s.session_id = ?2 AND s.thread_id = p.thread_id
 WHERE p.person_id = ?1 AND p.thread_id = ?3";
 
-fn find_thread(conn: &Connection, session: &Session, id: &str) -> Result<ThreadRow, ApiError> {
+fn find_thread(
+    conn: &Connection,
+    key: &Key,
+    session: &Session,
+    id: &str,
+) -> Result<ThreadRow, ApiError> {
     conn.query_row(
         THREAD_SQL,
         params![session.person_id, session.id, id],
         |r| {
+            let id: String = r.get(0)?;
             Ok(ThreadRow {
-                id: r.get(0)?,
+                title: key.text(r, 2, &title_aad(&id))?,
+                id,
                 kind: r.get(1)?,
-                title: r.get(2)?,
                 from: r.get(3)?,
                 delivered_seq: r.get(4)?,
                 last_seq: r.get(5)?,
@@ -587,22 +594,25 @@ fn participants(conn: &Connection, thread: &str) -> Result<Vec<String>, ApiError
 
 /// `n.author_id IS (…)`: the server's own person (`db::SYSTEM_PERSON_SQL`), one key read.
 const NOTE_COLUMNS: &str = "SELECT n.id, a.handle, n.via, n.created_at, n.text,
-       n.author_id IS (SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'system_person')
+       n.author_id IS (SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'system_person'),
+       n.thread_id
      FROM notes n JOIN people a ON a.id = n.author_id";
 
 /// The note `?1` of thread `?2`, by its primary key: one row read per thread shown.
 const NOTE_AT_SQL: &str = "WHERE n.seq = ?1 AND n.thread_id = ?2";
 
-/// A row of `NOTE_COLUMNS` as a note, its text cut to `max_chars` when given.
-fn note_out(r: &rusqlite::Row, max_chars: Option<usize>) -> rusqlite::Result<NoteOut> {
-    let mut text: String = r.get(4)?;
+/// A row of `NOTE_COLUMNS` as a note, its text opened and cut to `max_chars` when given.
+fn note_out(r: &rusqlite::Row, key: &Key, max_chars: Option<usize>) -> rusqlite::Result<NoteOut> {
+    let id: String = r.get(0)?;
+    let thread: String = r.get(6)?;
+    let mut text = key.text(r, 4, &note_aad(&thread, &id))?;
     let mut truncated = false;
     if let Some((cut, _)) = max_chars.and_then(|max| text.char_indices().nth(max)) {
         text.truncate(cut);
         truncated = true;
     }
     Ok(NoteOut {
-        id: r.get(0)?,
+        id,
         author: r.get(1)?,
         via: r.get(2)?,
         created_at: rfc3339(r.get(3)?),
@@ -615,6 +625,7 @@ fn note_out(r: &rusqlite::Row, max_chars: Option<usize>) -> rusqlite::Result<Not
 /// Notes of a thread after `seq`, oldest first, cut to `max_chars` when given.
 fn notes_after(
     conn: &Connection,
+    key: &Key,
     thread: &str,
     seq: i64,
     max_chars: Option<usize>,
@@ -622,13 +633,14 @@ fn notes_after(
     let mut stmt = conn.prepare(&format!(
         "{NOTE_COLUMNS} WHERE n.thread_id = ?1 AND n.seq > ?2 ORDER BY n.seq"
     ))?;
-    let rows = stmt.query_map(params![thread, seq], |r| note_out(r, max_chars))?;
+    let rows = stmt.query_map(params![thread, seq], |r| note_out(r, key, max_chars))?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 /// The note `seq` of a thread, cut to `max_chars` when given; `None` if it has no such note.
 fn note_at(
     conn: &Connection,
+    key: &Key,
     thread: &str,
     seq: i64,
     max_chars: Option<usize>,
@@ -637,7 +649,7 @@ fn note_at(
         .query_row(
             &format!("{NOTE_COLUMNS} {NOTE_AT_SQL}"),
             params![seq, thread],
-            |r| note_out(r, max_chars),
+            |r| note_out(r, key, max_chars),
         )
         .optional()?)
 }
@@ -990,7 +1002,7 @@ fn look(app: &App, caller: &Caller, all: bool, first: bool) -> Result<Look, ApiE
 fn answer_inbox(app: &App, caller: &Caller, all: bool, arrived: bool) -> Result<Value, ApiError> {
     if arrived {
         return as_session(app, caller, true, |tx, session, now| {
-            inbox_of(tx, caller, Some(session), all, now)
+            inbox_of(tx, app.key(), caller, Some(session), all, now)
         });
     }
     let mut conn = app.db();
@@ -1000,7 +1012,7 @@ fn answer_inbox(app: &App, caller: &Caller, all: bool, arrived: bool) -> Result<
         Some(_) => Some(touch(&tx, app, caller, now, false)?),
         None => None,
     };
-    let out = inbox_of(&tx, caller, session.as_ref(), all, now)?;
+    let out = inbox_of(&tx, app.key(), caller, session.as_ref(), all, now)?;
     tx.commit()?;
     Ok(out)
 }
@@ -1008,6 +1020,7 @@ fn answer_inbox(app: &App, caller: &Caller, all: bool, arrived: bool) -> Result<
 /// The inbox of `session` (`None`: one forgotten, with nothing), delivering the threads it returns.
 fn inbox_of(
     tx: &Connection,
+    key: &Key,
     caller: &Caller,
     session: Option<&Session>,
     all: bool,
@@ -1019,13 +1032,14 @@ fn inbox_of(
         let page = page(tx, session, all)?;
         more = inbox_count(tx, session, all)?.saturating_sub(page.len());
         for candidate in &page {
-            let row = find_thread(tx, session, &candidate.thread)?;
+            let row = find_thread(tx, key, session, &candidate.thread)?;
             let mut out = thread_out(tx, session, &row)?;
             // Shown, not delivered: what a waiting thread waits on, even when another session of
             // the person already has it.
-            out.last_note = note_at(tx, &row.id, row.last_seq, Some(INBOX_TEXT_CHARS))?;
+            out.last_note = note_at(tx, key, &row.id, row.last_seq, Some(INBOX_TEXT_CHARS))?;
             out.new_notes = Some(notes_after(
                 tx,
+                key,
                 &row.id,
                 row.delivered_seq,
                 Some(INBOX_TEXT_CHARS),
@@ -1070,11 +1084,11 @@ async fn thread(
 ) -> Result<Json<ThreadOut>, ApiError> {
     let Path(id) = id.map_err(|_| ApiError::not_found("no such thread"))?;
     let out = as_session(&app, &caller, true, |tx, session, now| {
-        let row = find_thread(tx, session, &id)?;
+        let row = find_thread(tx, app.key(), session, &id)?;
         deliver(tx, session, &row.id, row.last_seq, now)?;
         refresh(tx, &row.id)?;
         let mut out = thread_out(tx, session, &row)?;
-        out.notes = Some(notes_after(tx, &row.id, 0, None)?);
+        out.notes = Some(notes_after(tx, app.key(), &row.id, 0, None)?);
         out.delivery = Some(delivery(tx, &row.id)?);
         tracing::info!(person = %caller.handle, session = session.id, thread = %row.id, "thread");
         Ok(out)
@@ -1262,7 +1276,7 @@ fn write_as(
             (id, true, to, Vec::new())
         }
         Some(id) => {
-            let row = find_thread(tx, session, id)?;
+            let row = find_thread(tx, app.key(), session, id)?;
             let names = reply_names(tx, &whom.mentions, now)?;
             if req.text.is_some() {
                 // The server's own notes (release notes) count against no limit.
@@ -1310,7 +1324,7 @@ fn write_as(
                     caller.person_id,
                     caller.token_id,
                     session.label,
-                    text,
+                    app.key().seal(&note_aad(&thread_id, &id), text.as_bytes()),
                     now
                 ],
             )?;
@@ -1737,7 +1751,13 @@ fn open_thread(
     conn.execute(
         "INSERT INTO threads (id, kind, title, opener_id, status, created_at)
          VALUES (?1, ?2, ?3, ?4, 'open', ?5)",
-        params![id, kind, title_of(text), caller.person_id, now],
+        params![
+            id,
+            kind,
+            app.key().seal(&title_aad(&id), title_of(text).as_bytes()),
+            caller.person_id,
+            now
+        ],
     )?;
     let mut add = conn.prepare(
         "INSERT INTO participants (thread_id, person_id, context, named_seq)
