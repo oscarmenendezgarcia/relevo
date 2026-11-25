@@ -35,18 +35,6 @@ impl std::fmt::Debug for Key {
     }
 }
 
-/// A sealed value this key does not open: sealed by another key, for another row, or damaged.
-#[derive(Debug)]
-pub struct Undecryptable;
-
-impl std::fmt::Display for Undecryptable {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("a sealed value this server's key does not open (another key's, or damaged)")
-    }
-}
-
-impl std::error::Error for Undecryptable {}
-
 /// The associated data of a note's text.
 pub fn note_aad(thread: &str, note: &str) -> String {
     format!("note:{thread}:{note}")
@@ -90,62 +78,50 @@ impl Key {
     }
 
     /// What `seal` sealed for the place `aad` names, if this key sealed it, for that place, and
-    /// nothing changed it since.
-    pub fn open(&self, aad: &str, sealed: &[u8]) -> Result<Vec<u8>, Undecryptable> {
-        let Some((&VERSION, rest)) = sealed.split_first() else {
-            return Err(Undecryptable);
+    /// nothing changed it since; `None` otherwise (another key's, another row's, or damaged).
+    pub fn open(&self, aad: &str, sealed: &[u8]) -> Option<Vec<u8>> {
+        let (&VERSION, rest) = sealed.split_first()? else {
+            return None;
         };
         if rest.len() < NONCE_LEN {
-            return Err(Undecryptable);
+            return None;
         }
         let (nonce, body) = rest.split_at(NONCE_LEN);
-        let nonce = Nonce::try_assume_unique_for_key(nonce).map_err(|_| Undecryptable)?;
+        let nonce = Nonce::try_assume_unique_for_key(nonce).ok()?;
         let mut body = body.to_vec();
         let plain = self
             .0
             .open_in_place(nonce, Aad::from(aad.as_bytes()), &mut body)
-            .map_err(|_| Undecryptable)?
+            .ok()?
             .len();
         body.truncate(plain);
-        Ok(body)
+        Some(body)
     }
 
     /// Column `idx` of `row`, sealed text, opened: a value this key does not open is an error
     /// that says so, never the value.
     pub fn text(&self, row: &rusqlite::Row, idx: usize, aad: &str) -> rusqlite::Result<String> {
-        let undecryptable = || {
-            rusqlite::Error::FromSqlConversionFailure(
-                idx,
-                rusqlite::types::Type::Blob,
-                Box::new(Undecryptable),
-            )
-        };
         let sealed: Vec<u8> = row.get(idx)?;
-        let plain = self.open(aad, &sealed).map_err(|_| undecryptable())?;
-        String::from_utf8(plain).map_err(|_| undecryptable())
+        self.open(aad, &sealed)
+            .and_then(|plain| String::from_utf8(plain).ok())
+            .ok_or_else(|| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    idx,
+                    rusqlite::types::Type::Blob,
+                    "a sealed value this server's key does not open (another key's, or damaged)"
+                        .into(),
+                )
+            })
     }
 
-    /// A new `meta.key_check` for this key: `CHECK_TEXT` sealed, in hex.
-    pub fn check(&self) -> String {
+    /// A new `meta.key_check` for this key: `CHECK_TEXT` sealed.
+    pub fn check(&self) -> Vec<u8> {
         self.seal(CHECK_AAD, CHECK_TEXT)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
     }
 
     /// Whether this key made `check` (a `meta.key_check`).
-    pub fn opens(&self, check: &str) -> bool {
-        let bytes: Option<Vec<u8>> = check
-            .len()
-            .is_multiple_of(2)
-            .then(|| {
-                (0..check.len())
-                    .step_by(2)
-                    .map(|i| u8::from_str_radix(check.get(i..i + 2)?, 16).ok())
-                    .collect()
-            })
-            .flatten();
-        bytes.is_some_and(|b| self.open(CHECK_AAD, &b).is_ok_and(|p| p == CHECK_TEXT))
+    pub fn opens(&self, check: &[u8]) -> bool {
+        self.open(CHECK_AAD, check).is_some_and(|p| p == CHECK_TEXT)
     }
 }
 
@@ -269,36 +245,34 @@ mod tests {
         assert_eq!(key.open(&aad, &key.seal(&aad, b"")).unwrap(), b"");
 
         // Another key.
-        assert!(Key::random().open(&aad, &sealed).is_err());
+        assert!(Key::random().open(&aad, &sealed).is_none());
         // Another row: the same value moved to another note, or to a title.
         assert!(
             key.open(&note_aad("r_aaaaaaaaaaaa", "n_cccccccccccc"), &sealed)
-                .is_err()
+                .is_none()
         );
-        assert!(key.open(&title_aad("r_aaaaaaaaaaaa"), &sealed).is_err());
+        assert!(key.open(&title_aad("r_aaaaaaaaaaaa"), &sealed).is_none());
         // Any byte changed: the version, the nonce, the ciphertext or the tag.
         for i in 0..sealed.len() {
             let mut tampered = sealed.clone();
             tampered[i] ^= 0x01;
-            assert!(key.open(&aad, &tampered).is_err(), "byte {i}");
+            assert!(key.open(&aad, &tampered).is_none(), "byte {i}");
         }
         // Cut short, or not sealed at all.
-        assert!(key.open(&aad, &sealed[..sealed.len() - 1]).is_err());
-        assert!(key.open(&aad, &sealed[..5]).is_err());
-        assert!(key.open(&aad, b"").is_err());
-        assert!(key.open(&aad, b"Deploy tonight?").is_err());
+        assert!(key.open(&aad, &sealed[..sealed.len() - 1]).is_none());
+        assert!(key.open(&aad, &sealed[..5]).is_none());
+        assert!(key.open(&aad, b"").is_none());
+        assert!(key.open(&aad, b"Deploy tonight?").is_none());
     }
 
     #[test]
     fn the_key_check_says_which_key_encrypted_the_database() {
         let key = Key::random();
         let check = key.check();
-        assert!(check.bytes().all(|b| b.is_ascii_hexdigit()), "{check}");
         assert!(key.opens(&check));
         assert!(!Key::random().opens(&check));
         assert!(!key.opens(&check[1..]));
-        assert!(!key.opens("zz"));
-        assert!(!key.opens(""));
+        assert!(!key.opens(b""));
     }
 
     #[test]

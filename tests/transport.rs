@@ -35,7 +35,7 @@ async fn start(limits: Limits, with_tls: bool) -> Server {
 /// The same, listening on `ip`, so that its clients come from `ip` too.
 async fn start_on(ip: IpAddr, limits: Limits, with_tls: bool) -> Server {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let app = App::new(db::open(":memory:").unwrap(), Clock::system(), 5).unwrap();
+    let app = App::new(db::open(":memory:").unwrap(), Clock::system(), 5);
     let token = db::invite(&app.db(), "ana", "Ana", None, "test", db::now_unix())
         .unwrap()
         .secret;

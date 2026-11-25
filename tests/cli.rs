@@ -32,7 +32,7 @@ async fn sessions_lists_label_session_context_and_last_seen() {
     let conn = db::open(path).unwrap();
     let ana = db::invite(&conn, "ana", "Ana", None, "Claude Code", now).unwrap();
     let bob = db::invite(&conn, "bob", "Bob", None, "bot", now).unwrap();
-    let app = App::new(conn, Clock::system(), 5).unwrap();
+    let app = App::new(conn, Clock::system(), 5);
     for (token, session, context) in [
         (&ana.secret, Some("term-0001"), Some("pagos-api")),
         (&ana.secret, None, None),
@@ -85,7 +85,7 @@ async fn clients_lists_each_sessions_client_against_the_servers_version_outdated
     let ana = db::invite(&conn, "ana", "Ana", None, "Claude Code", now).unwrap();
     let bob = db::invite(&conn, "bob", "Bob", None, "pi", now).unwrap();
     let carl = db::invite(&conn, "carl", "Carl", None, "Hermes", now).unwrap();
-    let app = App::new(conn, Clock::system(), 5).unwrap();
+    let app = App::new(conn, Clock::system(), 5);
     let current = format!("pi/{server}");
     // (token, session, context, Relevo-Client, User-Agent), in the order they are seen.
     for (token, session, context, client, agent) in [
@@ -674,7 +674,7 @@ async fn admin_commands_need_no_key_and_check_db_checks_it() {
     let (conn, k) = db::open_migrating(path, &key).unwrap();
     let ana = db::invite(&conn, "ana", "Ana", None, "laptop", now).unwrap();
     let bob = db::invite(&conn, "bob", "Bob", None, "laptop", now).unwrap();
-    let app = App::with_dist(conn, Clock::system(), 5, None, k).unwrap();
+    let app = App::with_dist(conn, Clock::system(), 5, None, k);
     let req = Request::post("/api/send")
         .header("authorization", format!("Bearer {}", ana.secret))
         .header("relevo-mentions", "1")
@@ -748,7 +748,7 @@ async fn admin_commands_need_no_key_and_check_db_checks_it() {
     let bytes = std::fs::read(&copy).unwrap();
     assert!(!bytes.windows(9).any(|w| w == b"The vault"));
     let (conn, k) = db::open_migrating(copy.to_str().unwrap(), &key).unwrap();
-    let app = App::with_dist(conn, Clock::system(), 5, None, k).unwrap();
+    let app = App::with_dist(conn, Clock::system(), 5, None, k);
     let req = Request::get("/api/inbox")
         .header("authorization", format!("Bearer {}", bob.secret))
         .body(Body::empty())

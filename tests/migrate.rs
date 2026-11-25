@@ -105,7 +105,7 @@ fn serve_open(path: &str) -> anyhow::Result<(rusqlite::Connection, Key)> {
 /// The server over the database at `path` as `serve` opens it, on a clock fixed at `now`.
 fn serve(path: &str, now: i64) -> Arc<App> {
     let (conn, key) = serve_open(path).unwrap();
-    App::with_dist(conn, Clock::fixed(now), 5, None, key).unwrap()
+    App::with_dist(conn, Clock::fixed(now), 5, None, key)
 }
 
 fn user_version(path: &str) -> i64 {
@@ -516,7 +516,7 @@ async fn a_layout_7_database_gets_the_meta_table_and_this_versions_release_notes
     let version = "9.0.0";
     // Everyone of the old database takes part, and nobody has it pending.
     let f = Fixture {
-        app: App::with_dist(conn, Clock::fixed(seen + 60), 5, None, key).unwrap(),
+        app: App::with_dist(conn, Clock::fixed(seen + 60), 5, None, key),
         v: serde_json::from_str(FIXTURE7).unwrap(),
     };
     for who in ["ana", "bob", "carl"] {
@@ -1215,7 +1215,7 @@ async fn a_layout_10_database_is_encrypted_in_place_and_reads_back_as_it_was() {
 
     // Through the API, as it was.
     let f = Fixture {
-        app: App::with_dist(conn, Clock::fixed(seen + 60), 5, None, key).unwrap(),
+        app: App::with_dist(conn, Clock::fixed(seen + 60), 5, None, key),
         v: serde_json::from_str(FIXTURE10).unwrap(),
     };
     let ana = f.agent("ana", "ana-cc-0001", "pagos-api");
@@ -1269,7 +1269,7 @@ async fn a_layout_10_database_is_encrypted_in_place_and_reads_back_as_it_was() {
     // A restart takes the same key, and encrypts nothing again.
     let (conn, key) = db::open_migrating(&path, &key_path).unwrap();
     assert_eq!(db::key_check(&conn).unwrap().unwrap(), check);
-    let app = App::with_dist(conn, Clock::fixed(seen + 120), 5, None, key).unwrap();
+    let app = App::with_dist(conn, Clock::fixed(seen + 120), 5, None, key);
     let ana = Agent {
         app,
         token: serde_json::from_str::<Value>(FIXTURE10).unwrap()["tokens"]["ana"]
@@ -1290,8 +1290,7 @@ async fn a_layout_10_database_is_encrypted_in_place_and_reads_back_as_it_was() {
 }
 
 /// An encrypted database opens only with its own key: with none, or another, `serve` refuses to
-/// start, says what to do, changes nothing and makes no key; `check-db` says the same, and an
-/// App over it with another key is an error.
+/// start, says what to do, changes nothing and makes no key; `check-db` says the same.
 #[test]
 fn an_encrypted_database_refuses_another_key_or_none_and_never_makes_one() {
     let dir = TempDir::new();
@@ -1336,12 +1335,11 @@ fn an_encrypted_database_refuses_another_key_or_none_and_never_makes_one() {
     assert_eq!(std::fs::read(&path).unwrap(), before);
     assert_eq!(user_version(&path), 11);
 
-    // Its own key opens it; an App with another one is an error, not a panic.
+    // Its own key opens it.
     assert_eq!(
         db::check(&path, &key_file(&path)).unwrap(),
         db::Layout::Current
     );
-    assert!(App::new(db::open(&path).unwrap(), Clock::system(), 5).is_err());
 }
 
 /// A start that made the key and died before its transaction committed left the database as it

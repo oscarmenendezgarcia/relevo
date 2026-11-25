@@ -25,7 +25,7 @@ impl Drop for Server {
 }
 
 async fn server(handles: &[&str]) -> Server {
-    let app = App::new(db::open(":memory:").unwrap(), Clock::system(), 5).unwrap();
+    let app = App::new(db::open(":memory:").unwrap(), Clock::system(), 5);
     let mut tokens = HashMap::new();
     for h in handles {
         let name = h[..1].to_uppercase() + &h[1..];

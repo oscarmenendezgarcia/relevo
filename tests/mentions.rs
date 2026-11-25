@@ -21,7 +21,7 @@ struct Server {
 /// A server with these people, each with one token, on a fixed clock, and these teams (name,
 /// members).
 fn server(handles: &[&str], teams: &[(&str, &[&str])]) -> Server {
-    let app = App::new(db::open(":memory:").unwrap(), Clock::fixed(T0), 5).unwrap();
+    let app = App::new(db::open(":memory:").unwrap(), Clock::fixed(T0), 5);
     let mut tokens = HashMap::new();
     {
         let conn = app.db();

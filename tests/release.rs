@@ -49,7 +49,7 @@ fn server(handles: &[&str], announced: Option<&str>) -> Server {
             .unwrap(),
     };
     Server {
-        app: App::new(conn, Clock::fixed(T0 + 60), 5).unwrap(),
+        app: App::new(conn, Clock::fixed(T0 + 60), 5),
         tokens,
     }
 }
@@ -537,7 +537,7 @@ async fn a_person_who_had_the_name_keeps_it_and_nothing_is_posted() {
     );
     // Their notes are theirs, not release notes, and they can be mentioned.
     let s = Server {
-        app: App::new(conn, Clock::fixed(T0 + 60), 5).unwrap(),
+        app: App::new(conn, Clock::fixed(T0 + 60), 5),
         tokens: HashMap::from([
             ("relevo".to_string(), token.secret),
             (

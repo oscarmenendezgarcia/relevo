@@ -35,7 +35,7 @@ async fn server(handles: &[&str]) -> Server {
 
 /// `server`, with these teams (name, members) and this clock.
 async fn server_at(handles: &[&str], teams: &[(&str, &[&str])], clock: Clock) -> Server {
-    let app = App::new(db::open(":memory:").unwrap(), clock, 5).unwrap();
+    let app = App::new(db::open(":memory:").unwrap(), clock, 5);
     let mut tokens = HashMap::new();
     {
         let conn = app.db();

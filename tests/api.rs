@@ -22,7 +22,7 @@ struct Team {
 
 /// A team of the given handles, each with one token, on a fixed clock.
 fn team(handles: &[&str]) -> Team {
-    let app = App::new(db::open(":memory:").unwrap(), Clock::fixed(T0), 5).unwrap();
+    let app = App::new(db::open(":memory:").unwrap(), Clock::fixed(T0), 5);
     let mut tokens = HashMap::new();
     {
         let conn = app.db();
@@ -952,7 +952,7 @@ async fn sixth_team_question_in_24_hours_fails() {
 
 #[tokio::test]
 async fn team_limit_is_configurable() {
-    let app = App::new(db::open(":memory:").unwrap(), Clock::fixed(T0), 1).unwrap();
+    let app = App::new(db::open(":memory:").unwrap(), Clock::fixed(T0), 1);
     let ana = db::invite(&app.db(), "ana", "Ana", None, "l", T0).unwrap();
     db::invite(&app.db(), "bob", "Bob", None, "l", T0).unwrap();
     let t = Team {

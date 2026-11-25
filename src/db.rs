@@ -798,7 +798,7 @@ fn server_key(tx: &Connection, file: &Path) -> Result<(Key, Option<Sealed>)> {
 }
 
 /// `meta.key_check`: set once `serve` has encrypted the database.
-pub fn key_check(conn: &Connection) -> Result<Option<String>> {
+pub fn key_check(conn: &Connection) -> Result<Option<Vec<u8>>> {
     Ok(conn
         .query_row("SELECT value FROM meta WHERE key = 'key_check'", [], |r| {
             r.get(0)
@@ -807,7 +807,7 @@ pub fn key_check(conn: &Connection) -> Result<Option<String>> {
 }
 
 /// The key in `file`, which must be the one that made `check`.
-fn key_for(check: &str, file: &Path) -> Result<Key> {
+fn key_for(check: &[u8], file: &Path) -> Result<Key> {
     let shown = file.display();
     let Some(key) = crypto::load(file)? else {
         bail!(

@@ -976,7 +976,7 @@ async fn main() -> Result<()> {
                 team_questions_per_day,
                 Some(dist),
                 key,
-            )?;
+            );
             let listener = tokio::net::TcpListener::bind(addr).await?;
             let scheme = if tls.is_some() { "https" } else { "http" };
             let url = public_url(

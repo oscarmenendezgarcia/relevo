@@ -60,13 +60,9 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl App {
-    /// The state over `conn` with a new random key, kept nowhere: for a database in memory, or
-    /// one `serve` never encrypted (see `with_dist`).
-    pub fn new(
-        conn: Connection,
-        clock: Clock,
-        team_questions_per_day: u32,
-    ) -> anyhow::Result<Arc<App>> {
+    /// The state over `conn` with a new random key, kept nowhere: for tests, over a database in
+    /// memory. `serve` opens its database with its key (`db::open_migrating`), then `with_dist`.
+    pub fn new(conn: Connection, clock: Clock, team_questions_per_day: u32) -> Arc<App> {
         App::with_dist(
             conn,
             clock,
@@ -76,19 +72,16 @@ impl App {
         )
     }
 
-    /// The same, handing out the dist in `dist` (`GET /api/dist/...`), with `key`. Refused when
-    /// the database says another key encrypted it (`meta.key_check`).
+    /// The same, handing out the dist in `dist` (`GET /api/dist/...`), with `key`, the one that
+    /// encrypted the database (`db::open_migrating` checked it).
     pub fn with_dist(
         conn: Connection,
         clock: Clock,
         team_questions_per_day: u32,
         dist: Option<PathBuf>,
         key: crypto::Key,
-    ) -> anyhow::Result<Arc<App>> {
-        if db::key_check(&conn)?.is_some_and(|check| !key.opens(&check)) {
-            anyhow::bail!("this key does not open this database");
-        }
-        Ok(Arc::new(App {
+    ) -> Arc<App> {
+        Arc::new(App {
             db: Mutex::new(conn),
             key,
             clock,
@@ -97,7 +90,7 @@ impl App {
             news: Mutex::new(HashMap::new()),
             waits: Mutex::new(HashMap::new()),
             join_tries: Mutex::default(),
-        }))
+        })
     }
 
     /// The key that seals and opens note text and thread titles.

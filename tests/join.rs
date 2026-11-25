@@ -82,8 +82,7 @@ fn fixture() -> Fixture {
         5,
         Some(dist),
         relevo::crypto::Key::random(),
-    )
-    .unwrap();
+    );
     Fixture { app, _temp: temp }
 }
 
