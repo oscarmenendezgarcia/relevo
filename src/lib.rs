@@ -8,6 +8,7 @@ pub mod claude_command;
 pub mod client;
 pub mod config;
 pub mod context;
+pub mod crypto;
 pub mod db;
 pub mod dist;
 pub mod error;
