@@ -209,6 +209,7 @@ EOF2
 
     install_ --enable "$binary" || fail "upgrade: $(cat "$fake/out")"
     expect_in_out "the layout of relevo 0.1.0 to 0.2.x"
+    expect_in_out "delete it once the upgrade is confirmed"
     cmp -s "$binary" "$bin" || fail "new binary not installed"
     # The probe and the backup only read it: the same bytes, no -wal or -shm left behind.
     [ "$(sha256sum <"$db")" = "$before" ] || fail "install.sh wrote the database"

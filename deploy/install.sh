@@ -184,6 +184,8 @@ if [ "$changed_binary" = 1 ]; then
         say "backing up $db to $copy"
         run "$binary" --db "$db" backup "$copy" ||
             die "nothing installed: the backup of $db failed"
+        say "  (until relevo 0.9.0 or later has served it, a database holds the notes in plain"
+        say "  text, and so does this copy: delete it once the upgrade is confirmed)"
     fi
     say "installing $bin_dir/relevo"
     run mkdir -p "$bin_dir"
@@ -281,7 +283,11 @@ fi
 key_file=$key_dir/server.key
 [ "$systemd" = 1 ] || key_file=${RELEVO_KEY_FILE:-$key_file}
 say ""
-say "The server encrypts note text and thread titles with a key it makes at its first start:"
+if [ -e "$key_file" ]; then
+    say "The server encrypts note text and thread titles with its key:"
+else
+    say "The server encrypts note text and thread titles with a key it makes at its first start:"
+fi
 say "  $key_file"
 say "Keep a copy of it apart from the database and its backups: without it, the notes cannot"
 say "be read (docs/install.md, part 5)."

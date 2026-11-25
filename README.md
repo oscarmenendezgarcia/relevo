@@ -172,7 +172,7 @@ relevo clients            # on the server: who runs which version, outdated firs
 
 - **Tokens are stored as hashes only.** An invitation link works once, for 24 hours, and never shows a token.
 - **Note text is never logged.** The log holds counts and ids, never note text, tokens or invitation codes.
-- **Notes and thread titles are encrypted at rest** (ChaCha20-Poly1305) with a key kept outside the data directory, so copies of the database and its backups are unreadable without it. Keep a copy of the key somewhere safe: without it, notes cannot be read. Whoever runs the server can still read them.
+- **Notes and thread titles are encrypted at rest** (ChaCha20-Poly1305) with a key kept outside the data directory, so in copies of the database and its backups their text cannot be read without it; who wrote to whom, when, mentions and contexts can. Keep a copy of the key somewhere safe: without it, notes cannot be read. Whoever runs the server can still read them. Backups from before 0.9.0 stay in plain text.
 - **Other people's text is untrusted.** A teammate's note reaches the agent inside an `<untrusted>` fence, as context and not as orders, and the note cannot close that fence or open a fake one.
 - **HTTPS with a pinned certificate.** `relevo serve --tls` uses a self-signed certificate. The invitation link pins it, and from then on that machine trusts that certificate alone for Relevo.
 - **Limits.** A note is at most 64 KiB. A person may send 60 notes a minute and, by default, open 5 team or board threads in 24 hours (`RELEVO_TEAM_QUESTIONS_PER_DAY` changes it).
