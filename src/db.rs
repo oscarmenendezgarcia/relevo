@@ -7,7 +7,7 @@ use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -662,7 +662,9 @@ fn try_open(
         tx.execute_batch(OPEN_CLOSED)
             .with_context(|| format!("migrating database {path} from layout 7 to 8"))?;
     }
-    let key = key_file.map(|file| server_key(&tx, file)).transpose()?;
+    let key = key_file
+        .map(|file| server_key(&tx, path, file))
+        .transpose()?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
     if let Some(old) = from {
@@ -672,13 +674,11 @@ fn try_open(
     }
     if let (Some(file), Some((_, Some(sealed)))) = (key_file, &key) {
         let key_file = file.display();
-        if sealed.made {
-            tracing::info!(
-                key = %key_file,
-                "made a new key for note text and thread titles: keep a copy of it apart from \
-                 the database and its backups; without it, the notes cannot be read"
-            );
-        }
+        let which = if sealed.made { "a new" } else { "the existing" };
+        tracing::info!(
+            "encrypting with {which} key at {key_file}: keep a copy of it apart from the \
+             database and its backups; without it, the notes cannot be read"
+        );
         tracing::info!(
             db = path,
             key = %key_file,
@@ -738,17 +738,40 @@ struct Sealed {
 /// transaction commits, so a start that dies before the commit leaves the database as it was and
 /// the next one takes the same key. Every note text and thread title still in plain text is
 /// sealed with it, and `key_check` records it.
-fn server_key(tx: &Connection, file: &Path) -> Result<(Key, Option<Sealed>)> {
+fn server_key(tx: &Connection, path: &str, file: &Path) -> Result<(Key, Option<Sealed>)> {
     if let Some(check) = key_check(tx)? {
         return Ok((key_for(&check, file)?, None));
     }
     let (key, made) = crypto::load_or_create(file)?;
+    let (notes, titles) =
+        seal_plain(tx, &key).with_context(|| format!("encrypting database {path}"))?;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES ('key_check', ?1)",
+        [key.check()],
+    )?;
+    if notes + titles > 0 {
+        tx.execute(
+            "INSERT OR IGNORE INTO meta (key, value) VALUES ('scrub_pending', '1')",
+            [],
+        )?;
+    }
+    let sealed = Sealed {
+        made,
+        notes,
+        titles,
+    };
+    Ok((key, Some(sealed)))
+}
+
+/// Seals every note text and thread title still in plain text with `key`, as bytes (whatever
+/// they hold), and says how many of each.
+fn seal_plain(tx: &Connection, key: &Key) -> rusqlite::Result<(usize, usize)> {
     let mut notes = 0;
     let mut after = 0;
     loop {
-        let batch: Vec<(i64, String, String, String)> = tx
+        let batch: Vec<(i64, String, String, Vec<u8>)> = tx
             .prepare_cached(
-                "SELECT seq, id, thread_id, text FROM notes
+                "SELECT seq, id, thread_id, CAST(text AS BLOB) FROM notes
                  WHERE seq > ?1 AND typeof(text) = 'text' ORDER BY seq LIMIT 500",
             )?
             .query_map([after], |r| {
@@ -761,40 +784,19 @@ fn server_key(tx: &Connection, file: &Path) -> Result<(Key, Option<Sealed>)> {
         after = *last;
         for (seq, id, thread, text) in &batch {
             tx.prepare_cached("UPDATE notes SET text = ?2 WHERE seq = ?1")?
-                .execute(params![
-                    seq,
-                    key.seal(&crypto::note_aad(thread, id), text.as_bytes())
-                ])?;
+                .execute(params![seq, key.seal(&crypto::note_aad(thread, id), text)])?;
         }
         notes += batch.len();
     }
-    let titles: Vec<(String, String)> = tx
-        .prepare("SELECT id, title FROM threads WHERE typeof(title) = 'text'")?
+    let titles: Vec<(String, Vec<u8>)> = tx
+        .prepare("SELECT id, CAST(title AS BLOB) FROM threads WHERE typeof(title) = 'text'")?
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
     for (id, title) in &titles {
         tx.prepare_cached("UPDATE threads SET title = ?2 WHERE id = ?1")?
-            .execute(params![
-                id,
-                key.seal(&crypto::title_aad(id), title.as_bytes())
-            ])?;
+            .execute(params![id, key.seal(&crypto::title_aad(id), title)])?;
     }
-    tx.execute(
-        "INSERT INTO meta (key, value) VALUES ('key_check', ?1)",
-        [key.check()],
-    )?;
-    if notes + titles.len() > 0 {
-        tx.execute(
-            "INSERT OR IGNORE INTO meta (key, value) VALUES ('scrub_pending', '1')",
-            [],
-        )?;
-    }
-    let sealed = Sealed {
-        made,
-        notes,
-        titles: titles.len(),
-    };
-    Ok((key, Some(sealed)))
+    Ok((notes, titles.len()))
 }
 
 /// `meta.key_check`: set once `serve` has encrypted the database.
@@ -962,8 +964,10 @@ fn layout(conn: &Connection, path: &str) -> Result<Layout> {
 
 /// The layout of the existing database at `path`, or why this version refuses it, found without
 /// writing anything (see `read_only`). An encrypted database must have its key in `key_file`
-/// (read only: never made here).
-pub fn check(path: &str, key_file: &Path) -> Result<Layout> {
+/// (read only: never made here); one not encrypted yet needs none, but a key file already there
+/// must be one `serve` would take. `key_file` is only asked for then: where it cannot be said
+/// (no `HOME`), a database that needs no key still checks.
+pub fn check(path: &str, key_file: impl FnOnce() -> Result<PathBuf>) -> Result<Layout> {
     if !std::path::Path::new(path).is_file() {
         bail!("no database at {path}");
     }
@@ -974,8 +978,15 @@ pub fn check(path: &str, key_file: &Path) -> Result<Layout> {
         [],
         |r| r.get(0),
     )?;
-    if has_meta && let Some(check) = key_check(&conn)? {
-        key_for(&check, key_file)?;
+    match has_meta.then(|| key_check(&conn)).transpose()?.flatten() {
+        Some(check) => {
+            key_for(&check, &key_file()?)?;
+        }
+        None => {
+            if let Ok(file) = key_file() {
+                crypto::load(&file)?;
+            }
+        }
     }
     Ok(found)
 }
@@ -2023,7 +2034,7 @@ mod tests {
             }
         }
         assert_eq!(
-            check(path.to_str().unwrap(), &path.with_extension("key")).unwrap(),
+            check(path.to_str().unwrap(), || Ok(path.with_extension("key"))).unwrap(),
             Layout::Current
         );
     }

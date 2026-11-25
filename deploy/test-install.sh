@@ -34,7 +34,7 @@ fail() {
 
 # Runs install.sh with the fake HOME and systemctl; its output goes to $fake/out.
 install_() {
-    env -u XDG_CONFIG_HOME HOME="$home" RELEVO_SYSTEMCTL="$fake/systemctl" \
+    env -u XDG_CONFIG_HOME -u RELEVO_KEY_FILE HOME="$home" RELEVO_SYSTEMCTL="$fake/systemctl" \
         "$here/install.sh" "$@" >"$fake/out" 2>&1
 }
 
@@ -229,7 +229,7 @@ EOF2
     [ "$(sha256sum <"$db")" = "$before" ] || fail "people wrote the database"
 
     # The server migrates it when it starts; the team is still there, nothing to invite again.
-    HOME="$home" RELEVO_DB=$db "$bin" serve --addr 127.0.0.1:0 >"$fake/serve.log" 2>&1 &
+    env -u RELEVO_KEY_FILE HOME="$home" RELEVO_DB=$db "$bin" serve --addr 127.0.0.1:0 >"$fake/serve.log" 2>&1 &
     serve=$!
     for _ in $(seq 100); do
         [ "$(version "$db")" = "$want" ] && break
@@ -341,7 +341,7 @@ if command -v openssl >/dev/null; then
         fail "left over: $(find "$data" -maxdepth 1 -name '.dist*')"
 
     echo "  serve finds it"
-    HOME="$home" RELEVO_DB=$data/relevo.db "$bin" serve --addr 127.0.0.1:0 >"$fake/serve.log" 2>&1 &
+    env -u RELEVO_KEY_FILE HOME="$home" RELEVO_DB=$data/relevo.db "$bin" serve --addr 127.0.0.1:0 >"$fake/serve.log" 2>&1 &
     serve=$!
     for _ in $(seq 100); do
         grep -q "relevo listening" "$fake/serve.log" && break

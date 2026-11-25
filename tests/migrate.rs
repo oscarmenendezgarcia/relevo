@@ -623,7 +623,10 @@ fn other_layouts_are_refused_and_left_as_they_are() {
             let err = format!("{:#}", err.unwrap_err());
             assert!(err.contains(says), "{err}");
         }
-        let err = format!("{:#}", db::check(&path, &key_file(&path)).unwrap_err());
+        let err = format!(
+            "{:#}",
+            db::check(&path, || Ok(key_file(&path))).unwrap_err()
+        );
         assert!(err.contains(says), "{err}");
         assert_eq!(user_version(&path), version);
         let conn = rusqlite::Connection::open(&path).unwrap();
@@ -674,7 +677,7 @@ fn only_serve_migrates_and_checking_writes_nothing() {
         assert_eq!(before[2].1, None);
 
         // Checking says serve migrates it, and changes nothing, leaving no -wal or -shm behind.
-        let layout = db::check(path, &key_file(path)).unwrap();
+        let layout = db::check(path, || Ok(key_file(path))).unwrap();
         assert_eq!(layout, db::Layout::Migrates(version));
         assert_eq!(layout.made_by(), made_by);
         assert_eq!(files(path), before);
@@ -696,13 +699,13 @@ fn only_serve_migrates_and_checking_writes_nothing() {
         let (conn, _) = serve_open(path).unwrap();
         assert_eq!(user_version(path), 11);
         assert_eq!(
-            db::check(path, &key_file(path)).unwrap(),
+            db::check(path, || Ok(key_file(path))).unwrap(),
             db::Layout::Current
         );
         db::open(path).unwrap();
         drop(conn);
         assert_eq!(
-            db::check(path, &key_file(path)).unwrap(),
+            db::check(path, || Ok(key_file(path))).unwrap(),
             db::Layout::Current
         );
     }
@@ -711,14 +714,17 @@ fn only_serve_migrates_and_checking_writes_nothing() {
     let empty = dir.0.join("empty.db");
     std::fs::write(&empty, b"").unwrap();
     assert_eq!(
-        db::check(empty.to_str().unwrap(), &key_file("empty")).unwrap(),
+        db::check(empty.to_str().unwrap(), || Ok(empty.with_extension("key"))).unwrap(),
         db::Layout::New
     );
     let missing = dir.0.join("missing.db");
     let missing = missing.to_str().unwrap();
     assert!(
-        format!("{:#}", db::check(missing, &key_file(missing)).unwrap_err())
-            .contains("no database")
+        format!(
+            "{:#}",
+            db::check(missing, || Ok(key_file(missing))).unwrap_err()
+        )
+        .contains("no database")
     );
     assert!(!std::path::Path::new(missing).exists());
 }
@@ -1296,9 +1302,21 @@ fn an_encrypted_database_refuses_another_key_or_none_and_never_makes_one() {
     let dir = TempDir::new();
     let path = dir.db();
     layout10(&path);
+    // Not encrypted yet: it needs no key, not even a place for one; but a key file there must be
+    // one `serve` would take.
+    let nowhere = || Err(anyhow::anyhow!("HOME is not set"));
+    assert_eq!(db::check(&path, nowhere).unwrap(), db::Layout::Migrates(10));
+    std::fs::write(key_file(&path), [7u8; 32]).unwrap();
+    let err = format!(
+        "{:#}",
+        db::check(&path, || Ok(key_file(&path))).unwrap_err()
+    );
+    assert!(err.contains("chmod 600"), "{err}");
+    std::fs::remove_file(key_file(&path)).unwrap();
     let (conn, _) = serve_open(&path).unwrap();
     drop(conn);
     let before = std::fs::read(&path).unwrap();
+    assert!(db::check(&path, nowhere).is_err());
 
     let missing = dir.0.join("restored/server.key");
     let refused = format!("{:#}", db::open_migrating(&path, &missing).unwrap_err());
@@ -1312,7 +1330,10 @@ fn an_encrypted_database_refuses_another_key_or_none_and_never_makes_one() {
     );
     assert!(!missing.exists());
     assert!(!missing.parent().unwrap().exists());
-    let checked = format!("{:#}", db::check(&path, &missing).unwrap_err());
+    let checked = format!(
+        "{:#}",
+        db::check(&path, || Ok(missing.clone())).unwrap_err()
+    );
     assert_eq!(checked, refused);
 
     let other = dir.0.join("other.key");
@@ -1330,14 +1351,14 @@ fn an_encrypted_database_refuses_another_key_or_none_and_never_makes_one() {
             other.display()
         )
     );
-    let checked = format!("{:#}", db::check(&path, &other).unwrap_err());
+    let checked = format!("{:#}", db::check(&path, || Ok(other.clone())).unwrap_err());
     assert_eq!(checked, refused);
     assert_eq!(std::fs::read(&path).unwrap(), before);
     assert_eq!(user_version(&path), 11);
 
     // Its own key opens it.
     assert_eq!(
-        db::check(&path, &key_file(&path)).unwrap(),
+        db::check(&path, || Ok(key_file(&path))).unwrap(),
         db::Layout::Current
     );
 }
@@ -1379,4 +1400,31 @@ fn a_start_that_died_takes_the_key_it_made_and_finishes_the_rewrite() {
     let (conn, _) = serve_open(&path).unwrap();
     assert_eq!(pending(&conn), 0);
     assert_eq!(db::key_check(&conn).unwrap().unwrap(), check);
+}
+
+/// A note whose stored text is not UTF-8 (written by hand, or damaged) does not stop the
+/// encryption: it is sealed as the bytes it holds.
+#[test]
+fn text_that_is_not_utf8_is_encrypted_as_it_is() {
+    let dir = TempDir::new();
+    let path = dir.db();
+    layout10(&path);
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE notes SET text = CAST(X'C328FF' AS TEXT)
+             WHERE seq = (SELECT min(seq) FROM notes)",
+            [],
+        )
+        .unwrap();
+    let (conn, key) = serve_open(&path).unwrap();
+    let (thread, note, sealed): (String, String, Vec<u8>) = conn
+        .query_row(
+            "SELECT thread_id, id, text FROM notes ORDER BY seq LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    let aad = relevo::crypto::note_aad(&thread, &note);
+    assert_eq!(key.open(&aad, &sealed).unwrap(), [0xc3, 0x28, 0xff]);
 }
