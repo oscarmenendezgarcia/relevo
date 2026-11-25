@@ -55,7 +55,8 @@ _ERROR_KINDS = {
 
 _DIAGNOSTIC_KEY_PREFIXES = ("gateway.errors.",)
 _DIAGNOSTIC_KEYS = ("gateway.notify.turn_error", "gateway.notify.turn_error_detailed",
-                    "gateway.notify.delivery_failed_retry", "gateway.busy.drain_rejected_new_work")
+                    "gateway.notify.delivery_failed_retry", "gateway.busy.drain_rejected_new_work",
+                    "gateway.busy.draining_maintenance", "gateway.busy.another_turn_running")
 # Appended to a reply after an automatic session reset: the gateway's, not the agent's.
 _TRAILER_KEYS = ("gateway.session.auto_reset_context_exhausted",)
 # turn_failure_copy's chat copy tables (English only), read when this Hermes has them.
@@ -84,6 +85,8 @@ _ADMISSION_NOTICES = (
     "is not re-run), or /reset to start a fresh conversation.",
     "⏸️ This conversation is paused: {cause}. Your message is saved but will not be answered here. Send "
     "/reset to start a fresh conversation, or ask the operator to resume this one.",
+    # hermes_cli/active_sessions.py: the turn found no free session slot.
+    "Hermes is at the active session limit ({count}/{max}).{detail} Try again when another session finishes.",
 )
 # A template needs this many characters besides its placeholders to say anything: shorter entries
 # are fragments of the copy above ("The model"), not replies.
@@ -127,9 +130,9 @@ def _without_details(text: str) -> str:
     return f"{head}\n\n{last}" if head else last
 
 
-def _template_pattern(template: str) -> Optional[re.Pattern]:
+def _template_pattern(template: str, floor: int = _DIAGNOSTIC_MIN_CHARS) -> Optional[re.Pattern]:
     literal = _squash(_without_details(template))
-    if len(_PLACEHOLDER.sub("", literal)) < _DIAGNOSTIC_MIN_CHARS:
+    if len(_PLACEHOLDER.sub("", literal)) < max(floor, 1):
         return None
     return re.compile(".*?".join(re.escape(part) for part in _PLACEHOLDER.split(literal)), re.S)
 
@@ -145,14 +148,17 @@ def _gateway_copy() -> _GatewayCopy:
     cached = _copy_cache.get(lang)
     if cached is not None:
         return cached
-    templates: set[str] = set()
+    templates: set[str] = set()  # error copy, and fragments of it: short entries are not replies
+    replies: set[str] = set()  # whole replies, however short (a few CJK characters)
     trailers: set[str] = set()
     try:
         from agent.i18n import _load_catalog
 
         for code in {lang, "en"}:
             for key, value in _load_catalog(code).items():
-                if key.startswith(_DIAGNOSTIC_KEY_PREFIXES) or key in _DIAGNOSTIC_KEYS:
+                if key in _DIAGNOSTIC_KEYS:
+                    replies.add(str(value))
+                elif key.startswith(_DIAGNOSTIC_KEY_PREFIXES):
                     templates.add(str(value))
                 elif key in _TRAILER_KEYS:
                     trailers.add(_squash(value))
@@ -160,15 +166,15 @@ def _gateway_copy() -> _GatewayCopy:
         try:
             from agent.i18n import t
 
-            templates.update(t(key) for key in _DIAGNOSTIC_KEYS)
+            replies.update(t(key) for key in _DIAGNOSTIC_KEYS)
             trailers.update(_squash(t(key)) for key in _TRAILER_KEYS)
         except Exception:
             pass
     notices = {_squash(n) for n in _FALLBACK_NOTICES}
-    templates.update(_ADMISSION_NOTICES)
+    replies.update(_ADMISSION_NOTICES)
     ingress = sys.modules.get("gateway.session_ingress")  # loaded in the gateway; never imported here
     if ingress is not None:
-        templates.update(value for name, value in vars(ingress).items()
+        replies.update(value for name, value in vars(ingress).items()
                          if name.endswith("_REPLY") and isinstance(value, str))
     try:
         from agent import turn_failure_copy as copy
@@ -179,7 +185,8 @@ def _gateway_copy() -> _GatewayCopy:
             templates.update(map(str, table.values()) if isinstance(table, dict) else [str(table or "")])
     except Exception:
         pass
-    patterns = tuple(p for p in map(_template_pattern, templates) if p is not None)
+    patterns = tuple(p for p in [*map(_template_pattern, templates), *(_template_pattern(r, 0) for r in replies)]
+                     if p is not None)
     found = _GatewayCopy(patterns, frozenset(notices), frozenset(t for t in trailers if t))
     _copy_cache[lang] = found
     return found
@@ -596,6 +603,7 @@ class RelevoAdapter(BasePlatformAdapter):
                                    user_id=author, user_name=name)
         resumed = self._first_batch and self._resumable(source)
         text = client.render_event(thread, notes, self._me, resumed)
+        digest = hashlib.sha256(f"{name}\n{text}".encode()).hexdigest()[:12]
         event = MessageEvent(
             text=text,
             message_type=MessageType.TEXT,
@@ -605,9 +613,9 @@ class RelevoAdapter(BasePlatformAdapter):
             raw_message=thread,
             # The gateway keeps each message id it admitted, across restarts, and refuses the same id
             # with other content. A thread handed over again (after a restart, say) renders other
-            # text for the same latest note, so the id names the text too: the same delivery is
-            # the same message, a different one a new message.
-            message_id=f"{latest.get('id')}-{hashlib.sha256(text.encode()).hexdigest()[:12]}",
+            # text for the same latest note, so the id names what it carries too (the text, and the
+            # sender's name): the same delivery is the same message, a different one a new message.
+            message_id=f"{latest.get('id')}-{digest}",
             # Others' text is conversation, never a gateway /command.
             allow_gateway_control=False,
             # A note may not be for this agent: a bare [SILENT] answer must stand.
@@ -641,8 +649,8 @@ class RelevoAdapter(BasePlatformAdapter):
             return SendResult(success=True)
         text = note_text(content)
         if text is None:
-            logger.warning("[relevo] the turn for thread %s failed; the gateway's notice is kept out of the "
-                           "thread (details in the gateway log)", chat_id)
+            logger.warning("[relevo] the gateway answered thread %s with its own notice (a failed or refused "
+                           "turn); it is kept out of the thread (details in the gateway log)", chat_id)
             return SendResult(success=True)
         if not text.strip():
             return SendResult(success=False, error="empty note", error_kind="unknown")

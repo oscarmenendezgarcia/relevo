@@ -77,6 +77,7 @@ _PKG = ENTRY.adapter_factory.__module__
 client = importlib.import_module(_PKG + ".client")
 tools_module = importlib.import_module(_PKG + ".tools")
 update_module = importlib.import_module(_PKG + ".update")
+adapter = importlib.import_module(_PKG + ".adapter")
 
 
 class _Tools:
@@ -930,8 +931,9 @@ class Outbound(Base):
         the thread stays pending for Oscar, unclaimed."""
         from types import SimpleNamespace
 
-        from agent.i18n import t
+        from agent.i18n import _load_catalog, t
         from gateway import session_ingress as ingress
+        from hermes_cli.active_sessions import active_session_limit_message
 
         def paused(reason, slack=False):
             live = SimpleNamespace(pause_notified=False, source=SimpleNamespace(
@@ -946,7 +948,11 @@ class Outbound(Base):
                    "Ask the operator to check gateway.log.",
                    "⚠️ Hermes did not answer this message (stale_generation): the conversation it was queued "
                    "for moved, so it was dropped. Send it again to continue.",
-                   t("gateway.busy.drain_rejected_new_work", action="restarting")]
+                   t("gateway.busy.drain_rejected_new_work", action="restarting"),
+                   # Returned as the turn's answer when no turn runs.
+                   t("gateway.busy.draining_maintenance"), t("gateway.busy.another_turn_running"),
+                   active_session_limit_message(3, 3),
+                   active_session_limit_message(3, 3, [{"surface": "cli", "session_id": "s1"}])]
         a = self.make_adapter()
         await a.connect()
         opened = self.bob.send(to=["oscar"], text="Can you deploy retail to office-prod?")
@@ -960,6 +966,10 @@ class Outbound(Base):
         oscar = next(d for d in thread["delivery"] if d["handle"] == "oscar")
         self.assertIsNone(oscar["handled_at"])
         self.assertIsNone(oscar["claimed_by"])
+        # A whole-reply notice is recognised however short it is in the owner's language.
+        drain = _load_catalog("zh")["gateway.busy.drain_rejected_new_work"]
+        self.assertLess(len(drain), adapter._DIAGNOSTIC_MIN_CHARS)
+        self.assertTrue(adapter._template_pattern(drain, 0).fullmatch(adapter._squash(drain.format(action="重启中"))))
 
     async def test_a_thread_handed_over_again_with_other_text_is_a_new_message(self):
         """The gateway refuses a message id it admitted with other content, and remembers it across
@@ -973,9 +983,10 @@ class Outbound(Base):
         note = self.bob.thread(opened["thread"])["notes"][-1]["id"]
         # The same thread, handed over again by a new process: once as it was, once rendered
         # otherwise (here after a request that may have lost its answer).
+        team = {"bob": {"handle": "bob", "name": first.user_name.split(" (@")[0]}}
         for after_failure in (False, True):
             a._seen.clear()
-            await a._dispatch(first.raw_message, {}, after_failure=after_failure)
+            await a._dispatch(first.raw_message, team, after_failure=after_failure)
         same, other = self.events[1:]
         for event in (first, same, other):
             self.assertTrue(event.message_id.startswith(f"{note}-"), event.message_id)
