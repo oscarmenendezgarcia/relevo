@@ -864,7 +864,7 @@ fn a_layout_7_database_without_the_timeline_tables_gets_them_when_it_migrates() 
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 10);
+    assert_eq!(version, 11);
     drop(conn);
     std::fs::remove_dir_all(&dir).unwrap();
 }

@@ -331,7 +331,7 @@ fn without_relevo_db_an_admin_command_never_creates_a_database_here() {
 }
 
 #[test]
-fn only_serve_migrates_a_layout_5_to_9_database_and_check_db_says_so() {
+fn only_serve_migrates_a_layout_5_to_10_database_and_check_db_says_so() {
     for (dump, made_by) in [
         (
             include_str!("fixtures/layout5.sql"),
@@ -344,6 +344,10 @@ fn only_serve_migrates_a_layout_5_to_9_database_and_check_db_says_so() {
             "a development build of relevo 0.5.0",
         ),
         (include_str!("fixtures/layout9.sql"), "relevo 0.5.x"),
+        (
+            include_str!("fixtures/layout10.sql"),
+            "relevo 0.6.0 to 0.8.x",
+        ),
     ] {
         let dir = std::env::temp_dir().join(db::random_id("relevo-cli-"));
         std::fs::create_dir(&dir).unwrap();
@@ -652,5 +656,114 @@ fn invite_bot_marks_a_bot_and_people_says_so() {
             .unwrap();
         assert!(!out.status.success(), "{args:?}");
     }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// On an encrypted database (layout 11), every admin command works without the key: none reads
+/// note text nor thread titles, and none makes a key. `check-db` checks the key, and says what is
+/// wrong without it; a backup holds the notes encrypted, and opens with the same key.
+#[tokio::test]
+async fn admin_commands_need_no_key_and_check_db_checks_it() {
+    let dir = std::env::temp_dir().join(db::random_id("relevo-cli-"));
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let path = dir.join("relevo.db");
+    let path = path.to_str().unwrap();
+    let key = dir.join("server.key");
+    let now = db::now_unix();
+    let (conn, k) = db::open_migrating(path, &key).unwrap();
+    let ana = db::invite(&conn, "ana", "Ana", None, "laptop", now).unwrap();
+    let bob = db::invite(&conn, "bob", "Bob", None, "laptop", now).unwrap();
+    let app = App::with_dist(conn, Clock::system(), 5, None, k).unwrap();
+    let req = Request::post("/api/send")
+        .header("authorization", format!("Bearer {}", ana.secret))
+        .header("relevo-mentions", "1")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"text":"@bob The vault password is in the safe"}"#,
+        ))
+        .unwrap();
+    let res = api::router(app.clone()).oneshot(req).await.unwrap();
+    assert!(res.status().is_success());
+    drop(app);
+
+    // A HOME with no key in it, and no RELEVO_KEY_FILE.
+    let run = |args: &[&str], key_file: Option<&std::path::Path>| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_relevo"));
+        cmd.arg("--db")
+            .arg(path)
+            .args(args)
+            .env("HOME", &home)
+            .env_remove("RELEVO_KEY_FILE");
+        if let Some(file) = key_file {
+            cmd.env("RELEVO_KEY_FILE", file);
+        }
+        cmd.output().unwrap()
+    };
+    let copy = dir.join("copy.db");
+    for args in [
+        &["people"][..],
+        &["invite", "carl", "--name", "Carl", "--token"][..],
+        &["token", "add", "ana", "--label", "desktop"][..],
+        &["token", "list"][..],
+        &["about", "ana", "payments"][..],
+        &["bot", "bob", "on"][..],
+        &["team", "add", "backend", "--title", "Backend"][..],
+        &["team", "join", "backend", "ana", "bob"][..],
+        &["teams"][..],
+        &["sessions"][..],
+        &["clients"][..],
+        &["deactivate", "carl"][..],
+        &["backup", copy.to_str().unwrap()][..],
+    ] {
+        let out = run(args, None);
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert!(!home.join(".config").exists());
+
+    let out = run(&["check-db"], None);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains(&format!(
+            "this database is encrypted but there is no key at {} (RELEVO_KEY_FILE)",
+            home.join(".config/relevo/server.key").display()
+        )),
+        "{err}"
+    );
+    assert!(!home.join(".config").exists());
+    let out = run(&["check-db"], Some(&key));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("this version's layout"));
+
+    // The copy holds no plain note, and opens with the database's key.
+    let bytes = std::fs::read(&copy).unwrap();
+    assert!(!bytes.windows(9).any(|w| w == b"The vault"));
+    let (conn, k) = db::open_migrating(copy.to_str().unwrap(), &key).unwrap();
+    let app = App::with_dist(conn, Clock::system(), 5, None, k).unwrap();
+    let req = Request::get("/api/inbox")
+        .header("authorization", format!("Bearer {}", bob.secret))
+        .body(Body::empty())
+        .unwrap();
+    let res = api::router(app.clone()).oneshot(req).await.unwrap();
+    assert!(res.status().is_success());
+    let body = http_body_util::BodyExt::collect(res.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        v["threads"][0]["last_note"]["text"],
+        "@bob The vault password is in the safe"
+    );
+    drop(app);
     std::fs::remove_dir_all(&dir).unwrap();
 }

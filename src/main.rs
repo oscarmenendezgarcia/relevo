@@ -905,7 +905,8 @@ async fn main() -> Result<()> {
     }
     // Nor does checking it.
     if let Command::CheckDb = &cli.command {
-        let says = match db::check(&db_file)? {
+        let key_file = relevo::crypto::path(config::env)?;
+        let says = match db::check(&db_file, &key_file)? {
             db::Layout::Current => "this version's layout",
             db::Layout::New => "empty: `relevo serve` sets it up",
             layout @ db::Layout::Migrates(_) => &format!(

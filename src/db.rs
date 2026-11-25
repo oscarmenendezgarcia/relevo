@@ -33,6 +33,9 @@ CREATE TABLE IF NOT EXISTS tokens (
     created_at INTEGER NOT NULL,
     revoked_at INTEGER
 );
+-- `threads.title` and `notes.text` hold, since layout 11, values encrypted for their row
+-- (`crypto`): BLOBs, which a TEXT column keeps as they are. A database `serve` has not opened
+-- since it was made may still hold them in plain text (see `server_key`).
 CREATE TABLE IF NOT EXISTS threads (
     id         TEXT PRIMARY KEY,
     kind       TEXT NOT NULL CHECK (kind IN ('direct', 'team', 'global')),
@@ -231,6 +234,8 @@ CREATE TABLE IF NOT EXISTS thread_closes (
 -- `system_person`, the id of the person `relevo` who posts them, and what `serve` last said of
 -- the address it serves at, for invitation links (`public_url`, `tls_pin`, `tls_fingerprint`,
 -- `tls_port`: see `set_public`). Layout 8 brings it (a database of layout 7 gets it as it migrates).
+-- `key_check` says which key encrypted the database (`crypto`; set by `serve`, see `server_key`),
+-- and `scrub_pending` that it is still to be rewritten since (see `scrub`).
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -346,11 +351,13 @@ pub const SESSION_LIFETIME_SECS: i64 = 7 * 24 * 3600;
 pub const CLAIM_LAPSE_SECS: i64 = 15 * 60;
 
 /// The layout of `SCHEMA`, kept in SQLite's `user_version`. A database of layout 5 (relevo 0.1.0
-/// to 0.2.x), 6 (relevo 0.3.x), 7 (relevo 0.4.x), 8 (development builds of 0.5.0) or 9 (relevo
-/// 0.5.x) is migrated in place (`MIGRATE_FROM_5` to `MIGRATE_FROM_9`, then `OPEN_CLOSED`), by
-/// `relevo serve` only; any other layout is refused, never half-updated
-/// (`CREATE TABLE IF NOT EXISTS` would skip the old tables and fail on their missing columns).
-const SCHEMA_VERSION: i64 = 10;
+/// to 0.2.x), 6 (relevo 0.3.x), 7 (relevo 0.4.x), 8 (development builds of 0.5.0), 9 (relevo
+/// 0.5.x) or 10 (relevo 0.6.0 to 0.8.x) is migrated in place (`MIGRATE_FROM_5` to
+/// `MIGRATE_FROM_9`, then `OPEN_CLOSED`, then `server_key`), by `relevo serve` only; any other
+/// layout is refused, never half-updated (`CREATE TABLE IF NOT EXISTS` would skip the old tables
+/// and fail on their missing columns). Layout 11 changes no table: its note text and thread
+/// titles are encrypted (`crypto`), which no version before it can read.
+const SCHEMA_VERSION: i64 = 11;
 
 /// Layout 5 to 6: the handled state of each participant, from what layout 5 recorded as handling.
 /// A thread that was `waiting` there (open, direct, its latest note not theirs) waited for their
@@ -502,7 +509,7 @@ UPDATE session_threads SET resolved = 0 WHERE resolved != 0;
 UPDATE threads SET status = 'open' WHERE status = 'closed';
 ";
 
-/// Opens (or creates) the database and applies the schema. A database of layout 5 to 9 is
+/// Opens (or creates) the database and applies the schema. A database of layout 5 to 10 is
 /// refused: only `relevo serve` migrates it (`open_migrating`), so that an admin command never
 /// changes the layout behind the owner's back, before a backup. No key: the admin commands never
 /// read note text nor thread titles. `":memory:"` works for tests.
@@ -510,7 +517,7 @@ pub fn open(path: &str) -> Result<Connection> {
     Ok(open_with(path, None, OPEN_PATIENCE)?.0)
 }
 
-/// `open`, migrating a database of layout 5 to 9 in place, with the key in `key_file`: for
+/// `open`, migrating a database of layout 5 to 10 in place, with the key in `key_file`: for
 /// `relevo serve`. A database encrypted already opens only with the key it was encrypted with,
 /// which must be there; one never encrypted takes the key in `key_file` (made if missing), and
 /// every note text and thread title in it is encrypted (see `server_key`).
@@ -629,8 +636,10 @@ fn try_open(
                 tx.execute_batch(MIGRATE_FROM_8)
                     .with_context(|| format!("migrating database {path} from layout 8 to 9"))?;
             }
-            tx.execute_batch(MIGRATE_FROM_9)
-                .with_context(|| format!("migrating database {path} from layout 9 to 10"))?;
+            if old <= 9 {
+                tx.execute_batch(MIGRATE_FROM_9)
+                    .with_context(|| format!("migrating database {path} from layout 9 to 10"))?;
+            }
             from = Some(old);
         }
         Layout::New | Layout::Current => {}
@@ -678,10 +687,41 @@ fn try_open(
             "encrypted the database's note text and thread titles"
         );
     }
+    if migrate {
+        let pending: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM meta WHERE key = 'scrub_pending')",
+            [],
+            |r| r.get(0),
+        )?;
+        if pending && let Err(e) = scrub(&conn) {
+            tracing::warn!(
+                db = path,
+                error = %format!("{e:#}"),
+                "the database could not be rewritten after its notes were encrypted: pages of \
+                 it may still hold them in plain text; the next start tries again"
+            );
+        }
+    }
     conn.pragma_update(None, "foreign_keys", "ON")?;
     // Open: from now on, each statement waits for another process's lock as long as it needs.
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     Ok((conn, key.map(|(key, _)| key)))
+}
+
+/// Rewrites the database once its notes were encrypted, so that no page of it, nor of its `-wal`,
+/// still holds them in plain text: `VACUUM` writes every page again, and a truncating checkpoint
+/// moves them into the file and empties the `-wal`. Until both are done, `meta.scrub_pending`
+/// stays, and every start of `serve` tries again: a crash between the encryption and this loses
+/// nothing.
+fn scrub(conn: &Connection) -> Result<()> {
+    conn.execute_batch("VACUUM")?;
+    let blocked: i64 = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
+    if blocked != 0 {
+        bail!("another connection kept the checkpoint from finishing");
+    }
+    conn.execute("DELETE FROM meta WHERE key = 'scrub_pending'", [])?;
+    tracing::info!("rewrote the database: no page of it holds the notes in plain text");
+    Ok(())
 }
 
 /// What `server_key` did to a database never encrypted before.
@@ -743,6 +783,12 @@ fn server_key(tx: &Connection, file: &Path) -> Result<(Key, Option<Sealed>)> {
         "INSERT INTO meta (key, value) VALUES ('key_check', ?1)",
         [key.check()],
     )?;
+    if notes + titles.len() > 0 {
+        tx.execute(
+            "INSERT OR IGNORE INTO meta (key, value) VALUES ('scrub_pending', '1')",
+            [],
+        )?;
+    }
     let sealed = Sealed {
         made,
         notes,
@@ -803,8 +849,14 @@ fn migrated(old: i64, opened: i64) -> Vec<String> {
                 .to_string(),
         );
     }
+    if old <= 9 {
+        lines.push(
+            "migrated the database from layout 9 to 10: sessions keep the agent they say they are"
+                .to_string(),
+        );
+    }
     lines.push(
-        "migrated the database from layout 9 to 10: sessions keep the agent they say they are"
+        "migrated the database from layout 10 to 11: note text and thread titles are encrypted"
             .to_string(),
     );
     lines
@@ -839,7 +891,7 @@ fn broken_thread_refs(tx: &Connection) -> Result<Vec<(String, i64, String)>> {
     Ok(out)
 }
 
-/// Why a command other than `serve` refuses a database of layout 5 to 9.
+/// Why a command other than `serve` refuses a database of layout 5 to 10.
 fn no_migration(path: &str, layout: Layout) -> String {
     format!(
         "database {path} has the layout of {}, which only `relevo serve` migrates (in place, \
@@ -858,7 +910,8 @@ pub enum Layout {
     /// This version's layout.
     Current,
     /// Layout 5 (relevo 0.1.0 to 0.2.x), 6 (relevo 0.3.x), 7 (relevo 0.4.x), 8 (development
-    /// builds of 0.5.0) or 9 (relevo 0.5.x): `relevo serve` migrates it.
+    /// builds of 0.5.0), 9 (relevo 0.5.x) or 10 (relevo 0.6.0 to 0.8.x): `relevo serve` migrates
+    /// it.
     Migrates(i64),
 }
 
@@ -870,6 +923,7 @@ impl Layout {
             Layout::Migrates(6) => "relevo 0.3.x",
             Layout::Migrates(7) => "relevo 0.4.x",
             Layout::Migrates(9) => "relevo 0.5.x",
+            Layout::Migrates(10) => "relevo 0.6.0 to 0.8.x",
             Layout::Migrates(_) => "a development build of relevo 0.5.0 (before its release)",
             Layout::New | Layout::Current => "this relevo",
         }
@@ -907,13 +961,23 @@ fn layout(conn: &Connection, path: &str) -> Result<Layout> {
 }
 
 /// The layout of the existing database at `path`, or why this version refuses it, found without
-/// writing anything (see `read_only`).
-pub fn check(path: &str) -> Result<Layout> {
+/// writing anything (see `read_only`). An encrypted database must have its key in `key_file`
+/// (read only: never made here).
+pub fn check(path: &str, key_file: &Path) -> Result<Layout> {
     if !std::path::Path::new(path).is_file() {
         bail!("no database at {path}");
     }
     let conn = read_only(path).with_context(|| format!("opening database {path}"))?;
-    layout(&conn, path)
+    let found = layout(&conn, path)?;
+    let has_meta: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta')",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_meta && let Some(check) = key_check(&conn)? {
+        key_for(&check, key_file)?;
+    }
+    Ok(found)
 }
 
 /// Opens the existing database at `path` to read it only, writing nothing: not the database, and
@@ -940,9 +1004,9 @@ pub fn read_only(path: &str) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
-/// Creates a missing database file readable by the server user only: it holds every note in
-/// plain text. SQLite gives the `-wal` and `-shm` files the same mode. Existing files are left as
-/// they are.
+/// Creates a missing database file readable by the server user only: all but the note text and
+/// thread titles is plain. SQLite gives the `-wal` and `-shm` files the same mode. Existing files
+/// are left as they are.
 fn create_private(path: &str) -> std::io::Result<()> {
     if path == ":memory:" {
         return Ok(());
@@ -1958,7 +2022,10 @@ mod tests {
                 panic!("{}: {e:#}", path.display());
             }
         }
-        assert_eq!(check(path.to_str().unwrap()).unwrap(), Layout::Current);
+        assert_eq!(
+            check(path.to_str().unwrap(), &path.with_extension("key")).unwrap(),
+            Layout::Current
+        );
     }
 
     #[test]
@@ -2018,14 +2085,11 @@ mod tests {
                 .collect()
         };
         let line = |from, to| format!("migrated the database from layout {from} to {to}");
-        assert_eq!(
-            steps(5),
-            [line(5, 6), line(6, 7), line(7, 8), line(8, 9), line(9, 10)]
-        );
-        assert_eq!(steps(6), [line(6, 7), line(7, 8), line(8, 9), line(9, 10)]);
-        assert_eq!(steps(7), [line(7, 8), line(8, 9), line(9, 10)]);
-        assert_eq!(steps(8), [line(8, 9), line(9, 10)]);
-        assert_eq!(steps(9), [line(9, 10)]);
+        let from = |old: i64| -> Vec<String> { (old..11).map(|l| line(l, l + 1)).collect() };
+        for old in 5..=10 {
+            assert_eq!(steps(old), from(old), "{old}");
+        }
+        assert_eq!(steps(10), [line(10, 11)]);
         assert!(migrated(7, 2)[0].contains("opened 2 closed threads"));
     }
 

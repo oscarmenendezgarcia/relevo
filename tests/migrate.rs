@@ -1,8 +1,9 @@
 //! Databases of layout 5, made by relevo 0.2.1 itself (`tests/fixtures/make-layout5.sh`), of
 //! layout 6, made by relevo 0.3.0 (`tests/fixtures/make-layout6.sh`), of layout 7, made by
 //! relevo 0.4.4 (`tests/fixtures/make-layout7.sh`), of layout 8, made by a development build of
-//! 0.5.0 (`tests/fixtures/make-layout8.sh`), and of layout 9, made by relevo 0.5.0
-//! (`tests/fixtures/make-layout9.sh`), migrated in place when this version first opens them, then
+//! 0.5.0 (`tests/fixtures/make-layout8.sh`), of layout 9, made by relevo 0.5.0
+//! (`tests/fixtures/make-layout9.sh`), and of layout 10, made by relevo 0.8.1
+//! (`tests/fixtures/make-layout10.sh`), migrated in place when this version first opens them, then
 //! used through the HTTP router.
 
 use std::path::{Path, PathBuf};
@@ -26,6 +27,8 @@ const LAYOUT8: &str = include_str!("fixtures/layout8.sql");
 const FIXTURE8: &str = include_str!("fixtures/layout8-tokens.json");
 const LAYOUT9: &str = include_str!("fixtures/layout9.sql");
 const FIXTURE9: &str = include_str!("fixtures/layout9-tokens.json");
+const LAYOUT10: &str = include_str!("fixtures/layout10.sql");
+const FIXTURE10: &str = include_str!("fixtures/layout10-tokens.json");
 
 /// A directory of its own, removed when the test ends.
 struct TempDir(PathBuf);
@@ -73,6 +76,11 @@ fn layout9(path: &str) -> i64 {
     made_by(path, LAYOUT9, 9)
 }
 
+/// The layout 10 database, as a file, and when its sessions were last seen.
+fn layout10(path: &str) -> i64 {
+    made_by(path, LAYOUT10, 10)
+}
+
 fn made_by(path: &str, dump: &str, layout: i64) -> i64 {
     let conn = rusqlite::Connection::open(path).unwrap();
     conn.execute_batch(dump).unwrap();
@@ -84,10 +92,14 @@ fn made_by(path: &str, dump: &str, layout: i64) -> i64 {
         .unwrap()
 }
 
-/// `serve`'s open of the database at `path`, with a key file of its own next to it (never the
-/// real one).
+/// The key file of the database at `path` in these tests: next to it, never the real one.
+fn key_file(path: &str) -> PathBuf {
+    Path::new(path).with_extension("key")
+}
+
+/// `serve`'s open of the database at `path`, with its key file.
 fn serve_open(path: &str) -> anyhow::Result<(rusqlite::Connection, Key)> {
-    db::open_migrating(path, &Path::new(path).with_extension("key"))
+    db::open_migrating(path, &key_file(path))
 }
 
 /// The server over the database at `path` as `serve` opens it, on a clock fixed at `now`.
@@ -206,7 +218,7 @@ async fn a_layout_5_database_migrates_and_what_waited_for_a_reply_stays_pending(
     let path = dir.db();
     let seen = layout5(&path);
     let app = serve(&path, seen + 60);
-    assert_eq!(user_version(&path), 10);
+    assert_eq!(user_version(&path), 11);
     let f = Fixture {
         app,
         v: serde_json::from_str(FIXTURE).unwrap(),
@@ -355,7 +367,7 @@ async fn a_layout_5_database_migrates_and_what_waited_for_a_reply_stays_pending(
         )
         .unwrap();
     assert_eq!(pending, 4);
-    assert_eq!(user_version(&path), 10);
+    assert_eq!(user_version(&path), 11);
 }
 
 /// The columns of every table and the definition of every index, as `db::open` leaves them.
@@ -415,6 +427,7 @@ fn a_migrated_database_has_the_layout_of_a_new_one() {
         ("7.db", layout7),
         ("8.db", layout8),
         ("9.db", layout9),
+        ("10.db", layout10),
     ] {
         let migrated = dir.0.join(name);
         let migrated = migrated.to_str().unwrap();
@@ -558,7 +571,7 @@ fn a_failed_migration_from_layout_7_leaves_it_at_layout_7() {
     conn.execute_batch("DROP TRIGGER no_reopening").unwrap();
     drop(conn);
     serve_open(&path).unwrap();
-    assert_eq!(user_version(&path), 10);
+    assert_eq!(user_version(&path), 11);
 }
 
 #[test]
@@ -580,7 +593,7 @@ fn a_broken_reference_elsewhere_does_not_stop_the_migration() {
     .unwrap();
     drop(conn);
     serve_open(&path).unwrap();
-    assert_eq!(user_version(&path), 10);
+    assert_eq!(user_version(&path), 11);
     // Still broken: the check the migration makes is over the tables that refer to threads.
     let conn = rusqlite::Connection::open(&path).unwrap();
     let broken: i64 = conn
@@ -597,7 +610,7 @@ fn a_broken_reference_elsewhere_does_not_stop_the_migration() {
 fn other_layouts_are_refused_and_left_as_they_are() {
     for (version, says) in [
         (4, "older version of relevo"),
-        (11, "newer version of relevo"),
+        (12, "newer version of relevo"),
     ] {
         let dir = TempDir::new();
         let path = dir.db();
@@ -610,7 +623,7 @@ fn other_layouts_are_refused_and_left_as_they_are() {
             let err = format!("{:#}", err.unwrap_err());
             assert!(err.contains(says), "{err}");
         }
-        let err = format!("{:#}", db::check(&path).unwrap_err());
+        let err = format!("{:#}", db::check(&path, &key_file(&path)).unwrap_err());
         assert!(err.contains(says), "{err}");
         assert_eq!(user_version(&path), version);
         let conn = rusqlite::Connection::open(&path).unwrap();
@@ -646,6 +659,7 @@ fn only_serve_migrates_and_checking_writes_nothing() {
             "a development build of relevo 0.5.0 (before its release)",
         ),
         (9, layout9, "relevo 0.5.x"),
+        (10, layout10, "relevo 0.6.0 to 0.8.x"),
     ] {
         let path = dir.0.join(format!("{version}.db"));
         let path = path.to_str().unwrap();
@@ -660,7 +674,7 @@ fn only_serve_migrates_and_checking_writes_nothing() {
         assert_eq!(before[2].1, None);
 
         // Checking says serve migrates it, and changes nothing, leaving no -wal or -shm behind.
-        let layout = db::check(path).unwrap();
+        let layout = db::check(path, &key_file(path)).unwrap();
         assert_eq!(layout, db::Layout::Migrates(version));
         assert_eq!(layout.made_by(), made_by);
         assert_eq!(files(path), before);
@@ -680,20 +694,32 @@ fn only_serve_migrates_and_checking_writes_nothing() {
         // The server migrates it; then everything opens it, and checking says so, also while it
         // is open (read-only, through its -wal and -shm).
         let (conn, _) = serve_open(path).unwrap();
-        assert_eq!(user_version(path), 10);
-        assert_eq!(db::check(path).unwrap(), db::Layout::Current);
+        assert_eq!(user_version(path), 11);
+        assert_eq!(
+            db::check(path, &key_file(path)).unwrap(),
+            db::Layout::Current
+        );
         db::open(path).unwrap();
         drop(conn);
-        assert_eq!(db::check(path).unwrap(), db::Layout::Current);
+        assert_eq!(
+            db::check(path, &key_file(path)).unwrap(),
+            db::Layout::Current
+        );
     }
 
     // A new file: empty. No file: an error, and none is made.
     let empty = dir.0.join("empty.db");
     std::fs::write(&empty, b"").unwrap();
-    assert_eq!(db::check(empty.to_str().unwrap()).unwrap(), db::Layout::New);
+    assert_eq!(
+        db::check(empty.to_str().unwrap(), &key_file("empty")).unwrap(),
+        db::Layout::New
+    );
     let missing = dir.0.join("missing.db");
     let missing = missing.to_str().unwrap();
-    assert!(format!("{:#}", db::check(missing).unwrap_err()).contains("no database"));
+    assert!(
+        format!("{:#}", db::check(missing, &key_file(missing)).unwrap_err())
+            .contains("no database")
+    );
     assert!(!std::path::Path::new(missing).exists());
 }
 
@@ -745,7 +771,7 @@ async fn a_layout_6_database_migrates_its_team_questions_to_the_global_board() {
     };
     let before = open(flags(&path));
     let app = serve(&path, seen + 60);
-    assert_eq!(user_version(&path), 10);
+    assert_eq!(user_version(&path), 11);
     // Delivery, handled and claims stay as they were, and so does what is pending.
     assert_eq!(open(flags(&path)), before);
     let f = Fixture {
@@ -867,7 +893,7 @@ async fn a_layout_7_database_migrates_and_its_closed_threads_open_with_nothing_p
     };
     assert!(unfetched(&path) >= 2);
     let app = serve(&path, seen + 60);
-    assert_eq!(user_version(&path), 10);
+    assert_eq!(user_version(&path), 11);
     // Nothing became pending, and no thread is closed.
     assert_eq!(waiting(&path), before);
     let closed: i64 = rusqlite::Connection::open(&path)
@@ -1001,7 +1027,7 @@ async fn a_layout_8_database_migrates_and_its_sessions_report_their_clients() {
     let seen = layout8(&path);
     let before = flags(&path);
     let app = serve(&path, seen + 60);
-    assert_eq!(user_version(&path), 10);
+    assert_eq!(user_version(&path), 11);
     // Delivery, handled and claims are as they were.
     assert_eq!(flags(&path), before);
     // Every session is kept, and has said nothing of its client yet.
@@ -1051,7 +1077,7 @@ async fn a_layout_9_database_migrates_and_its_sessions_say_their_agent() {
     let seen = layout9(&path);
     let before = flags(&path);
     let app = serve(&path, seen + 60);
-    assert_eq!(user_version(&path), 10);
+    assert_eq!(user_version(&path), 11);
     // Delivery, handled and claims are as they were.
     assert_eq!(flags(&path), before);
     // Every session is kept, with its client, and has said nothing of its agent yet.
@@ -1102,4 +1128,257 @@ async fn a_layout_9_database_migrates_and_its_sessions_say_their_agent() {
         .collect();
     // Not the token's label, "bob's desktop".
     assert_eq!(via, ["ana's laptop", "pi", "ana's laptop"]);
+}
+
+/// Every note text and thread title of the database at `path`, as stored.
+fn stored_texts(path: &str) -> Vec<String> {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.prepare("SELECT text FROM notes UNION ALL SELECT title FROM threads")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+/// Whether any file of the database at `path` (with its `-wal` and `-shm`) holds any of `texts`,
+/// or the first 24 bytes of one (a text longer than a page is split across pages).
+fn holds_any(path: &str, texts: &[String]) -> Vec<String> {
+    let mut found = Vec::new();
+    for (ext, bytes) in files(path) {
+        let Some(bytes) = bytes else { continue };
+        for text in texts {
+            let head = &text.as_bytes()[..text.len().min(24)];
+            if bytes.windows(head.len()).any(|w| w == head) {
+                found.push(format!("{ext}: {text}"));
+            }
+        }
+    }
+    found
+}
+
+fn mode(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+/// Layout 10 to 11: every note text and thread title is encrypted with a key made for it, and no
+/// file of the database keeps them in plain text; everything reads back as it was.
+#[tokio::test]
+async fn a_layout_10_database_is_encrypted_in_place_and_reads_back_as_it_was() {
+    let dir = TempDir::new();
+    let path = dir.db();
+    let seen = layout10(&path);
+    // As a server left it: in WAL mode.
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .pragma_update(None, "journal_mode", "WAL")
+        .unwrap();
+    let plain = stored_texts(&path);
+    assert_eq!(plain.len(), 7);
+    assert!(plain.iter().any(|t| t.chars().count() > 1000));
+    assert_eq!(holds_any(&path, &plain).len(), plain.len());
+
+    // The key file is made where it is asked for, its directory too, both private.
+    let key_path = dir.0.join("config/relevo/server.key");
+    let (conn, key) = db::open_migrating(&path, &key_path).unwrap();
+    assert_eq!(user_version(&path), 11);
+    assert_eq!(mode(&key_path), 0o600);
+    assert_eq!(mode(key_path.parent().unwrap()), 0o700);
+    assert_eq!(std::fs::read(&key_path).unwrap().len(), 32);
+    let check = db::key_check(&conn).unwrap().unwrap();
+    assert!(
+        relevo::crypto::load(&key_path)
+            .unwrap()
+            .unwrap()
+            .opens(&check)
+    );
+    // Rewritten since: nothing left to do, and no page of the files holds a note or a title,
+    // while it is open and once it is closed.
+    let pending: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM meta WHERE key = 'scrub_pending'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending, 0);
+    assert_eq!(holds_any(&path, &plain), Vec::<String>::new());
+    let kinds: Vec<String> = conn
+        .prepare("SELECT DISTINCT typeof(text) FROM notes UNION SELECT typeof(title) FROM threads")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(kinds, ["blob"]);
+
+    // Through the API, as it was.
+    let f = Fixture {
+        app: App::with_dist(conn, Clock::fixed(seen + 60), 5, None, key).unwrap(),
+        v: serde_json::from_str(FIXTURE10).unwrap(),
+    };
+    let ana = f.agent("ana", "ana-cc-0001", "pagos-api");
+    let th = ana.thread(&f.thread("direct")).await;
+    assert_eq!(th["title"], "@bob Rotate the staging database password");
+    assert_eq!(
+        th["notes"][0]["text"],
+        "@bob Rotate the staging database password"
+    );
+    assert_eq!(th["notes"][1]["text"], "Rotated, the vault has it.");
+    let bob = f.agent("bob", "bob-term-02", "");
+    let v = bob.inbox().await;
+    let team = listed(&v, &f.thread("team")).unwrap();
+    assert_eq!(team["title"], "@backend Is the invoice queue draining?");
+    assert_eq!(
+        team["new_notes"][0]["text"],
+        "@backend Is the invoice queue draining?"
+    );
+    let long = plain.iter().find(|t| t.chars().count() > 1000).unwrap();
+    let (status, v) = ana
+        .call(
+            "GET",
+            &format!("/api/timeline/threads/{}", f.thread("board")),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["notes"][0]["text"], long.as_str());
+    assert_eq!(
+        v["title"],
+        long.chars().take(80).collect::<String>().trim_end()
+    );
+    // A page shows the first 1,000 characters, cut once decrypted.
+    let (status, v) = ana.call("GET", "/api/timeline?tab=board", None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let first = &v["threads"][0]["first_note"];
+    assert_eq!(first["truncated"], true);
+    assert_eq!(
+        first["text"].as_str().unwrap(),
+        long.chars().take(1000).collect::<String>()
+    );
+    // New notes are encrypted too.
+    ana.send(json!({ "thread": f.thread("direct"), "text": "Thanks, Bob!" }))
+        .await;
+    drop(f);
+    assert_eq!(
+        holds_any(&path, &["Thanks, Bob!".to_string()]),
+        Vec::<String>::new()
+    );
+
+    // A restart takes the same key, and encrypts nothing again.
+    let (conn, key) = db::open_migrating(&path, &key_path).unwrap();
+    assert_eq!(db::key_check(&conn).unwrap().unwrap(), check);
+    let app = App::with_dist(conn, Clock::fixed(seen + 120), 5, None, key).unwrap();
+    let ana = Agent {
+        app,
+        token: serde_json::from_str::<Value>(FIXTURE10).unwrap()["tokens"]["ana"]
+            .as_str()
+            .unwrap()
+            .to_string(),
+        session: "ana-cc-0001",
+        context: "pagos-api",
+    };
+    let th = ana
+        .thread(
+            serde_json::from_str::<Value>(FIXTURE10).unwrap()["threads"]["direct"]
+                .as_str()
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(th["notes"][2]["text"], "Thanks, Bob!");
+}
+
+/// An encrypted database opens only with its own key: with none, or another, `serve` refuses to
+/// start, says what to do, changes nothing and makes no key; `check-db` says the same, and an
+/// App over it with another key is an error.
+#[test]
+fn an_encrypted_database_refuses_another_key_or_none_and_never_makes_one() {
+    let dir = TempDir::new();
+    let path = dir.db();
+    layout10(&path);
+    let (conn, _) = serve_open(&path).unwrap();
+    drop(conn);
+    let before = std::fs::read(&path).unwrap();
+
+    let missing = dir.0.join("restored/server.key");
+    let refused = format!("{:#}", db::open_migrating(&path, &missing).unwrap_err());
+    assert_eq!(
+        refused,
+        format!(
+            "this database is encrypted but there is no key at {} (RELEVO_KEY_FILE). Restore the \
+             key it was encrypted with; without it, its notes cannot be read.",
+            missing.display()
+        )
+    );
+    assert!(!missing.exists());
+    assert!(!missing.parent().unwrap().exists());
+    let checked = format!("{:#}", db::check(&path, &missing).unwrap_err());
+    assert_eq!(checked, refused);
+
+    let other = dir.0.join("other.key");
+    std::fs::write(&other, [7u8; 32]).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let refused = format!("{:#}", db::open_migrating(&path, &other).unwrap_err());
+    assert_eq!(
+        refused,
+        format!(
+            "this key does not open this database (RELEVO_KEY_FILE={}).\nUse the key it was \
+             encrypted with. Without it, its notes cannot be read.",
+            other.display()
+        )
+    );
+    let checked = format!("{:#}", db::check(&path, &other).unwrap_err());
+    assert_eq!(checked, refused);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(user_version(&path), 11);
+
+    // Its own key opens it; an App with another one is an error, not a panic.
+    assert_eq!(
+        db::check(&path, &key_file(&path)).unwrap(),
+        db::Layout::Current
+    );
+    assert!(App::new(db::open(&path).unwrap(), Clock::system(), 5).is_err());
+}
+
+/// A start that made the key and died before its transaction committed left the database as it
+/// was: the next start takes that key, and makes none. One that died after the commit, before
+/// the database was rewritten, has it rewritten by the next.
+#[test]
+fn a_start_that_died_takes_the_key_it_made_and_finishes_the_rewrite() {
+    let dir = TempDir::new();
+    let path = dir.db();
+    layout10(&path);
+    let file = key_file(&path);
+    let (_, made) = relevo::crypto::load_or_create(&file).unwrap();
+    assert!(made);
+    let bytes = std::fs::read(&file).unwrap();
+    let pending = |conn: &rusqlite::Connection| -> i64 {
+        conn.query_row(
+            "SELECT count(*) FROM meta WHERE key = 'scrub_pending'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+
+    let (conn, _) = serve_open(&path).unwrap();
+    assert_eq!(std::fs::read(&file).unwrap(), bytes);
+    let check = db::key_check(&conn).unwrap().unwrap();
+    assert!(relevo::crypto::load(&file).unwrap().unwrap().opens(&check));
+    assert_eq!(pending(&conn), 0);
+
+    // Committed, not rewritten yet.
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES ('scrub_pending', '1')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let (conn, _) = serve_open(&path).unwrap();
+    assert_eq!(pending(&conn), 0);
+    assert_eq!(db::key_check(&conn).unwrap().unwrap(), check);
 }
