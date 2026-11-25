@@ -149,7 +149,9 @@ class Server:
         # The tests open more team and global-board threads in a day than the default 5 allow.
         self.proc = subprocess.Popen([RELEVO_BIN, "serve", "--addr", f"127.0.0.1:{self.port}", "--db", self.db,
                                       *args], stdout=self.log, stderr=subprocess.STDOUT,
-                                     env={**os.environ, "RELEVO_TEAM_QUESTIONS_PER_DAY": "1000"})
+                                     # Its key next to the database, never the real one.
+                                     env={**os.environ, "RELEVO_TEAM_QUESTIONS_PER_DAY": "1000",
+                                          "RELEVO_KEY_FILE": str(self.dir / "server.key")})
         deadline = time.time() + 15
         while time.time() < deadline and self.proc.poll() is None:
             try:

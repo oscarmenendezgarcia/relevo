@@ -85,7 +85,8 @@ export async function startServer(
     if (!(await portFree(port))) continue;
     const c = spawn(bin, ["serve", "--addr", `127.0.0.1:${port}`, "--db", db, ...tls], {
       stdio: "ignore",
-      env: { ...process.env, ...options.env },
+      // Its key next to the database: never the real ~/.config/relevo-server/server.key.
+      env: { ...process.env, RELEVO_KEY_FILE: join(dir, "server.key"), ...options.env },
     });
     const exited = new Promise<void>((r) => c.once("exit", () => r()));
     url = `${certFile ? "https" : "http"}://127.0.0.1:${port}`;
