@@ -16,6 +16,7 @@ connect() also starts the automatic update of this plugin's folder in the backgr
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 import sys
@@ -54,7 +55,7 @@ _ERROR_KINDS = {
 
 _DIAGNOSTIC_KEY_PREFIXES = ("gateway.errors.",)
 _DIAGNOSTIC_KEYS = ("gateway.notify.turn_error", "gateway.notify.turn_error_detailed",
-                    "gateway.notify.delivery_failed_retry")
+                    "gateway.notify.delivery_failed_retry", "gateway.busy.drain_rejected_new_work")
 # Appended to a reply after an automatic session reset: the gateway's, not the agent's.
 _TRAILER_KEYS = ("gateway.session.auto_reset_context_exhausted",)
 # turn_failure_copy's chat copy tables (English only), read when this Hermes has them.
@@ -64,6 +65,25 @@ _FAILED_TURN_NOTICES = ("FAILED_TURN_NOTICE", "PARTIAL_FAILED_TURN_NOTICE", "AUT
 _FALLBACK_NOTICES = (
     "Your request was not processed. Send it again if you still want me to carry it out.",
     "This turn did not complete. Some actions may already have run; verify their effects before resending.",
+)
+# When the gateway does not admit a message (gateway/session_ingress.py), its handler returns a notice
+# instead of a turn's answer, sent as a final reply all the same: no model wrote it. English only;
+# the module's *_REPLY constants are read too when this Hermes has them.
+_ADMISSION_NOTICES = (
+    "⚠️ Hermes already received a different message under this message id, so this version was not saved. "
+    "Send it again as a new message to continue.",
+    "⏳ Too many messages are already waiting in this conversation; send this again after the current reply.",
+    "⚠️ Hermes refused this message ({named}), so it was not saved or answered. Ask the operator to check "
+    "gateway.log.",
+    "⚠️ Hermes did not answer this message ({reason}): the conversation it was queued for moved, so it was "
+    "dropped. Send it again to continue.",
+    "⏳ Hermes is restarting — your message is saved and will be answered when it is back.",
+    "⏳ Your message is saved and will be answered when the work running in this conversation finishes.",
+    "⏸️ This conversation is paused: a previous turn did not finish when Hermes restarted, and only you know "
+    "whether to send it again. Your message is saved. Send {discard} to drop the lost turn and continue (it "
+    "is not re-run), or /reset to start a fresh conversation.",
+    "⏸️ This conversation is paused: {cause}. Your message is saved but will not be answered here. Send "
+    "/reset to start a fresh conversation, or ask the operator to resume this one.",
 )
 # A template needs this many characters besides its placeholders to say anything: shorter entries
 # are fragments of the copy above ("The model"), not replies.
@@ -145,6 +165,11 @@ def _gateway_copy() -> _GatewayCopy:
         except Exception:
             pass
     notices = {_squash(n) for n in _FALLBACK_NOTICES}
+    templates.update(_ADMISSION_NOTICES)
+    ingress = sys.modules.get("gateway.session_ingress")  # loaded in the gateway; never imported here
+    if ingress is not None:
+        templates.update(value for name, value in vars(ingress).items()
+                         if name.endswith("_REPLY") and isinstance(value, str))
     try:
         from agent import turn_failure_copy as copy
 
@@ -570,14 +595,19 @@ class RelevoAdapter(BasePlatformAdapter):
         source = self.build_source(chat_id=thread_id, chat_name=self._titles[thread_id], chat_type="dm",
                                    user_id=author, user_name=name)
         resumed = self._first_batch and self._resumable(source)
+        text = client.render_event(thread, notes, self._me, resumed)
         event = MessageEvent(
-            text=client.render_event(thread, notes, self._me, resumed),
+            text=text,
             message_type=MessageType.TEXT,
             source=source,
             user_id=author,
             user_name=name,
             raw_message=thread,
-            message_id=str(latest.get("id")),
+            # The gateway keeps each message id it admitted, across restarts, and refuses the same id
+            # with other content. A thread handed over again (after a restart, say) renders other
+            # text for the same latest note, so the id names the text too: the same delivery is
+            # the same message, a different one a new message.
+            message_id=f"{latest.get('id')}-{hashlib.sha256(text.encode()).hexdigest()[:12]}",
             # Others' text is conversation, never a gateway /command.
             allow_gateway_control=False,
             # A note may not be for this agent: a bare [SILENT] answer must stand.
