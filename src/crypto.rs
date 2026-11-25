@@ -102,16 +102,13 @@ impl Key {
     /// that says so, never the value.
     pub fn text(&self, row: &rusqlite::Row, idx: usize, aad: &str) -> rusqlite::Result<String> {
         let sealed: Vec<u8> = row.get(idx)?;
-        self.open(aad, &sealed)
-            .and_then(|plain| String::from_utf8(plain).ok())
-            .ok_or_else(|| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    idx,
-                    rusqlite::types::Type::Blob,
-                    "a sealed value this server's key does not open (another key's, or damaged)"
-                        .into(),
-                )
-            })
+        let fail = |why: &str| {
+            rusqlite::Error::FromSqlConversionFailure(idx, rusqlite::types::Type::Blob, why.into())
+        };
+        let plain = self.open(aad, &sealed).ok_or_else(|| {
+            fail("a sealed value this server's key does not open (another key's, or damaged)")
+        })?;
+        String::from_utf8(plain).map_err(|_| fail("a sealed value that opened but is not UTF-8"))
     }
 
     /// A new `meta.key_check` for this key: `CHECK_TEXT` sealed.

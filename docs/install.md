@@ -241,7 +241,7 @@ relevo team remove backend        # its threads keep its name
 
 ## 5. Backups and restore
 
-The rest (people, teams, who wrote to whom, and when) is plain: `relevo backup` creates backups readable by you only.
+Note text and thread titles are encrypted; the rest (people, teams, who wrote to whom, and when) is plain: `relevo backup` creates backups readable by you only.
 
 **The key is not in the backups.** A backup can be restored only with the key the database was encrypted with, `~/.config/relevo-server/server.key` (part 2): keep a copy of the key somewhere safe and apart from the backups, since a backup stored with its key is as readable as one with no encryption at all. Lose the key and every note in the database and its backups is lost; nobody, not even the server, can read them again. Backups taken before 0.9.0, and the `before-upgrade-<time>.db` copy that `deploy/install.sh` takes when it upgrades to 0.9.0, hold the notes in plain text: keep them as private as before, and delete them once you no longer need them.
 
